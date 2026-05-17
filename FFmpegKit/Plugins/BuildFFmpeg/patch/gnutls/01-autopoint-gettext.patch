@@ -1,0 +1,13 @@
+diff --git a/configure.ac b/configure.ac
+--- a/configure.ac
++++ b/configure.ac
+@@ -393,9 +393,6 @@ GTK_DOC_CHECK([1.14],[--flavour no-tmpl])
+ 
+ AM_GNU_GETTEXT([external])
+ AM_GNU_GETTEXT_VERSION([0.19])
+-m4_ifdef([AM_GNU_GETTEXT_REQUIRE_VERSION],[
+-AM_GNU_GETTEXT_REQUIRE_VERSION([0.19])
+-])
+ 
+ AC_C_BIGENDIAN
+ 
