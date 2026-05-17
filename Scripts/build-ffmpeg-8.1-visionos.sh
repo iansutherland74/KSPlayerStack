@@ -36,6 +36,9 @@ run_step() {
 
 : >"$LOG"
 
+# Force re-clone after adding patches under Plugins/BuildFFmpeg/patch/
+rm -rf "$FFMPEGKIT/.Script/gmp-"* "$FFMPEGKIT/.Script/nettle-"* 2>/dev/null || true
+
 run_step enable-gmp
 run_step enable-nettle
 run_step enable-gnutls

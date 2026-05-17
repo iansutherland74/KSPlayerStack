@@ -1,0 +1,29 @@
+diff --git a/getopt.c b/getopt.c
+index 9d29de7..7594230 100644
+--- a/getopt.c
++++ b/getopt.c
+@@ -135,8 +135,9 @@ static struct _getopt_data getopt_data;
+ /* Avoid depending on library functions or files
+    whose names are inconsistent.  */
+ 
+-#ifndef getenv
+-extern char *getenv ();
++/* SDK provides getenv/getopt on Apple platforms. */
++#if !defined(__APPLE__) && !defined(getenv)
++extern char *getenv (const char *);
+ #endif
+ 
+ #endif /* not __GNU_LIBRARY__ */
+diff --git a/getopt.h b/getopt.h
+index da1a01f..835dd6d 100644
+--- a/getopt.h
++++ b/getopt.h
+@@ -166,7 +166,7 @@ extern int __posix_getopt (int ___argc, char *const *___argv,
+ #  endif
+ # endif
+ #else /* not __GNU_LIBRARY__ */
+-extern int getopt ();
++extern int getopt (int argc, char *const *argv, const char *optstring);
+ #endif /* __GNU_LIBRARY__ */
+ 
+ #ifndef __need_getopt
