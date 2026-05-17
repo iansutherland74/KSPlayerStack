@@ -1,0 +1,14 @@
+# FFmpeg native build workspace
+FFmpegKit/.Script/
+FFmpegKit/.build/
+FFmpegKit/.swiftpm/
+FFmpegKit/build-ffmpeg-8.1.log
+FFmpegKit/LLDBInitFile
+
+# Prebuilt binaries (regenerate with Scripts/build-ffmpeg-8.1-visionos.sh)
+FFmpegKit/Sources/*.xcframework
+
+# Xcode
+.DS_Store
+*.xcuserstate
+DerivedData/
