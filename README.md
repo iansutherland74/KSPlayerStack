@@ -1,14 +1,14 @@
 # KSPlayerStack
 
-Fresh workspace for **FFmpeg 8.1** + **KSPlayer** (SPM only). Not tied to Visionator.
+Fresh workspace for **FFmpeg 8.1.1** + **KSPlayer** (SPM only). Not tied to Visionator.
 
 ## Layout
 
 ```
 KSPlayerStack/
-├── FFmpegKit/          # kingslay FFmpegKit + n8.1 build config (rebuild required)
+├── FFmpegKit/          # kingslay FFmpegKit + n8.1.1 build config (rebuild required)
 ├── KSPlayer/           # player library → depends on ../FFmpegKit via SPM path
-├── Scripts/            # native FFmpeg 8.1 build helpers
+├── Scripts/            # native FFmpeg 8.1.1 build helpers
 └── README.md
 ```
 
@@ -18,7 +18,7 @@ KSPlayerStack/
 - Xcode 26.2 (Swift 6.2.3)
 - Homebrew: `pkg-config`, `nasm`, `cmake`, `meson`, `sdl2`
 
-## 1. Build FFmpeg 8.1 (visionOS first)
+## 1. Build FFmpeg 8.1.1 (visionOS first)
 
 Shipped `Sources/*.xcframework` in the download are still **FFmpeg 6.1.1** until you rebuild:
 
@@ -26,13 +26,13 @@ Shipped `Sources/*.xcframework` in the download are still **FFmpeg 6.1.1** until
 ./Scripts/build-ffmpeg-8.1-visionos.sh
 ```
 
-This can take **many hours**. Logs: `FFmpegKit/build-ffmpeg-8.1.log`.
+This can take **many hours**. Logs: `FFmpegKit/build-ffmpeg-8.1.1.log`.
 
 Verify after `enable-FFmpeg`:
 
 ```bash
 grep FFMPEG_VERSION FFmpegKit/Sources/Libavutil.xcframework/xros-arm64/Libavutil.framework/Headers/ffversion.h
-# expect n8.1.x
+# expect n8.1.1
 ```
 
 ## 2. Wire your app (SPM)

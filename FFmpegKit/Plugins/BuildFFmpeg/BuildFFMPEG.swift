@@ -28,7 +28,11 @@ class BuildFFMPEG: BaseBuild {
     }
 
     override func flagsDependencelibrarys() -> [Library] {
-        [.gmp, .nettle, .gnutls, .libsmbclient]
+        [
+            .libshaderc, .vulkan, .lcms2, .libdav1d, .gmp, .nettle, .gnutls,
+            .libsmbclient, .libsrt, .libzvbi, .libfreetype, .libfribidi, .libharfbuzz,
+            .libass, .libfontconfig, .libudfread, .libbluray, .libplacebo,
+        ]
     }
 
     override func frameworks() throws -> [String] {
@@ -224,6 +228,9 @@ class BuildFFMPEG: BaseBuild {
             // tvos17才支持AVCaptureDeviceInput
 //            'defaultDeviceWithMediaType:' is unavailable: not available on visionOS
             arguments.append("--enable-indev=avfoundation")
+        } else if platform == .xros || platform == .xrsimulator {
+            // visionOS marks FFmpeg's camera/microphone AVFoundation APIs unavailable.
+            arguments.append("--disable-indev=avfoundation")
         }
         //        if platform == .isimulator || platform == .tvsimulator {
         //            arguments.append("--assert-level=1")
@@ -234,6 +241,8 @@ class BuildFFMPEG: BaseBuild {
                 arguments.append("--enable-\(library.rawValue)")
                 if library == .libsrt || library == .libsmbclient {
                     arguments.append("--enable-protocol=\(library.rawValue)")
+                } else if library == .vulkan {
+                    arguments.append("--enable-vulkan-static")
                 } else if library == .libdav1d {
                     arguments.append("--enable-decoder=\(library.rawValue)")
                 } else if library == .libass {
@@ -256,17 +265,16 @@ class BuildFFMPEG: BaseBuild {
     private let ffmpegConfiguers = [
         // Configuration options:
         "--disable-armv5te", "--disable-armv6", "--disable-armv6t2",
-        "--disable-bzlib", "--disable-gray", "--disable-iconv", "--disable-linux-perf",
-        "--disable-shared", "--disable-small", "--disable-swscale-alpha", "--disable-symver", "--disable-xlib",
+        "--disable-linux-perf",
+        "--disable-shared", "--disable-small", "--disable-symver",
         "--enable-cross-compile",
         "--enable-optimizations", "--enable-pic", "--enable-runtime-cpudetect", "--enable-static", "--enable-thumb", "--enable-version3",
         "--pkg-config-flags=--static",
         // Documentation options:
         "--disable-doc", "--disable-htmlpages", "--disable-manpages", "--disable-podpages", "--disable-txtpages",
         // Component options:
-        "--enable-avcodec", "--enable-avformat", "--enable-avutil", "--enable-network", "--enable-swresample", "--enable-swscale",
-        "--disable-devices", "--disable-outdevs", "--disable-indevs", "--disable-postproc",
-        "--enable-indev=lavfi",
+        "--enable-avcodec", "--enable-avdevice", "--enable-avfilter", "--enable-avformat", "--enable-avutil",
+        "--enable-network", "--enable-swresample", "--enable-swscale",
         // ,"--disable-pthreads"
         // ,"--disable-w32threads"
         // ,"--disable-os2threads"
@@ -281,89 +289,10 @@ class BuildFFMPEG: BaseBuild {
         "--disable-d3d11va", "--disable-dxva2", "--disable-vaapi", "--disable-vdpau",
         // todo ffmpeg的编译脚本有问题，没有加入libavcodec/vulkan_video_codec_av1std.h
         "--disable-hwaccel=av1_vulkan,hevc_vulkan,h264_vulkan",
-        // Individual component options:
-        // ,"--disable-everything"
-        // ./configure --list-muxers
-        "--disable-muxers",
-        "--enable-muxer=flac", "--enable-muxer=dash", "--enable-muxer=hevc",
-        "--enable-muxer=m4v", "--enable-muxer=matroska", "--enable-muxer=mov", "--enable-muxer=mp4",
-        "--enable-muxer=mpegts", "--enable-muxer=webm*",
-        "--enable-muxer=nut",
-        // ./configure --list-encoders
-        "--disable-encoders",
-        "--enable-encoder=aac", "--enable-encoder=alac", "--enable-encoder=flac", "--enable-encoder=pcm*",
-        "--enable-encoder=movtext", "--enable-encoder=mpeg4", "--enable-encoder=prores",
-        // ./configure --list-protocols
-        "--enable-protocols",
-        // ./configure --list-demuxers
-        // 用所有的demuxers的话，那avformat就会达到8MB了，指定的话，那就只要4MB。
-        "--disable-demuxers",
-        "--enable-demuxer=aac", "--enable-demuxer=ac3", "--enable-demuxer=aiff", "--enable-demuxer=amr",
-        "--enable-demuxer=ape", "--enable-demuxer=asf", "--enable-demuxer=ass", "--enable-demuxer=av1",
-        "--enable-demuxer=avi", "--enable-demuxer=caf", "--enable-demuxer=concat",
-        "--enable-demuxer=dash", "--enable-demuxer=data", "--enable-demuxer=dv",
-        "--enable-demuxer=eac3",
-        "--enable-demuxer=flac", "--enable-demuxer=flv", "--enable-demuxer=h264", "--enable-demuxer=hevc",
-        "--enable-demuxer=hls", "--enable-demuxer=live_flv", "--enable-demuxer=loas", "--enable-demuxer=m4v",
-        // matroska=mkv,mka,mks,mk3d
-        "--enable-demuxer=matroska", "--enable-demuxer=mov", "--enable-demuxer=mp3", "--enable-demuxer=mpeg*",
-        "--enable-demuxer=nut",
-        "--enable-demuxer=ogg", "--enable-demuxer=rm", "--enable-demuxer=rtsp", "--enable-demuxer=rtp", "--enable-demuxer=srt",
-        "--enable-demuxer=vc1", "--enable-demuxer=wav", "--enable-demuxer=webm_dash_manifest",
-        // ./configure --list-bsfs
+        // Individual components are intentionally left at FFmpeg defaults.
+        // Do not use the older size-saving mode that disabled every muxer,
+        // demuxer, encoder, decoder, and filter before re-enabling a subset.
         "--enable-bsfs",
-        // ./configure --list-decoders
-        // 用所有的decoders的话，那avcodec就会达到40MB了，指定的话，那就只要20MB。
-        "--disable-decoders",
-        // 视频
-        "--enable-decoder=av1", "--enable-decoder=dca", "--enable-decoder=dxv",
-        "--enable-decoder=ffv1", "--enable-decoder=ffvhuff", "--enable-decoder=flv",
-        "--enable-decoder=h263", "--enable-decoder=h263i", "--enable-decoder=h263p", "--enable-decoder=h264",
-        "--enable-decoder=hap", "--enable-decoder=hevc", "--enable-decoder=huffyuv",
-        "--enable-decoder=indeo5",
-        "--enable-decoder=mjpeg", "--enable-decoder=mjpegb", "--enable-decoder=mpeg*", "--enable-decoder=mts2",
-        "--enable-decoder=prores",
-        "--enable-decoder=rv10", "--enable-decoder=rv20", "--enable-decoder=rv30", "--enable-decoder=rv40",
-        "--enable-decoder=snow", "--enable-decoder=svq3",
-        "--enable-decoder=tscc", "--enable-decoder=tscc2", "--enable-decoder=txd",
-        "--enable-decoder=wmv1", "--enable-decoder=wmv2", "--enable-decoder=wmv3",
-        "--enable-decoder=vc1", "--enable-decoder=vp6", "--enable-decoder=vp6a", "--enable-decoder=vp6f",
-        "--enable-decoder=vp7", "--enable-decoder=vp8", "--enable-decoder=vp9",
-        // 音频
-        "--enable-decoder=aac*", "--enable-decoder=ac3*", "--enable-decoder=adpcm*", "--enable-decoder=alac*",
-        "--enable-decoder=amr*", "--enable-decoder=ape", "--enable-decoder=cook",
-        "--enable-decoder=dca", "--enable-decoder=dolby_e", "--enable-decoder=eac3*", "--enable-decoder=flac",
-        "--enable-decoder=mp1*", "--enable-decoder=mp2*", "--enable-decoder=mp3*", "--enable-decoder=opus",
-        "--enable-decoder=pcm*", "--enable-decoder=sonic",
-        "--enable-decoder=truehd", "--enable-decoder=tta", "--enable-decoder=vorbis", "--enable-decoder=wma*", "--enable-decoder=wrapped_avframe",
-        // 字幕
-        "--enable-decoder=ass", "--enable-decoder=ccaption", "--enable-decoder=dvbsub", "--enable-decoder=dvdsub",
-        "--enable-decoder=mpl2", "--enable-decoder=movtext",
-        "--enable-decoder=pgssub", "--enable-decoder=srt", "--enable-decoder=ssa", "--enable-decoder=subrip",
-        "--enable-decoder=xsub", "--enable-decoder=webvtt",
-
-        // ./configure --list-filters
-        "--disable-filters",
-        "--enable-filter=aformat", "--enable-filter=amix", "--enable-filter=anull", "--enable-filter=aresample",
-        "--enable-filter=areverse", "--enable-filter=asetrate", "--enable-filter=atempo", "--enable-filter=atrim",
-        "--enable-filter=boxblur", "--enable-filter=bwdif", "--enable-filter=delogo",
-        "--enable-filter=equalizer", "--enable-filter=estdif",
-        "--enable-filter=firequalizer", "--enable-filter=format", "--enable-filter=fps",
-        "--enable-filter=gblur",
-        "--enable-filter=hflip", "--enable-filter=hwdownload", "--enable-filter=hwmap", "--enable-filter=hwupload",
-        "--enable-filter=idet", "--enable-filter=lenscorrection", "--enable-filter=lut*", "--enable-filter=negate", "--enable-filter=null",
-        "--enable-filter=overlay",
-        "--enable-filter=palettegen", "--enable-filter=paletteuse", "--enable-filter=pan",
-        "--enable-filter=rotate",
-        "--enable-filter=scale", "--enable-filter=setpts", "--enable-filter=superequalizer",
-        "--enable-filter=transpose", "--enable-filter=trim",
-        "--enable-filter=vflip", "--enable-filter=volume",
-        "--enable-filter=w3fdif",
-        "--enable-filter=yadif",
-        "--enable-filter=avgblur_vulkan", "--enable-filter=blend_vulkan", "--enable-filter=bwdif_vulkan",
-        "--enable-filter=chromaber_vulkan", "--enable-filter=flip_vulkan", "--enable-filter=gblur_vulkan",
-        "--enable-filter=hflip_vulkan", "--enable-filter=nlmeans_vulkan", "--enable-filter=overlay_vulkan",
-        "--enable-filter=vflip_vulkan", "--enable-filter=xfade_vulkan",
     ]
 }
 
@@ -431,18 +360,28 @@ class BuildBluray: BaseBuild {
         super.init(library: .libbluray)
     }
 
-    // 只有macos支持mount
-    override func platforms() -> [PlatformType] {
-        [.macos]
+    override func flagsDependencelibrarys() -> [Library] {
+        [.libfreetype, .libfontconfig, .libudfread]
     }
 
-    override func arguments(platform: PlatformType, arch: ArchType) -> [String] {
+    override func arguments(platform _: PlatformType, arch _: ArchType) -> [String] {
         [
-            "--disable-bdjava-jar",
-            "--disable-silent-rules",
-            "--disable-dependency-tracking",
-            "--host=\(platform.host(arch: arch))",
-            "--prefix=\(thinDir(platform: platform, arch: arch).path)",
+            "-Dbdj_jar=disabled",
+            "-Denable_tools=false",
+            "-Denable_examples=false",
+            "-Denable_devtools=false",
+        ]
+    }
+}
+
+class BuildUdfread: BaseBuild {
+    init() {
+        super.init(library: .libudfread)
+    }
+
+    override func arguments(platform _: PlatformType, arch _: ArchType) -> [String] {
+        [
+            "-Denable_examples=false",
         ]
     }
 }

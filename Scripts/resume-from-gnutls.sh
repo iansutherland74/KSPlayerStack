@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Resume FFmpeg 8.1 build from gnutls (after nettle/gmp). KSPlayerStack only.
+# Resume FFmpeg 8.1.1 build from gnutls (after nettle/gmp). KSPlayerStack only.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 FFMPEGKIT="$ROOT/FFmpegKit"
-LOG="$FFMPEGKIT/build-ffmpeg-8.1.log"
+LOG="$FFMPEGKIT/build-ffmpeg-8.1.1.log"
 cd "$FFMPEGKIT"
 
-BUILD=(swift package --disable-sandbox BuildFFmpeg disableGPL platforms=xros,xrsimulator notRecompile)
+BUILD=(swift package --disable-sandbox BuildFFmpeg platforms=xros,xrsimulator notRecompile)
 
 run_step() {
   echo "==> $*"
@@ -14,18 +14,34 @@ run_step() {
   "${BUILD[@]}" "$@" >>"$LOG" 2>&1
 }
 
+prepare_ffmpeg_rebuild() {
+  echo "==> Preparing clean FFmpeg 8.1.1 rebuild" | tee -a "$LOG"
+  rm -rf .Script/FFmpeg .Script/FFmpeg-n8.1 .Script/FFmpeg-n8.1.1
+
+  # SwiftPM must be able to load Package.swift before the BuildFFmpeg plugin can
+  # replace these generated binary targets.
+  for name in Libavcodec Libavdevice Libavfilter Libavformat Libavutil Libswresample Libswscale; do
+    if [ ! -d "Sources/${name}.xcframework" ]; then
+      cp -R Sources/lcms2.xcframework "Sources/${name}.xcframework"
+    fi
+  done
+}
+
 : >>"$LOG"
 run_step enable-gnutls
+run_step enable-readline
+run_step enable-libsmbclient
+run_step enable-libshaderc
+run_step enable-vulkan
+run_step enable-lcms2
 run_step enable-libdav1d
+run_step enable-libplacebo
 run_step enable-libfreetype enable-libfribidi enable-libharfbuzz enable-libass
+run_step enable-libfontconfig
 run_step enable-libzvbi
 run_step enable-libsrt
 
-echo "==> Removing Libav* 6.1 xcframeworks" | tee -a "$LOG"
-rm -rf Sources/Libavcodec.xcframework Sources/Libavdevice.xcframework Sources/Libavfilter.xcframework \
-       Sources/Libavformat.xcframework Sources/Libavutil.xcframework Sources/Libswresample.xcframework \
-       Sources/Libswscale.xcframework
-
+prepare_ffmpeg_rebuild
 run_step enable-FFmpeg
 
 grep -r FFMPEG_VERSION Sources/Libavutil.xcframework/*/Libavutil.framework/Headers/ffversion.h 2>/dev/null | head -3 || true

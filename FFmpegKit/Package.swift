@@ -49,7 +49,8 @@ let package = Package(
                 "libsrt",
                 "libfreetype", "libfribidi", "libharfbuzz", "libass",
                 "libfontconfig",
-                .target(name: "libbluray", condition: .when(platforms: [.macOS])),
+                .target(name: "libudfread", condition: .when(platforms: [.macOS, .iOS, .tvOS, .visionOS])),
+                .target(name: "libbluray", condition: .when(platforms: [.macOS, .iOS, .tvOS, .visionOS])),
                 "gmp", "nettle", "hogweed", "gnutls",
                 "libsmbclient",
                 "Libavcodec", "Libavdevice", "Libavfilter", "Libavformat", "Libavutil", "Libswresample", "Libswscale",
@@ -226,6 +227,10 @@ let package = Package(
         .binaryTarget(
             name: "libfontconfig",
             path: "Sources/libfontconfig.xcframework"
+        ),
+        .binaryTarget(
+            name: "libudfread",
+            path: "Sources/libudfread.xcframework"
         ),
         .binaryTarget(
             name: "libbluray",

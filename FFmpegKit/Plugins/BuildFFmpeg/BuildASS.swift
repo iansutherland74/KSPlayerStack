@@ -26,6 +26,13 @@ class BuildHarfbuzz: BaseBuild {
         super.init(library: .libharfbuzz)
     }
 
+    override func cFlags(platform: PlatformType, arch: ArchType) -> [String] {
+        var cFlags = super.cFlags(platform: platform, arch: arch)
+        cFlags.append("-Wno-cast-function-type-strict")
+        cFlags.append("-Wno-error=cast-function-type-strict")
+        return cFlags
+    }
+
     override func arguments(platform _: PlatformType, arch _: ArchType) -> [String] {
         [
             "-Dglib=disabled",
@@ -58,9 +65,29 @@ class BuildPng: BaseBuild {
     }
 }
 
+class BuildUnibreak: BaseBuild {
+    init() {
+        super.init(library: .libunibreak)
+    }
+
+    override func arguments(platform: PlatformType, arch: ArchType) -> [String] {
+        [
+            "--disable-shared",
+            "--enable-static",
+            "--with-pic",
+            "--host=\(platform.host(arch: arch))",
+            "--prefix=\(thinDir(platform: platform, arch: arch).path)",
+        ]
+    }
+}
+
 class BuildASS: BaseBuild {
     init() {
         super.init(library: .libass)
+    }
+
+    override func flagsDependencelibrarys() -> [Library] {
+        [.libunibreak]
     }
 
     override func arguments(platform: PlatformType, arch: ArchType) -> [String] {

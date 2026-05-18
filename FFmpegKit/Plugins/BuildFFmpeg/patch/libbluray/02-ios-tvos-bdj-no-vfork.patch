@@ -1,0 +1,56 @@
+diff --git a/src/libbluray/bdj/bdj.c b/src/libbluray/bdj/bdj.c
+index 359bc8f..d476772 100644
+--- a/src/libbluray/bdj/bdj.c
++++ b/src/libbluray/bdj/bdj.c
+@@ -42,8 +42,9 @@
+ #ifdef __APPLE__
+ #include <sys/types.h>
+ #include <sys/wait.h>
+ #include <limits.h>
+ #include <unistd.h>
++#include <TargetConditionals.h>
+ #endif
+ 
+ #ifdef _WIN32
+@@ -61,4 +62,4 @@
+-#if defined(__APPLE__) && !defined(HAVE_BDJ_J2ME)
++#if defined(__APPLE__) && TARGET_OS_OSX && !defined(HAVE_BDJ_J2ME)
+     void   *h_libjli;
+ #endif
+     void   *h_libjvm;
+@@ -241,4 +242,4 @@
+-#if defined(__APPLE__) && !defined(HAVE_BDJ_J2ME)
++#if defined(__APPLE__) && TARGET_OS_OSX && !defined(HAVE_BDJ_J2ME)
+ 
+ #define MACOS_JAVA_HOME "/usr/libexec/java_home"
+ static char *_java_home_macos()
+@@ -346,4 +347,4 @@
+-#if defined(__APPLE__) && !defined(HAVE_BDJ_J2ME)
++#if defined(__APPLE__) && TARGET_OS_OSX && !defined(HAVE_BDJ_J2ME)
+ static void *_load_jli_macos()
+ {
+     const char *java_home = NULL;
+@@ -470,4 +471,4 @@
+-#if defined(__APPLE__) && !defined(HAVE_BDJ_J2ME)
++#if defined(__APPLE__) && TARGET_OS_OSX && !defined(HAVE_BDJ_J2ME)
+     java_home = _java_home_macos();
+     if (java_home) {
+         handle = _jvm_dlopen_a(java_home, jvm_dir, num_jvm_dir, jvm_lib);
+@@ -1033,4 +1034,4 @@
+-#if defined(__APPLE__) && !defined(HAVE_BDJ_J2ME)
++#if defined(__APPLE__) && TARGET_OS_OSX && !defined(HAVE_BDJ_J2ME)
+     /* On macOS we need to load libjli to workaround a bug where the wrong
+      * version would be used: https://bugs.openjdk.java.net/browse/JDK-7131356
+      */
+@@ -1068,4 +1069,4 @@
+-#if defined(__APPLE__) && !defined(HAVE_BDJ_J2ME)
++#if defined(__APPLE__) && TARGET_OS_OSX && !defined(HAVE_BDJ_J2ME)
+     bdjava->h_libjli = jli_lib;
+ #endif
+     bdjava->h_libjvm = jvm_lib;
+@@ -1133,4 +1134,4 @@
+-#if defined(__APPLE__) && !defined(HAVE_BDJ_J2ME)
++#if defined(__APPLE__) && TARGET_OS_OSX && !defined(HAVE_BDJ_J2ME)
+     if (bdjava->h_libjli) {
+         dl_dlclose(bdjava->h_libjli);
+     }

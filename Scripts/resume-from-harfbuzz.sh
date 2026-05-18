@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Resume after gmp (or from scratch). Does not touch Visionator.
+# Resume FFmpeg 8.1.1 build from harfbuzz. KSPlayerStack only.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 FFMPEGKIT="$ROOT/FFmpegKit"
@@ -28,19 +28,9 @@ prepare_ffmpeg_rebuild() {
 }
 
 : >>"$LOG"
-run_step enable-nettle
-run_step enable-gnutls
-run_step enable-readline
-run_step enable-libsmbclient
-run_step enable-libshaderc
-run_step enable-vulkan
-run_step enable-lcms2
-run_step enable-libdav1d
-run_step enable-libplacebo
-run_step enable-libfreetype enable-libfribidi enable-libharfbuzz enable-libass
+run_step enable-libharfbuzz
+run_step enable-libass
 run_step enable-libfontconfig
-run_step enable-libudfread
-run_step enable-libbluray
 run_step enable-libzvbi
 run_step enable-libsrt
 

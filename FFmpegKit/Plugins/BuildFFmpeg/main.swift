@@ -93,7 +93,7 @@ extension Build {
         }
 
         if librarys.isEmpty {
-            librarys.append(contentsOf: [.libshaderc, .vulkan, .lcms2, .libplacebo, .libdav1d, .gmp, .nettle, .gnutls, .readline, .libsmbclient, .libsrt, .libzvbi, .libfreetype, .libfribidi, .libharfbuzz, .libass, .libfontconfig, .libbluray, .FFmpeg, .libmpv])
+            librarys.append(contentsOf: [.libshaderc, .vulkan, .lcms2, .libplacebo, .libdav1d, .gmp, .nettle, .gnutls, .readline, .libsmbclient, .libsrt, .libzvbi, .libfreetype, .libfribidi, .libharfbuzz, .libunibreak, .libass, .libfontconfig, .libudfread, .libbluray, .FFmpeg, .libmpv])
         }
         if BaseBuild.disableGPL {
             librarys.removeAll {
@@ -131,7 +131,7 @@ extension Build {
             enable-libsrt       depend enable-openssl or enable-gnutls
             enable-libfreetype  build with libfreetype
             enable-libharfbuzz  depend enable-libfreetype
-            enable-libass       depend enable-libfreetype enable-libfribidi enable-libharfbuzz
+            enable-libass       depend enable-libfreetype enable-libfribidi enable-libharfbuzz enable-libunibreak
             enable-libfontconfig depend enable-libfreetype
             enable-libbluray    depend enable-libfreetype enable-libfontconfig
             enable-libzvbi      build with libzvbi
@@ -143,17 +143,19 @@ extension Build {
 }
 
 enum Library: String, CaseIterable {
-    case libglslang, libshaderc, vulkan, lcms2, libdovi, libdav1d, libplacebo, libfreetype, libharfbuzz, libfribidi, libass, gmp, readline, nettle, gnutls, libsmbclient, libsrt, libzvbi, libfontconfig, libbluray, FFmpeg, libmpv, openssl, libtls, boringssl, libpng, libupnp, libnfs, libsmb2
+    case libglslang, libshaderc, vulkan, lcms2, libdovi, libdav1d, libplacebo, libfreetype, libharfbuzz, libfribidi, libunibreak, libass, gmp, readline, nettle, gnutls, libsmbclient, libsrt, libzvbi, libfontconfig, libudfread, libbluray, FFmpeg, libmpv, openssl, libtls, boringssl, libpng, libupnp, libnfs, libsmb2
     var version: String {
         switch self {
         case .FFmpeg:
-            return "n8.1"
+            return "n8.1.1"
         case .libfreetype:
             return "VER-2-13-2"
         case .libfribidi:
             return "v1.0.12"
         case .libharfbuzz:
             return "5.3.1"
+        case .libunibreak:
+            return "libunibreak_7_0"
         case .libass:
             return "0.17.1-branch"
         case .libpng:
@@ -199,7 +201,9 @@ enum Library: String, CaseIterable {
         case .libnfs:
             return "libnfs-5.0.2"
         case .libbluray:
-            return "1.3.4"
+            return "1.4.1"
+        case .libudfread:
+            return "1.2.0"
         case .libfontconfig:
             return "2.14.2"
         case .libsmb2:
@@ -231,6 +235,8 @@ enum Library: String, CaseIterable {
             return "https://github.com/google/boringssl"
         case .libplacebo:
             return "https://github.com/haasn/libplacebo"
+        case .libunibreak:
+            return "https://github.com/adah1972/libunibreak"
         case .vulkan:
             return "https://github.com/KhronosGroup/MoltenVK"
         case .libshaderc:
@@ -249,6 +255,8 @@ enum Library: String, CaseIterable {
             return "https://github.com/sahlberg/libnfs"
         case .libbluray:
             return "https://code.videolan.org/videolan/libbluray"
+        case .libudfread:
+            return "https://code.videolan.org/videolan/libudfread"
         case .libfontconfig:
             return "https://gitlab.freedesktop.org/fontconfig/fontconfig"
         case .libsmb2:
@@ -264,7 +272,7 @@ enum Library: String, CaseIterable {
 
     var isFFmpegDependentLibrary: Bool {
         switch self {
-        case .vulkan, .libshaderc, .libglslang, .lcms2, .libplacebo, .libdav1d, .gmp, .gnutls, .libsrt, .libzvbi, .libfontconfig, .libbluray:
+        case .vulkan, .libshaderc, .libglslang, .lcms2, .libplacebo, .libdav1d, .gmp, .gnutls, .libsrt, .libzvbi, .libfreetype, .libfribidi, .libharfbuzz, .libass, .libfontconfig, .libbluray:
             return true
         case .openssl:
             return false
@@ -283,6 +291,8 @@ enum Library: String, CaseIterable {
             return BuildFreetype()
         case .libfribidi:
             return BuildFribidi()
+        case .libunibreak:
+            return BuildUnibreak()
         case .libharfbuzz:
             return BuildHarfbuzz()
         case .libass:
@@ -331,6 +341,8 @@ enum Library: String, CaseIterable {
             return BuildNFS()
         case .libfontconfig:
             return BuildFontconfig()
+        case .libudfread:
+            return BuildUdfread()
         case .libbluray:
             return BuildBluray()
         case .libsmb2:
@@ -531,6 +543,16 @@ class BaseBuild {
                     ldFlags.append("-lhogweed")
                 } else if library == .gnutls {
                     ldFlags.append(contentsOf: ["-framework", "Security", "-framework", "CoreFoundation"])
+                } else if library == .vulkan {
+                    ldFlags.append(contentsOf: ["-framework", "CoreFoundation", "-framework", "CoreGraphics", "-framework", "Foundation", "-framework", "IOSurface", "-framework", "Metal", "-framework", "QuartzCore"])
+                    if platform == .macos {
+                        ldFlags.append(contentsOf: ["-framework", "Cocoa"])
+                    } else {
+                        ldFlags.append(contentsOf: ["-framework", "UIKit"])
+                    }
+                    if !(platform == .tvos || platform == .tvsimulator) {
+                        ldFlags.append(contentsOf: ["-framework", "IOKit"])
+                    }
                 } else if library == .libsmbclient {
                     ldFlags.append(contentsOf: ["-lresolv", "-lpthread", "-lz", "-liconv"])
                 }
@@ -553,7 +575,7 @@ class BaseBuild {
         let frameworks = try frameworks()
         for framework in frameworks {
             var arguments = ["-create-xcframework"]
-            for platform in PlatformType.allCases {
+            for platform in platforms() {
                 if let frameworkPath = try createFramework(framework: framework, platform: platform) {
                     if isFramework {
                         arguments.append("-framework")

@@ -15,6 +15,11 @@ class BuildPlacebo: BaseBuild {
             str = str.replacingOccurrences(of: "if sdl.found()", with: "if false")
             try! str.write(toFile: path.path, atomically: true, encoding: .utf8)
         }
+        let utilsGen = directoryURL + "src/vulkan/utils_gen.py"
+        if let data = FileManager.default.contents(atPath: utilsGen.path), var str = String(data: data, encoding: .utf8) {
+            str = str.replacingOccurrences(of: "registry = VkXML(ET.parse(xmlfile))", with: "registry = VkXML(ET.parse(xmlfile).getroot())")
+            try! str.write(toFile: utilsGen.path, atomically: true, encoding: .utf8)
+        }
     }
 
     override func arguments(platform _: PlatformType, arch _: ArchType) -> [String] {
@@ -25,6 +30,16 @@ class BuildPlacebo: BaseBuild {
 class BuildVulkan: BaseBuild {
     init() {
         super.init(library: .vulkan)
+        let path = directoryURL + "fetchDependencies"
+        if let data = FileManager.default.contents(atPath: path.path), var str = String(data: data, encoding: .utf8) {
+            str = str.replacingOccurrences(of: "git clone $2 $1", with: """
+            git -c http.version=HTTP/1.1 clone --filter=blob:none $2 $1 || {
+                rm -rf $1
+                git -c http.version=HTTP/1.1 clone --filter=blob:none $2 $1
+            }
+            """)
+            try! str.write(toFile: path.path, atomically: true, encoding: .utf8)
+        }
     }
 
     override func platforms() -> [PlatformType] {
@@ -64,6 +79,15 @@ class BuildVulkan: BaseBuild {
                 let prefix = thinDir(platform: platform, arch: arch) + "lib/pkgconfig"
                 try? FileManager.default.removeItem(at: prefix)
                 try? FileManager.default.createDirectory(at: prefix, withIntermediateDirectories: true, attributes: nil)
+                let thin = thinDir(platform: platform, arch: arch)
+                let libDir = thin + "lib"
+                let includeDir = thin + "include"
+                try? FileManager.default.createDirectory(at: libDir, withIntermediateDirectories: true, attributes: nil)
+                try? FileManager.default.removeItem(at: includeDir)
+                try? FileManager.default.copyItem(at: directoryURL + "Package/Release/MoltenVK/include", to: includeDir)
+                let vulkanLib = libDir + "libvulkan.a"
+                try? FileManager.default.removeItem(at: vulkanLib)
+                try? FileManager.default.copyItem(at: directoryURL + ["Package/Release/MoltenVK/static/MoltenVK.xcframework", platform.frameworkName, "libMoltenVK.a"], to: vulkanLib)
                 let vulkanPC = prefix + "vulkan.pc"
 
                 let content = """

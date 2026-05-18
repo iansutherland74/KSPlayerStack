@@ -1,0 +1,29 @@
+diff --git a/src/hb-gobject-structs.cc b/src/hb-gobject-structs.cc
+index c7fbeb0..476d5c5 100644
+--- a/src/hb-gobject-structs.cc
++++ b/src/hb-gobject-structs.cc
+@@ -60,15 +60,21 @@
+ 
+ #include "hb-gobject.h"
+ 
+ #define HB_DEFINE_BOXED_TYPE(name,copy_func,free_func) \
++static gpointer \
++hb_gobject_##name##_copy (gpointer boxed) \
++{ return (gpointer) copy_func ((hb_##name##_t *) boxed); } \
++static void \
++hb_gobject_##name##_free (gpointer boxed) \
++{ free_func ((hb_##name##_t *) boxed); } \
+ GType \
+ hb_gobject_##name##_get_type () \
+ { \
+    static gsize type_id = 0; \
+    if (g_once_init_enter (&type_id)) { \
+       GType id = g_boxed_type_register_static (g_intern_static_string ("hb_" #name "_t"), \
+-					       (GBoxedCopyFunc) copy_func, \
+-					       (GBoxedFreeFunc) free_func); \
++					       hb_gobject_##name##_copy, \
++					       hb_gobject_##name##_free); \
+       g_once_init_leave (&type_id, id); \
+    } \
+    return type_id; \
+ }
