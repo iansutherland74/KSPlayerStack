@@ -123,7 +123,7 @@ public final class MEPlayerItem: @unchecked Sendable {
 
     weak var delegate: MEPlayerDelegate?
     public init(url: URL, options: KSOptions) {
-        self.url = url
+        self.url = KSDiskPrecache.playbackURL(for: url, options: options)
         self.options = options
         timer.fireDate = Date.distantFuture
         operationQueue.name = "KSPlayer_" + String(describing: self).components(separatedBy: ".").last!

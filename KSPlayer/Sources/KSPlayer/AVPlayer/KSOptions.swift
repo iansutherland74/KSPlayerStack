@@ -38,6 +38,14 @@ open class KSOptions {
     // ffmpeg only cache http
     // 这个开关不能用，因为ff_tempfile: Cannot open temporary file
     public var cache = false
+    /// Downloads eligible remote media files into app cache storage and reuses completed files on later playback.
+    public var isDiskPrecacheEnabled = KSOptions.isDiskPrecacheEnabled
+    /// Maximum single media file size stored by disk precache, in bytes.
+    public var diskPrecacheMaxFileSize = KSOptions.diskPrecacheMaxFileSize
+    /// Maximum total disk precache size, in bytes.
+    public var diskPrecacheMaxCacheSize = KSOptions.diskPrecacheMaxCacheSize
+    /// Override for tests or apps that manage their own cache location. Defaults to Caches/KSPlayerDiskPrecache.
+    public var diskPrecacheDirectoryURL: URL?
     //  record stream
     public var outputURL: URL?
     public var avOptions = [String: Any]()
@@ -478,6 +486,9 @@ public extension KSOptions {
     /// seek完是否自动播放
     nonisolated(unsafe) static var isSeekedAutoPlay = true
     nonisolated(unsafe) static var hardwareDecode = true
+    nonisolated(unsafe) static var isDiskPrecacheEnabled = false
+    nonisolated(unsafe) static var diskPrecacheMaxFileSize: Int64 = 1_073_741_824
+    nonisolated(unsafe) static var diskPrecacheMaxCacheSize: Int64 = 5_368_709_120
     // 默认不用自研的硬解，因为有些视频的AVPacket的pts顺序是不对的，只有解码后的AVFrame里面的pts是对的。
     nonisolated(unsafe) static var asynchronousDecompression = false
     nonisolated(unsafe) static var isPipPopViewController = false

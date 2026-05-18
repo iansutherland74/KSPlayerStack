@@ -214,8 +214,9 @@ public class KSAVPlayer {
 
     public required init(url: URL, options: KSOptions) {
         KSOptions.setAudioSession()
-        fileAccess = KSSecurityScopedURLAccess(url: url)
-        urlAsset = AVURLAsset(url: url, options: options.avOptions)
+        let playbackURL = KSDiskPrecache.playbackURL(for: url, options: options)
+        fileAccess = KSSecurityScopedURLAccess(url: playbackURL)
+        urlAsset = AVURLAsset(url: playbackURL, options: options.avOptions)
         self.options = options
         itemObservation = player.observe(\.currentItem) { [weak self] player, _ in
             guard let self else { return }
@@ -452,8 +453,9 @@ extension KSAVPlayer: @preconcurrency MediaPlayerProtocol {
     public func replace(url: URL, options: KSOptions) {
         KSLog("replaceUrl \(self)")
         shutdown()
-        fileAccess = KSSecurityScopedURLAccess(url: url)
-        urlAsset = AVURLAsset(url: url, options: options.avOptions)
+        let playbackURL = KSDiskPrecache.playbackURL(for: url, options: options)
+        fileAccess = KSSecurityScopedURLAccess(url: playbackURL)
+        urlAsset = AVURLAsset(url: playbackURL, options: options.avOptions)
         self.options = options
     }
 
