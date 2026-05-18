@@ -175,7 +175,7 @@ private extension KSMEPlayer {
     #if !os(macOS)
     @objc private func audioRouteChange(notification: Notification) {
         KSLog("[audio] audioRouteChange")
-        guard let reason = notification.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt else {
+        guard notification.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt != nil else {
             return
         }
 //        let routeChangeReason = AVAudioSession.RouteChangeReason(rawValue: reason)
@@ -270,10 +270,11 @@ extension KSMEPlayer: MEPlayerDelegate {
                     progress = min(100, Int(loadingState.progress))
                 }
             }
+            let bufferingProgress = progress
             if playbackState == .playing {
                 runOnMainThread { [weak self] in
                     // 在主线程更新进度
-                    self?.bufferingProgress = progress
+                    self?.bufferingProgress = bufferingProgress
                 }
             }
         }

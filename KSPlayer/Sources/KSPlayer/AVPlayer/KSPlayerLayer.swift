@@ -598,7 +598,7 @@ extension KSPlayerLayer {
     }
     #endif
 
-    open func prepareToPlay() {
+    public func prepareToPlay() {
         state = .preparing
         startTime = CACurrentMediaTime()
         bufferedCount = 0

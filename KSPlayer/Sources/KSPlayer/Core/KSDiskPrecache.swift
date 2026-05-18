@@ -132,7 +132,7 @@ public enum KSDiskPrecache {
 
     private static func markDownloadFinished(key: String) {
         queue.sync {
-            activeDownloads.remove(key)
+            _ = activeDownloads.remove(key)
         }
     }
 

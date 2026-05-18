@@ -1,7 +1,40 @@
 // swift-tools-version: 5.9
 // Use 5.9 so the BuildFFmpeg command plugin compiles under Xcode 26.
 // Built xcframeworks still target visionOS 26 via Plugins/BuildFFmpeg (minVersion).
+import Foundation
 import PackageDescription
+
+func pkgConfigTokens(_ arguments: [String]) -> [String] {
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+    process.arguments = ["pkg-config"] + arguments
+
+    let output = Pipe()
+    process.standardOutput = output
+    process.standardError = Pipe()
+
+    do {
+        try process.run()
+        process.waitUntilExit()
+    } catch {
+        return []
+    }
+
+    guard process.terminationStatus == 0 else {
+        return []
+    }
+
+    let data = output.fileHandleForReading.readDataToEndOfFile()
+    let string = String(decoding: data, as: UTF8.self)
+    return string.split(whereSeparator: { $0 == " " || $0 == "\n" || $0 == "\t" }).map(String.init)
+}
+
+// SwiftPM rejects -D_THREAD_SAFE from pkg-config on Apple platforms. Keep the
+// rest of SDL2's pkg-config output intact for ffplay.
+let sdl2CFlags = pkgConfigTokens(["--cflags", "sdl2"]).filter { $0 != "-D_THREAD_SAFE" }
+let sdl2Libs = pkgConfigTokens(["--libs", "sdl2"])
+let sdl2CSettings: [CSetting] = sdl2CFlags.isEmpty ? [] : [.unsafeFlags(sdl2CFlags)]
+let sdl2LinkerSettings: [LinkerSetting] = sdl2Libs.isEmpty ? [] : [.unsafeFlags(sdl2Libs)]
 
 let package = Package(
     name: "FFmpegKit",
@@ -88,7 +121,9 @@ let package = Package(
             dependencies: [
                 "fftools",
                 "SDL2",
-            ]
+            ],
+            cSettings: sdl2CSettings,
+            linkerSettings: sdl2LinkerSettings
         ),
         .executableTarget(
             name: "ffprobe",
@@ -110,7 +145,6 @@ let package = Package(
         ),
         .systemLibrary(
             name: "SDL2",
-            pkgConfig: "sdl2",
             providers: [
                 .brew(["sdl2"]),
             ]

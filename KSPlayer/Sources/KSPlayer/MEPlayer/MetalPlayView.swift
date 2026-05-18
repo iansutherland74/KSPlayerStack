@@ -5,7 +5,7 @@
 //  Created by kintan on 2018/3/11.
 //
 
-import AVFoundation
+@preconcurrency import AVFoundation
 import Combine
 import CoreMedia
 #if canImport(MetalKit)

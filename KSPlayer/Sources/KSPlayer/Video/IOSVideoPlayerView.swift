@@ -7,9 +7,9 @@
 #if canImport(UIKit) && canImport(CallKit)
 import AVKit
 import Combine
-import CoreServices
 import MediaPlayer
 import UIKit
+import UniformTypeIdentifiers
 
 open class IOSVideoPlayerView: VideoPlayerView {
     private weak var originalSuperView: UIView?
@@ -381,7 +381,7 @@ extension IOSVideoPlayerView {
     }
 
     @objc fileprivate func openFileAction(_: AnyObject) {
-        let documentPicker = UIDocumentPickerViewController(documentTypes: [kUTTypeAudio, kUTTypeMovie, kUTTypePlainText] as [String], in: .open)
+        let documentPicker = UIDocumentPickerViewController(forOpeningContentTypes: [.audio, .movie, .plainText], asCopy: false)
         documentPicker.delegate = self
         viewController?.present(documentPicker, animated: true, completion: nil)
     }

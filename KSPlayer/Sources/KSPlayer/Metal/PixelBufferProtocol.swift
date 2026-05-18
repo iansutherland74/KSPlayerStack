@@ -47,7 +47,7 @@ extension CVPixelBuffer: PixelBufferProtocol {
     public var height: Int { CVPixelBufferGetHeight(self) }
     public var aspectRatio: CGSize {
         get {
-            if let ratio = CVBufferGetAttachment(self, kCVImageBufferPixelAspectRatioKey, nil)?.takeUnretainedValue() as? NSDictionary,
+            if let ratio = CVBufferCopyAttachment(self, kCVImageBufferPixelAspectRatioKey, nil) as? NSDictionary,
                let horizontal = (ratio[kCVImageBufferPixelAspectRatioHorizontalSpacingKey] as? NSNumber)?.intValue,
                let vertical = (ratio[kCVImageBufferPixelAspectRatioVerticalSpacingKey] as? NSNumber)?.intValue,
                horizontal > 0, vertical > 0
@@ -77,16 +77,16 @@ extension CVPixelBuffer: PixelBufferProtocol {
     }
 
     public var isFullRangeVideo: Bool {
-        CVBufferGetAttachment(self, kCMFormatDescriptionExtension_FullRangeVideo, nil)?.takeUnretainedValue() as? Bool ?? false
+        CVBufferCopyAttachment(self, kCMFormatDescriptionExtension_FullRangeVideo, nil) as? Bool ?? false
     }
 
     public var attachmentsDic: CFDictionary? {
-        CVBufferGetAttachments(self, .shouldPropagate)
+        CVBufferCopyAttachments(self, .shouldPropagate)
     }
 
     public var yCbCrMatrix: CFString? {
         get {
-            CVBufferGetAttachment(self, kCVImageBufferYCbCrMatrixKey, nil)?.takeUnretainedValue() as? NSString
+            CVBufferCopyAttachment(self, kCVImageBufferYCbCrMatrixKey, nil) as? NSString
         }
         set {
             if let newValue {
@@ -97,7 +97,7 @@ extension CVPixelBuffer: PixelBufferProtocol {
 
     public var colorPrimaries: CFString? {
         get {
-            CVBufferGetAttachment(self, kCVImageBufferColorPrimariesKey, nil)?.takeUnretainedValue() as? NSString
+            CVBufferCopyAttachment(self, kCVImageBufferColorPrimariesKey, nil) as? NSString
         }
         set {
             if let newValue {
@@ -108,7 +108,7 @@ extension CVPixelBuffer: PixelBufferProtocol {
 
     public var transferFunction: CFString? {
         get {
-            CVBufferGetAttachment(self, kCVImageBufferTransferFunctionKey, nil)?.takeUnretainedValue() as? NSString
+            CVBufferCopyAttachment(self, kCVImageBufferTransferFunctionKey, nil) as? NSString
         }
         set {
             if let newValue {

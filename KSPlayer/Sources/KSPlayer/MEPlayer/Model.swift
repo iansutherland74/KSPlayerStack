@@ -96,7 +96,7 @@ public extension KSOptions {
             if transferFunction == kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ {
                 if #available(macOS 11.0, iOS 14.0, tvOS 14.0, *) {
                     return CGColorSpace(name: CGColorSpace.itur_2100_PQ)
-                } else if #available(macOS 10.15.4, iOS 13.4, tvOS 13.4, *) {
+                } else if #available(iOS 13.4, tvOS 13.4, *) {
                     return CGColorSpace(name: CGColorSpace.itur_2020_PQ)
                 } else {
                     return CGColorSpace(name: CGColorSpace.itur_2020_PQ_EOTF)
@@ -128,7 +128,7 @@ public extension KSOptions {
         case kCVImageBufferColorPrimaries_ITU_R_2020:
             if #available(macOS 11.0, iOS 14.0, tvOS 14.0, *) {
                 return CGColorSpace(name: CGColorSpace.itur_2100_PQ)
-            } else if #available(macOS 10.15.4, iOS 13.4, tvOS 13.4, *) {
+            } else if #available(iOS 13.4, tvOS 13.4, *) {
                 return CGColorSpace(name: CGColorSpace.itur_2020_PQ)
             } else {
                 return CGColorSpace(name: CGColorSpace.itur_2020_PQ_EOTF)

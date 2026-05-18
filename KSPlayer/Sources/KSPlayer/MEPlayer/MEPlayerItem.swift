@@ -517,7 +517,7 @@ extension MEPlayerItem {
                 let timestamp = startTime + CMTime(seconds: options.startPlayTime)
                 let flags = seekByBytes ? AVSEEK_FLAG_BYTE : 0
                 let seekStartTime = CACurrentMediaTime()
-                let result = avformat_seek_file(formatCtx, -1, Int64.min, timestamp.value, Int64.max, flags)
+                _ = avformat_seek_file(formatCtx, -1, Int64.min, timestamp.value, Int64.max, flags)
                 audioClock.time = timestamp
                 videoClock.time = timestamp
                 KSLog("start PlayTime: \(timestamp.seconds) spend Time: \(CACurrentMediaTime() - seekStartTime)")
@@ -579,11 +579,12 @@ extension MEPlayerItem {
                 if seekToTime != seekTime {
                     continue
                 }
+                let seekSucceeded = result >= 0
                 isSeek = true
                 allPlayerItemTracks.forEach { $0.seek(time: seekToTime) }
                 DispatchQueue.main.async { [weak self] in
                     guard let self else { return }
-                    self.seekingCompletionHandler?(result >= 0)
+                    self.seekingCompletionHandler?(seekSucceeded)
                     self.seekingCompletionHandler = nil
                 }
                 audioClock.time = CMTime(seconds: seekToTime, preferredTimescale: time.timescale) + startTime

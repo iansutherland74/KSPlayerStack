@@ -259,7 +259,11 @@ public extension [String: String] {
                 let matrix = CGAffineTransform(rotationAngle: radians)
                 #endif
                 let fontDescriptor = UIFontDescriptor(name: fontName, matrix: matrix)
+                #if !canImport(UIKit)
                 font = UIFont(descriptor: fontDescriptor, size: fontSize) ?? font
+                #else
+                font = UIFont(descriptor: fontDescriptor, size: fontSize)
+                #endif
             }
             attributes[.font] = font
         }
@@ -267,10 +271,7 @@ public extension [String: String] {
         if let assColor = self["PrimaryColour"] {
             attributes[.foregroundColor] = UIColor(assColor: assColor)
         }
-        // 还不知道这个要设置到什么颜色上
-        if let assColor = self["SecondaryColour"] {
-//            attributes[.backgroundColor] = UIColor(assColor: assColor)
-        }
+        // SecondaryColour is intentionally not mapped yet.
         if self["Bold"] == "1" {
             attributes[.expansion] = 1
         }

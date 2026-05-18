@@ -8,14 +8,12 @@
 @preconcurrency import AVFoundation
 import CryptoKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 #if canImport(UIKit)
 import UIKit
 #else
 import AppKit
-#endif
-#if canImport(MobileCoreServices)
-import MobileCoreServices.UTType
 #endif
 open class LayerContainerView: UIView {
     #if canImport(UIKit)
@@ -47,7 +45,7 @@ class GIFCreator {
     init(savePath: URL, imagesCount: Int) {
         try? FileManager.default.removeItem(at: savePath)
         frameProperties = [kCGImagePropertyGIFDictionary: [kCGImagePropertyGIFDelayTime: 0.25]] as CFDictionary
-        destination = CGImageDestinationCreateWithURL(savePath as CFURL, kUTTypeGIF, imagesCount, nil)!
+        destination = CGImageDestinationCreateWithURL(savePath as CFURL, UTType.gif.identifier as CFString, imagesCount, nil)!
         let fileProperties = [kCGImagePropertyGIFDictionary: [kCGImagePropertyGIFLoopCount: 0]]
         CGImageDestinationSetProperties(destination, fileProperties as CFDictionary)
     }
@@ -297,7 +295,7 @@ public extension FourCharCode {
             CChar(self & 0xFF),
             0,
         ]
-        return String(cString: cString)
+        return String(decoding: cString.dropLast().map { UInt8(bitPattern: $0) }, as: UTF8.self)
     }
 }
 
@@ -389,15 +387,15 @@ public extension URL {
     ]
 
     var isMovie: Bool {
-        if let typeID = try? resourceValues(forKeys: [.typeIdentifierKey]).typeIdentifier as CFString? {
-            return UTTypeConformsTo(typeID, kUTTypeMovie)
+        if let typeID = try? resourceValues(forKeys: [.typeIdentifierKey]).typeIdentifier {
+            return UTType(typeID)?.conforms(to: .movie) ?? false
         }
         return false
     }
 
     var isAudio: Bool {
-        if let typeID = try? resourceValues(forKeys: [.typeIdentifierKey]).typeIdentifier as CFString? {
-            return UTTypeConformsTo(typeID, kUTTypeAudio)
+        if let typeID = try? resourceValues(forKeys: [.typeIdentifierKey]).typeIdentifier {
+            return UTType(typeID)?.conforms(to: .audio) ?? false
         }
         return false
     }
@@ -573,7 +571,7 @@ public extension Double {
     }
 }
 
-extension TextAlignment: RawRepresentable {
+extension TextAlignment: @retroactive RawRepresentable {
     public typealias RawValue = String
     public init?(rawValue: RawValue) {
         if rawValue == "Leading" {
@@ -599,11 +597,11 @@ extension TextAlignment: RawRepresentable {
     }
 }
 
-extension TextAlignment: Identifiable {
+extension TextAlignment: @retroactive Identifiable {
     public var id: Self { self }
 }
 
-extension HorizontalAlignment: Hashable, RawRepresentable {
+extension HorizontalAlignment: @retroactive Hashable, @retroactive RawRepresentable {
     public typealias RawValue = String
     public init?(rawValue: RawValue) {
         if rawValue == "Leading" {
@@ -631,11 +629,11 @@ extension HorizontalAlignment: Hashable, RawRepresentable {
     }
 }
 
-extension HorizontalAlignment: Identifiable {
+extension HorizontalAlignment: @retroactive Identifiable {
     public var id: Self { self }
 }
 
-extension VerticalAlignment: Hashable, RawRepresentable {
+extension VerticalAlignment: @retroactive Hashable, @retroactive RawRepresentable {
     public typealias RawValue = String
     public init?(rawValue: RawValue) {
         if rawValue == "Top" {
@@ -663,11 +661,11 @@ extension VerticalAlignment: Hashable, RawRepresentable {
     }
 }
 
-extension VerticalAlignment: Identifiable {
+extension VerticalAlignment: @retroactive Identifiable {
     public var id: Self { self }
 }
 
-extension Color: RawRepresentable {
+extension Color: @retroactive RawRepresentable {
     public typealias RawValue = String
     public init?(rawValue: RawValue) {
         guard let data = Data(base64Encoded: rawValue) else {
@@ -697,7 +695,7 @@ extension Color: RawRepresentable {
     }
 }
 
-extension Array: RawRepresentable where Element: Codable {
+extension Array: @retroactive RawRepresentable where Element: Codable {
     public init?(rawValue: String) {
         guard let data = rawValue.data(using: .utf8),
               let result = try? JSONDecoder().decode([Element].self, from: data)
@@ -715,7 +713,7 @@ extension Array: RawRepresentable where Element: Codable {
     }
 }
 
-extension Date: RawRepresentable {
+extension Date: @retroactive RawRepresentable {
     public typealias RawValue = String
     public init?(rawValue: RawValue) {
         guard let data = rawValue.data(using: .utf8),
@@ -795,19 +793,19 @@ extension CGImage {
 }
 
 public extension AVFileType {
-    static let png = AVFileType(kUTTypePNG as String)
-    static let jpeg2000 = AVFileType(kUTTypeJPEG2000 as String)
+    static let png = AVFileType(UTType.png.identifier)
+    static let jpeg2000 = AVFileType("public.jpeg-2000")
 }
 
-extension URL: Identifiable {
+extension URL: @retroactive Identifiable {
     public var id: Self { self }
 }
 
-extension String: Identifiable {
+extension String: @retroactive Identifiable {
     public var id: Self { self }
 }
 
-extension Float: Identifiable {
+extension Float: @retroactive Identifiable {
     public var id: Self { self }
 }
 

@@ -172,7 +172,7 @@ class VideoSwresample: FrameChange {
                     let size = Int(linesize[i])
                     let bytesPerRow = CVPixelBufferGetBytesPerRowOfPlane(pbuf, i)
                     var contents = pbuf.baseAddressOfPlane(at: i)
-                    var source = data[i]!
+                    let source = data[i]!
                     if bufferPlaneCount < planeCount, i + 2 == planeCount {
                         var sourceU = data[i]!
                         var sourceV = data[i + 1]!

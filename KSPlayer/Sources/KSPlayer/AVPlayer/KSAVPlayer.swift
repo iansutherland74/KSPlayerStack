@@ -768,7 +768,7 @@ class AVMediaPlayerTrack: @preconcurrency MediaPlayerTrack, SubtitleKindProvidin
 
     private static func subtitleKind(mediaSelectionOption: AVMediaSelectionOption) -> SubtitleKind {
         if mediaSelectionOption.mediaSubTypes.contains(where: { subtype in
-            let rawValue = (subtype as? NSNumber).map { FourCharCode(truncating: $0) } ?? 0
+            let rawValue = FourCharCode(truncating: subtype)
             return rawValue == kCMClosedCaptionFormatType_CEA608 || rawValue == kCMClosedCaptionFormatType_CEA708
         }) {
             return .closedCaption

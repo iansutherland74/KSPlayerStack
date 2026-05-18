@@ -430,7 +430,7 @@ extension AVRational {
     }
 }
 
-extension AVBufferSrcParameters: Equatable {
+extension AVBufferSrcParameters: @retroactive Equatable {
     public static func == (lhs: AVBufferSrcParameters, rhs: AVBufferSrcParameters) -> Bool {
         lhs.format == rhs.format && lhs.width == rhs.width && lhs.height == rhs.height && lhs.sample_aspect_ratio == rhs.sample_aspect_ratio && lhs.sample_rate == rhs.sample_rate && lhs.ch_layout == rhs.ch_layout
     }
@@ -445,7 +445,7 @@ extension AVBufferSrcParameters: Equatable {
     }
 }
 
-extension AVChannelLayout: Equatable {
+extension AVChannelLayout: @retroactive Equatable {
     public static func == (lhs: AVChannelLayout, rhs: AVChannelLayout) -> Bool {
         var lhs = lhs
         var rhs = rhs
@@ -453,7 +453,7 @@ extension AVChannelLayout: Equatable {
     }
 }
 
-extension AVChannelLayout: CustomStringConvertible {
+extension AVChannelLayout: @retroactive CustomStringConvertible {
     nonisolated(unsafe) static let defaultValue = AVChannelLayout(order: AV_CHANNEL_ORDER_NATIVE, nb_channels: 2, u: AVChannelLayout.__Unnamed_union_u(mask: swift_AV_CH_LAYOUT_STEREO), opaque: nil)
     var isDolbyAtmosBedLayout: Bool {
         [
@@ -482,11 +482,11 @@ extension AVChannelLayout: CustomStringConvertible {
         var channelLayout = self
         var str = [Int8](repeating: 0, count: 64)
         _ = av_channel_layout_describe(&channelLayout, &str, str.count)
-        return String(cString: str)
+        return String(decoding: str.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self)
     }
 }
 
-extension AVRational: Equatable {
+extension AVRational: @retroactive Equatable {
     public static func == (lhs: AVRational, rhs: AVRational) -> Bool {
         lhs.num == rhs.num && rhs.den == rhs.den
     }

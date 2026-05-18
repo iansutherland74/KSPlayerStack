@@ -274,7 +274,11 @@ extension DOVIDecoderConfigurationRecord: CustomStringConvertible {
             return hdrFallbackDynamicRange.description
         }
         switch dv_profile {
-        case 2, 3, 4, 6, 8 where dv_bl_signal_compatibility_id == 2:
+        case 2 where dv_bl_signal_compatibility_id == 2,
+             3 where dv_bl_signal_compatibility_id == 2,
+             4 where dv_bl_signal_compatibility_id == 2,
+             6 where dv_bl_signal_compatibility_id == 2,
+             8 where dv_bl_signal_compatibility_id == 2:
             return "source SDR/base metadata"
         case 7 where el_present_flag != 0:
             return "HDR10 base layer; no full enhancement-layer composition"

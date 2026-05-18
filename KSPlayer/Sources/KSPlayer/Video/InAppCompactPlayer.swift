@@ -38,6 +38,7 @@ public struct KSPlayerCompactLayout: Sendable {
         return CGSize(width: min(max(size.width, 1), maxWidth), height: min(max(size.height, 1), maxHeight))
     }
 
+    @MainActor
     func constraints(for view: UIView, in containerView: UIView) -> [NSLayoutConstraint] {
         let resolvedSize = resolvedSize(containerSize: containerView.bounds.size)
         var constraints = [

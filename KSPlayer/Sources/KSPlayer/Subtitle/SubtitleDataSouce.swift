@@ -16,7 +16,7 @@ public class EmptySubtitleInfo: SubtitleInfo {
     }
 }
 
-public class URLSubtitleInfo: KSSubtitle, SubtitleInfo, SubtitleKindProviding {
+public class URLSubtitleInfo: KSSubtitle, SubtitleInfo, SubtitleKindProviding, @unchecked Sendable {
     public var isEnabled: Bool = false {
         didSet {
             if isEnabled, parts.isEmpty, !downloadURL.isImageSubtitle {
