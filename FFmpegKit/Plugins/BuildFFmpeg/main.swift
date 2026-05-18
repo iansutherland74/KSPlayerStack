@@ -173,11 +173,11 @@ enum Library: String, CaseIterable {
         case .gnutls:
             return "3.8.3"
         case .nettle:
-            return "nettle_3.9.1_release_20230601"
+            return "nettle_4.0_release_20260205"
         case .libdav1d:
             return "1.5.3"
         case .gmp:
-            return "v6.2.1"
+            return "master"
         case .libtls:
             return "OPENBSD_7_3"
         case .libzvbi:
@@ -224,9 +224,9 @@ enum Library: String, CaseIterable {
         case .libsmbclient:
             return "https://github.com/samba-team/samba"
         case .nettle:
-            return "https://git.lysator.liu.se/nettle/nettle"
+            return "https://git.lysator.liu.se/nettle/nettle.git"
         case .gmp:
-            return "https://github.com/alisw/GMP"
+            return "https://github.com/gmp-mirror/gmp"
         case .libdav1d:
             return "https://code.videolan.org/videolan/dav1d.git"
         case .libtls:
