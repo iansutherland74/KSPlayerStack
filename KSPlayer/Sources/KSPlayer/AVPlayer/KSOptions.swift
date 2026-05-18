@@ -81,6 +81,7 @@ open class KSOptions {
     public var destinationDynamicRange: DynamicRange?
     public var videoAdaptable = true
     public var videoFilters = [String]()
+    public var videoUpscaling = VideoUpscalingMode.none
     public var syncDecodeVideo = false
     public var hardwareDecode = KSOptions.hardwareDecode
     public var asynchronousDecompression = KSOptions.asynchronousDecompression
@@ -452,6 +453,11 @@ public enum VideoInterlacingType: String {
     case bff
     case progressive
     case undetermined
+}
+
+public enum VideoUpscalingMode: Equatable, Sendable {
+    case none
+    case appleSuperResolution(scaleFactor: Float = 2)
 }
 
 public extension KSOptions {

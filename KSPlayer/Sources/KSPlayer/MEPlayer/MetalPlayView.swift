@@ -69,6 +69,7 @@ public final class MetalPlayView: UIView, @preconcurrency VideoOutput {
     }
 
     private let metalView = MetalView()
+    private let videoUpscaler = VideoUpscaler()
     public weak var displayLayerDelegate: DisplayLayerDelegate?
     public init(options: KSOptions) {
         self.options = options
@@ -143,6 +144,7 @@ public final class MetalPlayView: UIView, @preconcurrency VideoOutput {
 
     public func flush() {
         pixelBuffer = nil
+        videoUpscaler.reset()
         if displayView.isHidden {
             metalView.clear()
         } else {
@@ -174,22 +176,32 @@ extension MetalPlayView {
                 return
             }
             pixelBuffer = frame.corePixelBuffer
-            guard let pixelBuffer else {
+            guard let sourcePixelBuffer = pixelBuffer else {
                 return
             }
+            var renderPixelBuffer: PixelBufferProtocol = sourcePixelBuffer
             isDovi = frame.isDovi
             fps = frame.fps
             let cmtime = frame.cmtime
-            let par = pixelBuffer.size
-            let sar = pixelBuffer.aspectRatio
-            if let pixelBuffer = pixelBuffer.cvPixelBuffer, options.isUseDisplayLayer() {
+            let sourcePar = sourcePixelBuffer.size
+            if let cvPixelBuffer = sourcePixelBuffer.cvPixelBuffer {
+                if let dar = options.customizeDar(sar: sourcePixelBuffer.aspectRatio, par: sourcePar) {
+                    cvPixelBuffer.aspectRatio = CGSize(width: dar.width, height: dar.height * sourcePar.width / sourcePar.height)
+                }
+                if let upscaledPixelBuffer = videoUpscaler.upscale(pixelBuffer: cvPixelBuffer, time: cmtime, mode: options.videoUpscaling) {
+                    renderPixelBuffer = upscaledPixelBuffer
+                    pixelBuffer = upscaledPixelBuffer
+                }
+            } else {
+                videoUpscaler.reset()
+            }
+            let par = renderPixelBuffer.size
+            let sar = renderPixelBuffer.aspectRatio
+            if let pixelBuffer = renderPixelBuffer.cvPixelBuffer, options.isUseDisplayLayer() {
                 if displayView.isHidden {
                     displayView.isHidden = false
                     metalView.isHidden = true
                     metalView.clear()
-                }
-                if let dar = options.customizeDar(sar: sar, par: par) {
-                    pixelBuffer.aspectRatio = CGSize(width: dar.width, height: dar.height * par.width / par.height)
                 }
                 checkFormatDescription(pixelBuffer: pixelBuffer)
                 set(pixelBuffer: pixelBuffer, time: cmtime)
@@ -209,13 +221,13 @@ extension MetalPlayView {
                 } else {
                     size = KSOptions.sceneSize
                 }
-                checkFormatDescription(pixelBuffer: pixelBuffer)
+                checkFormatDescription(pixelBuffer: renderPixelBuffer)
                 #if !os(tvOS)
                 if #available(iOS 16, *) {
                     metalView.metalLayer.edrMetadata = frame.edrMetadata
                 }
                 #endif
-                metalView.draw(pixelBuffer: pixelBuffer, display: options.display, size: size)
+                metalView.draw(pixelBuffer: renderPixelBuffer, display: options.display, size: size)
             }
             renderSource?.setVideo(time: cmtime, position: frame.position)
         }
