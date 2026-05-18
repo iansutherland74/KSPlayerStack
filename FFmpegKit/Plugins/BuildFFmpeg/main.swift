@@ -207,7 +207,7 @@ enum Library: String, CaseIterable {
         case .libudfread:
             return "1.2.0"
         case .libfontconfig:
-            return "2.14.2"
+            return "2.17.1"
         case .libsmb2:
             return "master"
         }
@@ -260,7 +260,7 @@ enum Library: String, CaseIterable {
         case .libudfread:
             return "https://code.videolan.org/videolan/libudfread"
         case .libfontconfig:
-            return "https://gitlab.freedesktop.org/fontconfig/fontconfig"
+            return "https://gitlab.freedesktop.org/fontconfig/fontconfig.git"
         case .libsmb2:
             return "https://github.com/sahlberg/libsmb2"
         default:
