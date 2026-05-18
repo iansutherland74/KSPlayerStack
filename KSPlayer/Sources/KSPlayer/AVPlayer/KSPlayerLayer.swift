@@ -64,6 +64,83 @@ public protocol KSPlayerLayerDelegate: AnyObject {
     func player(layer: KSPlayerLayer, bufferedCount: Int, consumeTime: TimeInterval)
 }
 
+struct DefinitionSwitchPrewarmPolicy {
+    static func canPrewarm(isEnabled: Bool, duration: TimeInterval, targetTime: TimeInterval, isSeekable: Bool, isExternalPlaybackActive: Bool, isPictureInPictureActive: Bool) -> Bool {
+        isEnabled
+            && duration.isFinite
+            && duration > 0
+            && targetTime.isFinite
+            && targetTime >= 0
+            && targetTime < duration
+            && isSeekable
+            && !isExternalPlaybackActive
+            && !isPictureInPictureActive
+    }
+
+    static func handoffTime(requestedTime: TimeInterval, elapsed: TimeInterval, playbackRate: Float, wasPlaying: Bool, duration: TimeInterval) -> TimeInterval {
+        guard requestedTime.isFinite, duration.isFinite, duration > 0 else {
+            return max(requestedTime, 0)
+        }
+        let advancedTime = wasPlaying ? requestedTime + max(elapsed, 0) * Double(playbackRate) : requestedTime
+        return min(max(advancedTime, 0), duration)
+    }
+}
+
+private final class DefinitionSwitchPrewarmDelegate: MediaPlayerDelegate {
+    nonisolated(unsafe) var readyToPlayHandler: ((any MediaPlayerProtocol) -> Void)?
+    nonisolated(unsafe) var loadStateHandler: ((any MediaPlayerProtocol) -> Void)?
+    nonisolated(unsafe) var finishHandler: ((any MediaPlayerProtocol, Error?) -> Void)?
+
+    func readyToPlay(player: some MediaPlayerProtocol) {
+        readyToPlayHandler?(player)
+    }
+
+    func changeLoadState(player: some MediaPlayerProtocol) {
+        loadStateHandler?(player)
+    }
+
+    func changeBuffering(player _: some MediaPlayerProtocol, progress _: Int) {}
+
+    func playBack(player _: some MediaPlayerProtocol, loopCount _: Int) {}
+
+    func finish(player: some MediaPlayerProtocol, error: Error?) {
+        finishHandler?(player, error)
+    }
+}
+
+private final class DefinitionSwitchPrewarmContext {
+    let player: any MediaPlayerProtocol
+    let delegate: DefinitionSwitchPrewarmDelegate
+    let url: URL
+    let options: KSOptions
+    let requestedTime: TimeInterval
+    let startedAt = CACurrentMediaTime()
+    let shouldAutoPlayAfterSwitch: Bool
+    let playbackRate: Float
+    let playbackVolume: Float
+    var timeoutWorkItem: DispatchWorkItem?
+    var didSeek = false
+
+    init(player: any MediaPlayerProtocol, delegate: DefinitionSwitchPrewarmDelegate, url: URL, options: KSOptions, requestedTime: TimeInterval,
+         shouldAutoPlayAfterSwitch: Bool, playbackRate: Float, playbackVolume: Float)
+    {
+        self.player = player
+        self.delegate = delegate
+        self.url = url
+        self.options = options
+        self.requestedTime = requestedTime
+        self.shouldAutoPlayAfterSwitch = shouldAutoPlayAfterSwitch
+        self.playbackRate = playbackRate
+        self.playbackVolume = playbackVolume
+    }
+
+    func cancel() {
+        timeoutWorkItem?.cancel()
+        timeoutWorkItem = nil
+        player.shutdown()
+    }
+}
+
 open class KSPlayerLayer: NSObject, @unchecked Sendable {
     public weak var delegate: KSPlayerLayerDelegate?
     @Published
@@ -119,7 +196,7 @@ open class KSPlayerLayer: NSObject, @unchecked Sendable {
             player.playbackVolume = oldValue.playbackVolume
             player.delegate = self
             player.contentMode = .scaleAspectFit
-            if isAutoPlay {
+            if isAutoPlay, !isCommittingPrewarmedPlayer {
                 prepareToPlay()
             }
         }
@@ -127,6 +204,9 @@ open class KSPlayerLayer: NSObject, @unchecked Sendable {
 
     public private(set) var url: URL {
         didSet {
+            if isCommittingPrewarmedPlayer {
+                return
+            }
             let firstPlayerType = preferredPlayerType(for: url, respectsWirelessRoute: true)
             if type(of: player) == firstPlayerType {
                 if url == oldValue {
@@ -183,6 +263,8 @@ open class KSPlayerLayer: NSObject, @unchecked Sendable {
     private var bufferedCount = 0
     private var shouldSeekTo: TimeInterval = 0
     private var startTime: TimeInterval = 0
+    private var prewarmContext: DefinitionSwitchPrewarmContext?
+    private var isCommittingPrewarmedPlayer = false
     public init(url: URL, isAutoPlay: Bool = KSOptions.isAutoPlay, options: KSOptions, delegate: KSPlayerLayerDelegate? = nil) {
         self.url = url
         self.options = options
@@ -245,6 +327,12 @@ open class KSPlayerLayer: NSObject, @unchecked Sendable {
         self.options = options
         runOnMainThread {
             self.url = url
+        }
+    }
+
+    public func set(url: URL, options: KSOptions, preservingCurrentTime targetTime: TimeInterval) {
+        runOnMainThread {
+            self.replaceURLPreservingPlaybackTime(url: url, options: options, targetTime: targetTime)
         }
     }
 
@@ -488,6 +576,134 @@ extension KSPlayerLayer {
         startTime = CACurrentMediaTime()
         bufferedCount = 0
         player.prepareToPlay()
+    }
+
+    private func replaceURLPreservingPlaybackTime(url: URL, options: KSOptions, targetTime: TimeInterval) {
+        let canPrewarm = DefinitionSwitchPrewarmPolicy.canPrewarm(
+            isEnabled: options.isDefinitionSwitchPrewarmingEnabled,
+            duration: player.duration,
+            targetTime: targetTime,
+            isSeekable: player.seekable,
+            isExternalPlaybackActive: player.isExternalPlaybackActive,
+            isPictureInPictureActive: isPipActive
+        )
+        guard canPrewarm else {
+            replaceURLWithoutPrewarm(url: url, options: options, targetTime: targetTime)
+            return
+        }
+
+        prewarmContext?.cancel()
+        let playerType = preferredPlayerType(for: url, respectsWirelessRoute: true)
+        let nextPlayer: any MediaPlayerProtocol = playerType.init(url: url, options: options)
+        let prewarmDelegate = DefinitionSwitchPrewarmDelegate()
+        let shouldAutoPlayAfterSwitch = isAutoPlay || (targetTime > 0 && options.isSeekedAutoPlay)
+        let context = DefinitionSwitchPrewarmContext(
+            player: nextPlayer,
+            delegate: prewarmDelegate,
+            url: url,
+            options: options,
+            requestedTime: targetTime,
+            shouldAutoPlayAfterSwitch: shouldAutoPlayAfterSwitch,
+            playbackRate: player.playbackRate,
+            playbackVolume: player.playbackVolume
+        )
+        prewarmContext = context
+
+        nextPlayer.playbackRate = player.playbackRate
+        nextPlayer.playbackVolume = player.playbackVolume
+        nextPlayer.isMuted = player.isMuted
+        nextPlayer.allowsExternalPlayback = player.allowsExternalPlayback
+        nextPlayer.usesExternalPlaybackWhileExternalScreenIsActive = player.usesExternalPlaybackWhileExternalScreenIsActive
+        nextPlayer.contentMode = player.contentMode
+        nextPlayer.delegate = prewarmDelegate
+
+        prewarmDelegate.readyToPlayHandler = { [weak self, weak context] prewarmedPlayer in
+            guard let self, let context, self.prewarmContext === context, ObjectIdentifier(prewarmedPlayer) == ObjectIdentifier(context.player) else { return }
+            self.seekPrewarmedPlayer(context: context)
+        }
+        prewarmDelegate.loadStateHandler = { [weak self, weak context] prewarmedPlayer in
+            guard let self, let context, self.prewarmContext === context, ObjectIdentifier(prewarmedPlayer) == ObjectIdentifier(context.player) else { return }
+            self.commitPrewarmedPlayerIfReady(context: context)
+        }
+        prewarmDelegate.finishHandler = { [weak self, weak context] prewarmedPlayer, error in
+            guard let self, let context, self.prewarmContext === context, ObjectIdentifier(prewarmedPlayer) == ObjectIdentifier(context.player), error != nil else { return }
+            self.replaceURLWithoutPrewarm(url: context.url, options: context.options, targetTime: context.requestedTime)
+        }
+
+        let timeout = max(options.definitionSwitchPrewarmTimeout, 0.1)
+        let timeoutWorkItem = DispatchWorkItem { [weak self, weak context] in
+            guard let self, let context, self.prewarmContext === context else { return }
+            self.replaceURLWithoutPrewarm(url: context.url, options: context.options, targetTime: context.requestedTime)
+        }
+        context.timeoutWorkItem = timeoutWorkItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + timeout, execute: timeoutWorkItem)
+
+        nextPlayer.prepareToPlay()
+    }
+
+    private func seekPrewarmedPlayer(context: DefinitionSwitchPrewarmContext) {
+        let seekTime = DefinitionSwitchPrewarmPolicy.handoffTime(
+            requestedTime: context.requestedTime,
+            elapsed: CACurrentMediaTime() - context.startedAt,
+            playbackRate: context.playbackRate,
+            wasPlaying: context.shouldAutoPlayAfterSwitch,
+            duration: context.player.duration
+        )
+        context.player.seek(time: seekTime) { [weak self, weak context] finished in
+            guard let self, let context, self.prewarmContext === context else { return }
+            guard finished else {
+                self.replaceURLWithoutPrewarm(url: context.url, options: context.options, targetTime: context.requestedTime)
+                return
+            }
+            context.didSeek = true
+            self.commitPrewarmedPlayerIfReady(context: context)
+        }
+    }
+
+    private func commitPrewarmedPlayerIfReady(context: DefinitionSwitchPrewarmContext) {
+        guard prewarmContext === context, context.didSeek, context.player.loadState == .playable else {
+            return
+        }
+        context.timeoutWorkItem?.cancel()
+        prewarmContext = nil
+
+        let oldPlayer = player
+        isCommittingPrewarmedPlayer = true
+        self.options = context.options
+        self.url = context.url
+        self.player = context.player
+        isCommittingPrewarmedPlayer = false
+        oldPlayer.shutdown()
+
+        player.playbackRate = context.playbackRate
+        player.playbackVolume = context.playbackVolume
+        if context.shouldAutoPlayAfterSwitch {
+            isAutoPlay = true
+            player.play()
+            timer.fireDate = Date.distantPast
+            state = player.loadState == .playable ? .bufferFinished : .buffering
+            MPNowPlayingInfoCenter.default().playbackState = .playing
+            if #available(tvOS 14.0, *) {
+                KSPictureInPictureController.mute()
+            }
+        } else {
+            isAutoPlay = false
+            player.pause()
+            timer.fireDate = Date.distantFuture
+            state = .paused
+            MPNowPlayingInfoCenter.default().playbackState = .paused
+        }
+        updateNowPlayingInfo()
+    }
+
+    private func replaceURLWithoutPrewarm(url: URL, options: KSOptions, targetTime: TimeInterval) {
+        prewarmContext?.cancel()
+        prewarmContext = nil
+        self.options = options
+        self.url = url
+        if targetTime > 0 {
+            seek(time: targetTime, autoPlay: options.isSeekedAutoPlay) { _ in }
+        }
     }
 
     private func updateNowPlayingInfo() {

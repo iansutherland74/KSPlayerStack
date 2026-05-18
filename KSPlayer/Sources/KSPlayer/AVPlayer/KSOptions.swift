@@ -94,6 +94,10 @@ open class KSOptions {
     public var isProgressPreviewEnabled = KSOptions.isProgressPreviewEnabled
     /// Controls whether progress previews may warm thumbnail images in the background.
     public var progressPreviewThumbnailMode = KSOptions.progressPreviewThumbnailMode
+    /// Prepares the next definition/source before swapping so VOD quality changes can hand off with minimal delay.
+    public var isDefinitionSwitchPrewarmingEnabled = KSOptions.isDefinitionSwitchPrewarmingEnabled
+    /// Maximum time to wait for a prewarmed definition/source before falling back to the normal replace path.
+    public var definitionSwitchPrewarmTimeout = KSOptions.definitionSwitchPrewarmTimeout
     public var syncDecodeVideo = false
     public var hardwareDecode = KSOptions.hardwareDecode
     public var asynchronousDecompression = KSOptions.asynchronousDecompression
@@ -504,6 +508,8 @@ public extension KSOptions {
     nonisolated(unsafe) static var diskPrecacheMaxCacheSize: Int64 = 5_368_709_120
     nonisolated(unsafe) static var isProgressPreviewEnabled = true
     nonisolated(unsafe) static var progressPreviewThumbnailMode = ProgressPreviewThumbnailMode.localOnly
+    nonisolated(unsafe) static var isDefinitionSwitchPrewarmingEnabled = false
+    nonisolated(unsafe) static var definitionSwitchPrewarmTimeout: TimeInterval = 8
     // 默认不用自研的硬解，因为有些视频的AVPacket的pts顺序是不对的，只有解码后的AVFrame里面的pts是对的。
     nonisolated(unsafe) static var asynchronousDecompression = false
     nonisolated(unsafe) static var isPipPopViewController = false

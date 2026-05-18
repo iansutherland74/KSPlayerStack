@@ -371,9 +371,15 @@ open class VideoPlayerView: PlayerView {
         }
         currentDefinition = definitionIndex >= resource.definitions.count ? resource.definitions.count - 1 : definitionIndex
         let asset = resource.definitions[currentDefinition]
-        super.set(url: asset.url, options: asset.options)
-        if shouldSeekTo > 0 {
-            seek(time: shouldSeekTo) { _ in }
+        resetProgressPreviewThumbnails()
+        srtControl.url = asset.url
+        if let playerLayer {
+            playerLayer.set(url: asset.url, options: asset.options, preservingCurrentTime: shouldSeekTo)
+        } else {
+            super.set(url: asset.url, options: asset.options)
+            if shouldSeekTo > 0 {
+                seek(time: shouldSeekTo) { _ in }
+            }
         }
     }
 
