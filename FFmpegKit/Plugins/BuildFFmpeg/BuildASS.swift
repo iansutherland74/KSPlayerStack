@@ -32,7 +32,10 @@ class BuildHarfbuzz: BaseBuild {
         let pcFile = prefix + "lib/pkgconfig/harfbuzz.pc"
         if let data = FileManager.default.contents(atPath: pcFile.path), var text = String(data: data, encoding: .utf8) {
             let freetype = thinDir(library: .libfreetype, platform: platform, arch: arch).path
-            text = text.replacingOccurrences(of: "Requires: freetype2\n", with: "")
+            text = text
+                .components(separatedBy: "\n")
+                .filter { !$0.hasPrefix("Requires: freetype2") }
+                .joined(separator: "\n")
             text = text.replacingOccurrences(
                 of: "Libs: -L${libdir} -lharfbuzz -lm\n",
                 with: "Libs: -L${libdir} -lharfbuzz -L\(freetype)/lib -lfreetype -lz -lbz2 -lm\n"
@@ -55,7 +58,16 @@ class BuildHarfbuzz: BaseBuild {
     override func arguments(platform _: PlatformType, arch _: ArchType) -> [String] {
         [
             "-Dglib=disabled",
+            "-Dgobject=disabled",
+            "-Dcairo=disabled",
+            "-Dchafa=disabled",
+            "-Dpng=disabled",
+            "-Draster=disabled",
+            "-Dvector=disabled",
+            "-Dgpu=disabled",
+            "-Dtests=disabled",
             "-Ddocs=disabled",
+            "-Dutilities=disabled",
         ]
     }
 }
@@ -70,7 +82,9 @@ class BuildFreetype: BaseBuild {
         let pcFile = thinDir(platform: platform, arch: arch) + "lib/pkgconfig/freetype2.pc"
         if let data = FileManager.default.contents(atPath: pcFile.path), var text = String(data: data, encoding: .utf8) {
             text = text.replacingOccurrences(of: "Requires: zlib\n", with: "")
+            text = text.replacingOccurrences(of: "Requires: zlib, bzip2\n", with: "")
             text = text.replacingOccurrences(of: "Libs: -L${libdir} -lfreetype -lbz2\n", with: "Libs: -L${libdir} -lfreetype -lz -lbz2\n")
+            text = text.replacingOccurrences(of: "Libs: -L${libdir} -lfreetype\n", with: "Libs: -L${libdir} -lfreetype -lz -lbz2\n")
             try text.write(to: pcFile, atomically: true, encoding: .utf8)
         }
     }

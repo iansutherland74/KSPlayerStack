@@ -151,11 +151,11 @@ enum Library: String, CaseIterable {
         case .FFmpeg:
             return "n8.1.1"
         case .libfreetype:
-            return "VER-2-13-2"
+            return "VER-2-14-3"
         case .libfribidi:
-            return "v1.0.12"
+            return "v1.0.16"
         case .libharfbuzz:
-            return "5.3.1"
+            return "14.2.0"
         case .libunibreak:
             return "libunibreak_7_0"
         case .libass:
