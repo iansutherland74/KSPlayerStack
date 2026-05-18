@@ -127,18 +127,7 @@ open class KSPlayerLayer: NSObject, @unchecked Sendable {
 
     public private(set) var url: URL {
         didSet {
-            let firstPlayerType: MediaPlayerProtocol.Type
-            if isWirelessRouteActive {
-                // airplay的话，默认使用KSAVPlayer
-                firstPlayerType = KSAVPlayer.self
-            } else if options.display != .plane {
-                // AR模式只能用KSMEPlayer
-                // swiftlint:disable force_cast
-                firstPlayerType = NSClassFromString("KSPlayer.KSMEPlayer") as! MediaPlayerProtocol.Type
-                // swiftlint:enable force_cast
-            } else {
-                firstPlayerType = KSOptions.firstPlayerType
-            }
+            let firstPlayerType = preferredPlayerType(for: url, respectsWirelessRoute: true)
             if type(of: player) == firstPlayerType {
                 if url == oldValue {
                     if isAutoPlay {
@@ -198,15 +187,7 @@ open class KSPlayerLayer: NSObject, @unchecked Sendable {
         self.url = url
         self.options = options
         self.delegate = delegate
-        let firstPlayerType: MediaPlayerProtocol.Type
-        if options.display != .plane {
-            // AR模式只能用KSMEPlayer
-            // swiftlint:disable force_cast
-            firstPlayerType = NSClassFromString("KSPlayer.KSMEPlayer") as! MediaPlayerProtocol.Type
-            // swiftlint:enable force_cast
-        } else {
-            firstPlayerType = KSOptions.firstPlayerType
-        }
+        let firstPlayerType = Self.preferredPlayerType(for: url, options: options)
         player = firstPlayerType.init(url: url, options: options)
         self.isAutoPlay = isAutoPlay
         super.init()
@@ -487,6 +468,21 @@ extension KSPlayerLayer: AVPictureInPictureControllerDelegate {
 // MARK: - private functions
 
 extension KSPlayerLayer {
+    private static func preferredPlayerType(for url: URL, options: KSOptions) -> MediaPlayerProtocol.Type {
+        if options.display != .plane || url.isBluRayInputCandidate {
+            return KSMEPlayer.self
+        }
+        return KSOptions.firstPlayerType
+    }
+
+    private func preferredPlayerType(for url: URL, respectsWirelessRoute: Bool) -> MediaPlayerProtocol.Type {
+        if respectsWirelessRoute, isWirelessRouteActive, !url.isBluRayInputCandidate {
+            // airplay的话，默认使用KSAVPlayer
+            return KSAVPlayer.self
+        }
+        return Self.preferredPlayerType(for: url, options: options)
+    }
+
     open func prepareToPlay() {
         state = .preparing
         startTime = CACurrentMediaTime()

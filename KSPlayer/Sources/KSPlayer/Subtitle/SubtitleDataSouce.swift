@@ -150,7 +150,10 @@ public class DirectorySubtitleDataSouce: FileURLSubtitleDataSouce {
             return
         }
         if fileURL.isFileURL {
-            let subtitleURLs: [URL] = (try? FileManager.default.contentsOfDirectory(at: fileURL.deletingLastPathComponent(), includingPropertiesForKeys: nil).filter(\.isSubtitle)) ?? []
+            let directoryURL = fileURL.deletingLastPathComponent()
+            let access = KSSecurityScopedURLAccess(urls: [fileURL, directoryURL])
+            defer { access.stop() }
+            let subtitleURLs: [URL] = (try? FileManager.default.contentsOfDirectory(at: directoryURL, includingPropertiesForKeys: nil).filter(\.isSubtitle)) ?? []
             infos = subtitleURLs.map { URLSubtitleInfo(url: $0) }.sorted { left, right in
                 left.name < right.name
             }

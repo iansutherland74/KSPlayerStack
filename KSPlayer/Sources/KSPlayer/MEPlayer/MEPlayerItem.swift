@@ -20,6 +20,7 @@ public final class MEPlayerItem: @unchecked Sendable {
     private var outputFormatCtx: UnsafeMutablePointer<AVFormatContext>?
     private var outputPacket: UnsafeMutablePointer<AVPacket>?
     private var streamMapping = [Int: Int]()
+    private var fileAccess: KSSecurityScopedURLAccess?
     private var openOperation: BlockOperation?
     private var readOperation: BlockOperation?
     private var closeOperation: BlockOperation?
@@ -163,6 +164,15 @@ public final class MEPlayerItem: @unchecked Sendable {
 extension MEPlayerItem {
     private func openThread() {
         avformat_close_input(&self.formatCtx)
+        fileAccess = KSSecurityScopedURLAccess(url: url)
+        let bluRaySource = KSBluRayURLResolver.source(for: url)
+        if !url.isFileURL, url.pathExtension.caseInsensitiveCompare("iso") == .orderedSame {
+            error = NSError(description: "Blu-ray ISO playback requires a local file URL. iOS and visionOS cannot mount remote ISO disk images; import the ISO or a BDMV folder into the app sandbox first.")
+            return
+        }
+        if let bluRaySource, bluRaySource.url != url {
+            fileAccess = KSSecurityScopedURLAccess(urls: [url, bluRaySource.url])
+        }
         formatCtx = avformat_alloc_context()
         guard let formatCtx else {
             error = NSError(errorCode: .formatCreate)
@@ -189,12 +199,14 @@ extension MEPlayerItem {
 //        }
         setHttpProxy()
         var avOptions = options.formatContextOptions.avOptions
-        if let pb = options.process(url: url) {
+        if bluRaySource == nil, let pb = options.process(url: url) {
             // 如果要自定义协议的话，那就用avio_alloc_context，对formatCtx.pointee.pb赋值
             formatCtx.pointee.pb = pb.getContext()
         }
         let urlString: String
-        if url.isFileURL {
+        if let bluRaySource {
+            urlString = bluRaySource.ffmpegURLString
+        } else if url.isFileURL {
             urlString = url.path
         } else {
             urlString = url.absoluteString
@@ -207,7 +219,21 @@ extension MEPlayerItem {
             return
         }
         guard result == 0 else {
-            error = .init(errorCode: .formatOpenInput, avErrorCode: result)
+            if let bluRaySource {
+                let description: String
+                switch bluRaySource.kind {
+                case .isoImage:
+                    description = "Unable to open Blu-ray ISO with libbluray. iOS and visionOS do not support OS-level ISO mounting, so the ISO must be an unencrypted Blu-ray image readable directly by libbluray/libudfread, or use an imported BDMV folder."
+                case .bdmvDirectory:
+                    description = "Unable to open Blu-ray BDMV folder with libbluray. Make sure the selected folder contains a readable BDMV directory and that sandbox file access is still active."
+                }
+                error = NSError(errorCode: .formatOpenInput, userInfo: [
+                    NSLocalizedDescriptionKey: description,
+                    NSUnderlyingErrorKey: AVError(code: result),
+                ])
+            } else {
+                error = .init(errorCode: .formatOpenInput, avErrorCode: result)
+            }
             avformat_close_input(&self.formatCtx)
             return
         }
@@ -646,6 +672,8 @@ extension MEPlayerItem: MediaPlayback {
             self.formatCtx?.pointee.interrupt_callback.callback = nil
             avformat_close_input(&self.formatCtx)
             avformat_close_input(&self.outputFormatCtx)
+            self.fileAccess?.stop()
+            self.fileAccess = nil
             self.duration = 0
             self.closeOperation = nil
             self.operationQueue.cancelAllOperations()

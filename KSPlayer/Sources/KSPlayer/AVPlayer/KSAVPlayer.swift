@@ -79,6 +79,7 @@ public class KSAVPlayer {
 
     private let playerView = KSAVPlayerView()
     private var urlAsset: AVURLAsset
+    private var fileAccess: KSSecurityScopedURLAccess
     private var shouldSeekTo = TimeInterval(0)
     private var playerLooper: AVPlayerLooper?
     private var statusObservation: NSKeyValueObservation?
@@ -213,6 +214,7 @@ public class KSAVPlayer {
 
     public required init(url: URL, options: KSOptions) {
         KSOptions.setAudioSession()
+        fileAccess = KSSecurityScopedURLAccess(url: url)
         urlAsset = AVURLAsset(url: url, options: options.avOptions)
         self.options = options
         itemObservation = player.observe(\.currentItem) { [weak self] player, _ in
@@ -415,6 +417,7 @@ extension KSAVPlayer: @preconcurrency MediaPlayerProtocol {
     public func prepareToPlay() {
         KSLog("prepareToPlay \(self)")
         options.prepareTime = CACurrentMediaTime()
+        fileAccess = KSSecurityScopedURLAccess(url: urlAsset.url)
         runOnMainThread { [weak self] in
             guard let self else { return }
             self.bufferingProgress = 0
@@ -443,11 +446,13 @@ extension KSAVPlayer: @preconcurrency MediaPlayerProtocol {
         loadState = .idle
         urlAsset.cancelLoading()
         replaceCurrentItem(playerItem: nil)
+        fileAccess.stop()
     }
 
     public func replace(url: URL, options: KSOptions) {
         KSLog("replaceUrl \(self)")
         shutdown()
+        fileAccess = KSSecurityScopedURLAccess(url: url)
         urlAsset = AVURLAsset(url: url, options: options.avOptions)
         self.options = options
     }

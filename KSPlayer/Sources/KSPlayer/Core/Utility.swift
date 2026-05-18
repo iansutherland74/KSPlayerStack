@@ -400,6 +400,8 @@ public extension URL {
 
     func data(userAgent: String? = nil) async throws -> Data {
         if isFileURL {
+            let access = KSSecurityScopedURLAccess(url: self)
+            defer { access.stop() }
             return try Data(contentsOf: self)
         } else {
             var request = URLRequest(url: self)
