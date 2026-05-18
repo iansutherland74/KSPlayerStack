@@ -76,6 +76,10 @@ extension KSVideoPlayer: UIViewRepresentable {
             playerLayer?.state ?? .initialized
         }
 
+        public var resumeState: KSPlayerResumeState? {
+            playerLayer?.resumeState
+        }
+
         @Published
         public var isMuted: Bool = false {
             didSet {
@@ -139,6 +143,7 @@ extension KSVideoPlayer: UIViewRepresentable {
         public init() {}
 
         public func makeView(url: URL, options: KSOptions) -> UIView {
+            subtitleModel.apply(options: options)
             defer {
                 DispatchQueue.main.async { [weak self] in
                     self?.subtitleModel.url = url
@@ -171,6 +176,7 @@ extension KSVideoPlayer: UIViewRepresentable {
             delayHide?.cancel()
             delayHide = nil
             subtitleModel.selectedSubtitleInfo?.isEnabled = false
+            subtitleModel.selectedSecondarySubtitleInfo?.isEnabled = false
         }
 
         public func skip(interval: Int) {
@@ -221,6 +227,7 @@ extension KSVideoPlayer.Coordinator: KSPlayerLayerDelegate {
     public func player(layer: KSPlayerLayer, state: KSPlayerState) {
         onStateChanged?(layer, state)
         if state == .readyToPlay {
+            subtitleModel.updateVideoDynamicRange(from: layer.player)
             playbackRate = layer.player.playbackRate
             if let subtitleDataSouce = layer.player.subtitleDataSouce {
                 // 要延后增加内嵌字幕。因为有些内嵌字幕是放在视频流的。所以会比readyToPlay回调晚。
@@ -255,7 +262,7 @@ extension KSVideoPlayer.Coordinator: KSPlayerLayerDelegate {
         }
     }
 
-    public func player(layer _: KSPlayerLayer, currentTime: TimeInterval, totalTime: TimeInterval) {
+    public func player(layer: KSPlayerLayer, currentTime: TimeInterval, totalTime: TimeInterval) {
         onPlay?(currentTime, totalTime)
         if currentTime >= Double(Int.max) || currentTime <= Double(Int.min) || totalTime >= Double(Int.max) || totalTime <= Double(Int.min) {
             return
@@ -268,6 +275,7 @@ extension KSVideoPlayer.Coordinator: KSPlayerLayerDelegate {
         if timemodel.totalTime != total {
             timemodel.totalTime = total
         }
+        subtitleModel.updateVideoDynamicRange(from: layer.player)
         _ = subtitleModel.subtitle(currentTime: currentTime)
     }
 

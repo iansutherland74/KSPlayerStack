@@ -324,6 +324,10 @@ extension FFmpegFieldOrder: CustomStringConvertible {
 
 // swiftlint:enable identifier_name
 public extension MediaPlayerTrack {
+    var subtitleKind: SubtitleKind {
+        (self as? any SubtitleKindProviding)?.subtitleKind ?? (isImageSubtitle ? .image : .text)
+    }
+
     var language: String? {
         languageCode.flatMap {
             Locale.current.localizedString(forLanguageCode: $0)
@@ -340,6 +344,13 @@ public extension MediaPlayerTrack {
         } else {
             return formatDescription?.dynamicRange
         }
+    }
+
+    var dynamicRangeDescription: String {
+        if dovi == nil, let track = self as? FFmpegAssetTrack, track.hasHDR10PlusMetadata {
+            return "HDR10+"
+        }
+        return dynamicRange?.description ?? DynamicRange.sdr.description
     }
 
     var colorSpace: CGColorSpace? {
@@ -376,10 +387,10 @@ public extension CMFormatDescription {
         let contentRange: DynamicRange
         if codecType.string == "dvhe" || codecType == kCMVideoCodecType_DolbyVisionHEVC {
             contentRange = .dolbyVision
-        } else if bitDepth == 10 || transferFunction == kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ as String { /// HDR
-            contentRange = .hdr10
         } else if transferFunction == kCVImageBufferTransferFunction_ITU_R_2100_HLG as String { /// HLG
             contentRange = .hlg
+        } else if transferFunction == kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ as String { /// HDR10/HDR10+
+            contentRange = .hdr10
         } else {
             contentRange = .sdr
         }

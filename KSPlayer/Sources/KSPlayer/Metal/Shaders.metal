@@ -28,11 +28,23 @@ vertex VertexOut mapSphereTexture(VertexIn input [[stage_in]], constant float4x4
     return outVertex;
 }
 
+half3 applyVideoColorAdjustment(half3 rgb, constant float4& adjustment) {
+    if (adjustment.w < 0.5) {
+        return rgb;
+    }
+    half luma = dot(rgb, half3(0.2126, 0.7152, 0.0722));
+    rgb = mix(half3(luma), rgb, half(adjustment.x));
+    rgb = (rgb - half3(0.5)) * half(adjustment.z) + half3(0.5 + adjustment.y);
+    return clamp(rgb, half3(0.0), half3(1.0));
+}
+
 fragment half4 displayTexture(VertexOut mappingVertex [[ stage_in ]],
-                              texture2d<half, access::sample> texture [[ texture(0) ]]) {
+                              texture2d<half, access::sample> texture [[ texture(0) ]],
+                              constant float4& colorAdjustment [[ buffer(3) ]]) {
     constexpr sampler s(address::clamp_to_edge, filter::linear);
 
-    return half4(texture.sample(s, mappingVertex.textureCoordinate));
+    half4 color = texture.sample(s, mappingVertex.textureCoordinate);
+    return half4(applyVideoColorAdjustment(color.rgb, colorAdjustment), color.a);
 }
 
 fragment half4 displayYUVTexture(VertexOut in [[ stage_in ]],
@@ -42,13 +54,15 @@ fragment half4 displayYUVTexture(VertexOut in [[ stage_in ]],
                                   sampler textureSampler [[ sampler(0) ]],
                                   constant float3x3& yuvToBGRMatrix [[ buffer(0) ]],
                                   constant float3& colorOffset [[ buffer(1) ]],
-                                  constant uchar3& leftShift [[ buffer(2) ]])
+                                  constant uchar3& leftShift [[ buffer(2) ]],
+                                  constant float4& colorAdjustment [[ buffer(3) ]])
 {
     half3 yuv;
     yuv.x = yTexture.sample(textureSampler, in.textureCoordinate).r;
     yuv.y = uTexture.sample(textureSampler, in.textureCoordinate).r;
     yuv.z = vTexture.sample(textureSampler, in.textureCoordinate).r;
-    return half4(half3x3(yuvToBGRMatrix)*(yuv*half3(leftShift)+half3(colorOffset)), 1);
+    half3 rgb = half3x3(yuvToBGRMatrix)*(yuv*half3(leftShift)+half3(colorOffset));
+    return half4(applyVideoColorAdjustment(rgb, colorAdjustment), 1);
 }
 
 
@@ -58,12 +72,14 @@ fragment half4 displayNV12Texture(VertexOut in [[ stage_in ]],
                                   sampler textureSampler [[ sampler(0) ]],
                                   constant float3x3& yuvToBGRMatrix [[ buffer(0) ]],
                                   constant float3& colorOffset [[ buffer(1) ]],
-                                  constant uchar3& leftShift [[ buffer(2) ]])
+                                  constant uchar3& leftShift [[ buffer(2) ]],
+                                  constant float4& colorAdjustment [[ buffer(3) ]])
 {
     half3 yuv;
     yuv.x = lumaTexture.sample(textureSampler, in.textureCoordinate).r;
     yuv.yz = chromaTexture.sample(textureSampler, in.textureCoordinate).rg;
-    return half4(half3x3(yuvToBGRMatrix)*(yuv*half3(leftShift)+half3(colorOffset)), 1);
+    half3 rgb = half3x3(yuvToBGRMatrix)*(yuv*half3(leftShift)+half3(colorOffset));
+    return half4(applyVideoColorAdjustment(rgb, colorAdjustment), 1);
 }
 
 half3 shaderLinearize(half3 rgb) {
@@ -86,7 +102,8 @@ fragment half4 displayYCCTexture(VertexOut in [[ stage_in ]],
                                   sampler textureSampler [[ sampler(0) ]],
                                   constant float3x3& yuvToBGRMatrix [[ buffer(0) ]],
                                   constant float3& colorOffset [[ buffer(1) ]],
-                                  constant uchar3& leftShift [[ buffer(2) ]])
+                                  constant uchar3& leftShift [[ buffer(2) ]],
+                                  constant float4& colorAdjustment [[ buffer(3) ]])
 {
     half3 ipt;
     ipt.x = lumaTexture.sample(textureSampler, in.textureCoordinate).r;
@@ -99,5 +116,5 @@ fragment half4 displayYCCTexture(VertexOut in [[ stage_in ]],
     lms = shaderLinearize(lms);
     half3 rgb = lms2rgb*lms;
     rgb = shaderDeLinearize(rgb);
-    return half4(rgb, 1);
+    return half4(applyVideoColorAdjustment(rgb, colorAdjustment), 1);
 }

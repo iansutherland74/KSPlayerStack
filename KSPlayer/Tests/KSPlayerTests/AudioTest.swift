@@ -49,10 +49,66 @@ class AudioTest: XCTestCase {
         XCTAssertTrue(track.description.contains("AC-4 demuxing is available"))
     }
 
+    func testDolbyAC4AtmosTitleMetadataDoesNotClaimDecodeSupport() {
+        let codecpar = makeAudioCodecParameters(codecID: AV_CODEC_ID_AC4)
+        let metadata = FFmpegAssetTrack.audioCodecMetadata(
+            codecID: codecpar.codec_id,
+            profile: codecpar.profile,
+            codecName: "ac4",
+            profileName: nil,
+            channelLayout: codecpar.ch_layout,
+            title: "English Dolby Atmos",
+            decodeSupport: FFmpegAssetTrack.audioDecodeSupport(codecID: codecpar.codec_id)
+        )
+
+        XCTAssertEqual(metadata?.displayName, "Dolby AC-4 Atmos")
+        XCTAssertEqual(metadata?.isDolbyAC4, true)
+        XCTAssertEqual(metadata?.isDolbyAtmos, true)
+        XCTAssertEqual(metadata?.decodeSupport.isSupported, false)
+    }
+
+    func testDolbyAC4IsNotSelectedAsDecodableFFmpegAudio() {
+        guard let ac4Track = FFmpegAssetTrack(codecpar: makeAudioCodecParameters(codecID: AV_CODEC_ID_AC4)),
+              let eac3Track = FFmpegAssetTrack(codecpar: makeAudioCodecParameters(codecID: AV_CODEC_ID_EAC3))
+        else {
+            XCTFail("Expected Dolby audio track metadata")
+            return
+        }
+
+        let decodableTracks = FFmpegAssetTrack.decodableAudioTracks([ac4Track, eac3Track])
+
+        XCTAssertEqual(decodableTracks.count, 1)
+        XCTAssertTrue(decodableTracks[0] === eac3Track)
+        XCTAssertFalse(decodableTracks.contains { $0 === ac4Track })
+    }
+
+    func testAV1CodecMapsToCoreMediaSampleEntry() {
+        let mediaSubType = AV_CODEC_ID_AV1.mediaSubType
+
+        XCTAssertEqual(mediaSubType.rawValue.string, "av01")
+        XCTAssertEqual(mediaSubType.rawValue.avc, "av1C")
+    }
+
     func testAtmosChannelLayoutsMapToCoreAudioTags() {
         let channelLayout = AVChannelLayout(order: AV_CHANNEL_ORDER_NATIVE, nb_channels: 8, u: AVChannelLayout.__Unnamed_union_u(mask: swift_AV_CH_LAYOUT_5POINT1POINT2), opaque: nil)
         XCTAssertEqual(channelLayout.layoutTag, kAudioChannelLayoutTag_Atmos_5_1_2)
         XCTAssertTrue(channelLayout.isDolbyAtmosBedLayout)
+    }
+
+    func testAudioFormatDescriptionPreservesChannelLayout() {
+        guard let track = FFmpegAssetTrack(codecpar: makeAudioCodecParameters(codecID: AV_CODEC_ID_EAC3, channels: 6)),
+              let formatDescription = track.formatDescription
+        else {
+            XCTFail("Expected audio format description")
+            return
+        }
+
+        var layoutSize = 0
+        let layout = CMAudioFormatDescriptionGetChannelLayout(formatDescription, sizeOut: &layoutSize)
+
+        XCTAssertNotNil(layout)
+        XCTAssertGreaterThan(layoutSize, 0)
+        XCTAssertEqual(layout.flatMap { AVAudioChannelLayout(layout: $0) }?.channelCount, 6)
     }
 
     private func makeAudioCodecParameters(codecID: AVCodecID, profile: Int32 = AV_PROFILE_UNKNOWN, channels: Int32 = 6) -> AVCodecParameters {

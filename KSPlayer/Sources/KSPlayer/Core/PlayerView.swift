@@ -148,6 +148,7 @@ open class PlayerView: UIView, KSPlayerLayerDelegate, KSSliderDelegate {
     }
 
     open func set(url: URL, options: KSOptions) {
+        srtControl.apply(options: options)
         srtControl.url = url
         toolBar.currentTime = 0
         toolBar.seekableTimeRange = nil
@@ -173,6 +174,7 @@ open class PlayerView: UIView, KSPlayerLayerDelegate, KSSliderDelegate {
     open func player(layer: KSPlayerLayer, state: KSPlayerState) {
         delegate?.playerController(state: state)
         if state == .readyToPlay {
+            srtControl.updateVideoDynamicRange(from: layer.player)
             toolBar.seekableTimeRange = layer.player.seekableTimeRange
             totalTime = layer.player.duration
             toolBar.isSeekable = layer.player.seekable
@@ -185,6 +187,7 @@ open class PlayerView: UIView, KSPlayerLayerDelegate, KSSliderDelegate {
     open func player(layer: KSPlayerLayer, currentTime: TimeInterval, totalTime: TimeInterval) {
         delegate?.playerController(currentTime: currentTime, totalTime: totalTime)
         playTimeDidChange?(currentTime, totalTime)
+        srtControl.updateVideoDynamicRange(from: layer.player)
         toolBar.seekableTimeRange = layer.player.seekableTimeRange
         toolBar.isSeekable = layer.player.seekable
         toolBar.currentTime = currentTime

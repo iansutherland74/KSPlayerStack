@@ -24,6 +24,10 @@ extension FFmpegAssetTrack: KSSubtitleProtocol {
 
 extension KSMEPlayer: SubtitleDataSouce {
     public var infos: [any SubtitleInfo] {
-        tracks(mediaType: .subtitle).compactMap { $0 as? (any SubtitleInfo) }
+        var infos = tracks(mediaType: .subtitle).compactMap { $0 as? (any SubtitleInfo) }
+        if let offlineSubtitleGeneratorInfo {
+            infos.append(offlineSubtitleGeneratorInfo)
+        }
+        return infos
     }
 }

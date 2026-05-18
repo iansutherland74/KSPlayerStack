@@ -42,7 +42,7 @@ public struct FFmpegAudioCodecMetadata: Equatable {
     public let decodeSupport: FFmpegAudioDecodeSupport
 }
 
-public class FFmpegAssetTrack: MediaPlayerTrack {
+public class FFmpegAssetTrack: MediaPlayerTrack, SubtitleKindProviding {
     public private(set) var trackID: Int32 = 0
     public let codecName: String
     public var name: String = ""
@@ -67,14 +67,21 @@ public class FFmpegAssetTrack: MediaPlayerTrack {
     public let isImageSubtitle: Bool
     public var delay: TimeInterval = 0
     var subtitle: SyncPlayerItemTrack<SubtitleFrame>?
+    var embeddedFontDirectoryURL: URL?
     // video
     public private(set) var rotation: Int16 = 0
     public var dovi: DOVIDecoderConfigurationRecord?
+    public private(set) var hasHDR10PlusMetadata = false
     public let fieldOrder: FFmpegFieldOrder
     public let formatDescription: CMFormatDescription?
+    public private(set) var panoramaProjection: VideoProjection?
     var closedCaptionsTrack: FFmpegAssetTrack?
     let isConvertNALSize: Bool
     var seekByBytes = false
+    public var subtitleKind: SubtitleKind {
+        Self.subtitleKind(codecID: codecpar.codec_id, isImageSubtitle: isImageSubtitle)
+    }
+
     public var description: String {
         var description = audioCodecMetadata?.displayName ?? codecName
         if let formatName {
@@ -94,6 +101,8 @@ public class FFmpegAssetTrack: MediaPlayerTrack {
                 description += String(format: ", %.2f fps", nominalFrameRate)
                 if let dovi {
                     description += ", \(dovi.description)"
+                } else if let dynamicRangeLabel {
+                    description += ", \(dynamicRangeLabel)"
                 }
             }
         }
@@ -154,6 +163,9 @@ public class FFmpegAssetTrack: MediaPlayerTrack {
         } else {
             name = languageCode ?? codecName
         }
+        if mediaType == .video, panoramaProjection == nil {
+            panoramaProjection = PanoramaProjectionPolicy.detectedProjection(metadata: metadata)
+        }
         updateAudioCodecMetadata(title: name)
         // AV_DISPOSITION_DEFAULT
         if mediaType == .subtitle {
@@ -170,7 +182,7 @@ public class FFmpegAssetTrack: MediaPlayerTrack {
         self.codecpar = codecpar
         bitRate = codecpar.bit_rate
         // codec_tag byte order is LSB first CMFormatDescription.MediaSubType(rawValue: codecpar.codec_tag.bigEndian)
-        let codecType = codecpar.codec_id.mediaSubType
+        let codecType = codecpar.mediaSubType
         var codecName = ""
         let profileName = avcodec_profile_name(codecpar.codec_id, codecpar.profile).flatMap { String(cString: $0) }
         if let descriptor = avcodec_descriptor_get(codecpar.codec_id) {
@@ -195,7 +207,9 @@ public class FFmpegAssetTrack: MediaPlayerTrack {
             let bytesPerSample = UInt32(av_get_bytes_per_sample(sampleFormat))
             let formatFlags = ((sampleFormat == AV_SAMPLE_FMT_FLT || sampleFormat == AV_SAMPLE_FMT_DBL) ? kAudioFormatFlagIsFloat : sampleFormat == AV_SAMPLE_FMT_U8 ? 0 : kAudioFormatFlagIsSignedInteger) | kAudioFormatFlagIsPacked
             var audioStreamBasicDescription = AudioStreamBasicDescription(mSampleRate: Float64(codecpar.sample_rate), mFormatID: codecType.rawValue, mFormatFlags: formatFlags, mBytesPerPacket: bytesPerSample * channelsPerFrame, mFramesPerPacket: 1, mBytesPerFrame: bytesPerSample * channelsPerFrame, mChannelsPerFrame: channelsPerFrame, mBitsPerChannel: bytesPerSample * 8, mReserved: 0)
-            _ = CMAudioFormatDescriptionCreate(allocator: kCFAllocatorDefault, asbd: &audioStreamBasicDescription, layoutSize: 0, layout: nil, magicCookieSize: 0, magicCookie: nil, extensions: nil, formatDescriptionOut: &formatDescriptionOut)
+            _ = layout.withCoreAudioChannelLayout { layoutSize, layout in
+                CMAudioFormatDescriptionCreate(allocator: kCFAllocatorDefault, asbd: &audioStreamBasicDescription, layoutSize: layoutSize, layout: layout, magicCookieSize: 0, magicCookie: nil, extensions: nil, formatDescriptionOut: &formatDescriptionOut)
+            }
             if let name = av_get_sample_fmt_name(sampleFormat) {
                 formatName = String(cString: name)
             } else {
@@ -204,11 +218,14 @@ public class FFmpegAssetTrack: MediaPlayerTrack {
         } else if codecpar.codec_type == AVMEDIA_TYPE_VIDEO {
             audioDescriptor = nil
             mediaType = .video
+            var doviRecord: DOVIDecoderConfigurationRecord?
             if codecpar.nb_coded_side_data > 0, let sideDatas = codecpar.coded_side_data {
                 for i in 0 ..< codecpar.nb_coded_side_data {
                     let sideData = sideDatas[Int(i)]
                     if sideData.type == AV_PKT_DATA_DOVI_CONF {
-                        dovi = sideData.data.withMemoryRebound(to: DOVIDecoderConfigurationRecord.self, capacity: 1) { $0 }.pointee
+                        doviRecord = sideData.data.withMemoryRebound(to: DOVIDecoderConfigurationRecord.self, capacity: 1) { $0 }.pointee
+                    } else if sideData.type == AV_PKT_DATA_DYNAMIC_HDR10_PLUS {
+                        hasHDR10PlusMetadata = true
                     } else if sideData.type == AV_PKT_DATA_DISPLAYMATRIX {
                         let matrix = sideData.data.withMemoryRebound(to: Int32.self, capacity: 1) { $0 }
                         let rawRotation = -av_display_rotation_get(matrix)
@@ -219,6 +236,8 @@ public class FFmpegAssetTrack: MediaPlayerTrack {
                         } else {
                             rotation = 0
                         }                        
+                    } else if sideData.type == AV_PKT_DATA_SPHERICAL {
+                        panoramaProjection = Self.sphericalProjection(data: sideData.data, size: Int32(clamping: sideData.size))
                     }
                 }
             }
@@ -257,9 +276,11 @@ public class FFmpegAssetTrack: MediaPlayerTrack {
                 }
                 isConvertNALSize = false
             }
+            dovi = doviRecord
             let format = AVPixelFormat(rawValue: codecpar.format)
             bitDepth = format.bitDepth
             let fullRange = codecpar.color_range == AVCOL_RANGE_JPEG
+            let dolbyVisionHDRFallback = doviRecord?.hdrFallbackDynamicRange
             let dic: NSMutableDictionary = [
                 kCVImageBufferChromaLocationBottomFieldKey: kCVImageBufferChromaLocation_Left,
                 kCVImageBufferChromaLocationTopFieldKey: kCVImageBufferChromaLocation_Left,
@@ -268,14 +289,14 @@ public class FFmpegAssetTrack: MediaPlayerTrack {
                 codecType.rawValue == kCMVideoCodecType_HEVC ? "EnableHardwareAcceleratedVideoDecoder" : "RequireHardwareAcceleratedVideoDecoder": true,
             ]
             // kCMFormatDescriptionExtension_BitsPerComponent
-            if let atomsData {
-                dic[kCMFormatDescriptionExtension_SampleDescriptionExtensionAtoms] = [codecType.rawValue.avc: atomsData]
+            if let atomsData, let atomName = codecType.rawValue.sampleDescriptionExtensionAtomName {
+                dic[kCMFormatDescriptionExtension_SampleDescriptionExtensionAtoms] = [atomName: atomsData]
             }
             dic[kCVPixelBufferPixelFormatTypeKey] = format.osType(fullRange: fullRange)
             dic[kCVImageBufferPixelAspectRatioKey] = sar.aspectRatio
-            dic[kCVImageBufferColorPrimariesKey] = colorPrimaries as String?
-            dic[kCVImageBufferTransferFunctionKey] = transferFunction as String?
-            dic[kCVImageBufferYCbCrMatrixKey] = yCbCrMatrix as String?
+            dic[kCVImageBufferColorPrimariesKey] = Self.colorPrimaries(codecpar: codecpar, dolbyVisionHDRFallback: dolbyVisionHDRFallback) as String?
+            dic[kCVImageBufferTransferFunctionKey] = Self.transferFunction(codecpar: codecpar, dolbyVisionHDRFallback: dolbyVisionHDRFallback) as String?
+            dic[kCVImageBufferYCbCrMatrixKey] = Self.yCbCrMatrix(codecpar: codecpar, dolbyVisionHDRFallback: dolbyVisionHDRFallback) as String?
             // swiftlint:disable line_length
             _ = CMVideoFormatDescriptionCreate(allocator: kCFAllocatorDefault, codecType: codecType.rawValue, width: codecpar.width, height: codecpar.height, extensions: dic, formatDescriptionOut: &formatDescriptionOut)
             // swiftlint:enable line_length
@@ -321,8 +342,36 @@ public class FFmpegAssetTrack: MediaPlayerTrack {
         )
     }
 
+    private static func sphericalProjection(data: UnsafeMutablePointer<UInt8>?, size: Int32) -> VideoProjection? {
+        guard let data, size >= Int32(MemoryLayout<Int32>.size) else {
+            return .equirectangular
+        }
+        let rawProjection = data.withMemoryRebound(to: Int32.self, capacity: 1) { $0.pointee }
+        switch rawProjection {
+        case 0:
+            return .equirectangular
+        case 1:
+            return .cubemap
+        case 2:
+            return .equirectangularTiled
+        default:
+            return .unknown("ffmpeg-spherical-\(rawProjection)")
+        }
+    }
+
     func createContext(options: KSOptions) throws -> UnsafeMutablePointer<AVCodecContext> {
         try codecpar.createContext(options: options)
+    }
+
+    func configureAsClosedCaptionsTrack(source: FFmpegAssetTrack) {
+        trackID = -(source.trackID + 1)
+        name = NSLocalizedString("Closed Captions", comment: "Closed caption track name")
+        startTime = source.startTime
+        timebase = source.timebase
+    }
+
+    func markHDR10PlusMetadataDetected() {
+        hasHDR10PlusMetadata = true
     }
 
     public var isEnabled: Bool {
@@ -339,7 +388,35 @@ public class FFmpegAssetTrack: MediaPlayerTrack {
     }
 }
 
+extension AVChannelLayout {
+    fileprivate func withCoreAudioChannelLayout<T>(_ body: (Int, UnsafePointer<AudioChannelLayout>?) -> T) -> T {
+        guard let tag = layoutTag, let layout = AVAudioChannelLayout(layoutTag: tag) else {
+            return body(0, nil)
+        }
+        return body(MemoryLayout<AudioChannelLayout>.size, layout.layout)
+    }
+}
+
 extension FFmpegAssetTrack {
+    static func subtitleKind(codecID: AVCodecID, isImageSubtitle: Bool) -> SubtitleKind {
+        if codecID == AV_CODEC_ID_EIA_608 {
+            return .closedCaption
+        }
+        if isImageSubtitle {
+            return .image
+        }
+        switch codecID {
+        case AV_CODEC_ID_ASS, AV_CODEC_ID_SSA, AV_CODEC_ID_SUBRIP, AV_CODEC_ID_WEBVTT, AV_CODEC_ID_MOV_TEXT:
+            return .text
+        default:
+            return .unknown
+        }
+    }
+
+    static func decodableAudioTracks(_ tracks: [FFmpegAssetTrack]) -> [FFmpegAssetTrack] {
+        tracks.filter { $0.mediaType == .audio && $0.audioDecodeSupport.isSupported }
+    }
+
     static func audioDecodeSupport(codecID: AVCodecID) -> FFmpegAudioDecodeSupport {
         if avcodec_find_decoder(codecID) != nil {
             return .supported
@@ -403,6 +480,10 @@ extension FFmpegAssetTrack {
     }
 
     private var colorPrimaries: CFString? {
+        Self.colorPrimaries(codecpar: codecpar, dolbyVisionHDRFallback: dolbyVisionHDRFallback)
+    }
+
+    private static func colorPrimaries(codecpar: AVCodecParameters, dolbyVisionHDRFallback: DynamicRange?) -> CFString? {
         if dolbyVisionHDRFallback != nil, codecpar.color_primaries == AVCOL_PRI_UNSPECIFIED {
             return kCVImageBufferColorPrimaries_ITU_R_2020
         }
@@ -410,6 +491,10 @@ extension FFmpegAssetTrack {
     }
 
     private var transferFunction: CFString? {
+        Self.transferFunction(codecpar: codecpar, dolbyVisionHDRFallback: dolbyVisionHDRFallback)
+    }
+
+    private static func transferFunction(codecpar: AVCodecParameters, dolbyVisionHDRFallback: DynamicRange?) -> CFString? {
         if let dolbyVisionHDRFallback, codecpar.color_trc == AVCOL_TRC_UNSPECIFIED {
             return dolbyVisionHDRFallback.transferFunction
         }
@@ -417,9 +502,21 @@ extension FFmpegAssetTrack {
     }
 
     private var yCbCrMatrix: CFString? {
+        Self.yCbCrMatrix(codecpar: codecpar, dolbyVisionHDRFallback: dolbyVisionHDRFallback)
+    }
+
+    private static func yCbCrMatrix(codecpar: AVCodecParameters, dolbyVisionHDRFallback: DynamicRange?) -> CFString? {
         if dolbyVisionHDRFallback != nil, codecpar.color_space == AVCOL_SPC_UNSPECIFIED {
             return kCVImageBufferYCbCrMatrix_ITU_R_2020
         }
         return codecpar.color_space.ycbcrMatrix
+    }
+
+    var dynamicRangeLabel: String? {
+        if hasHDR10PlusMetadata {
+            return "HDR10+"
+        }
+        let range = dynamicRange
+        return range == .sdr ? nil : range?.description
     }
 }

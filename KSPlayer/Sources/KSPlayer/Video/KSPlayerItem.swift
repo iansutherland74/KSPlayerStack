@@ -29,8 +29,8 @@ public class KSPlayerResource: Equatable, Hashable {
      - parameter cover:     video cover, will show before playing, and hide when play
      - parameter subtitleURLs: video subtitles
      */
-    public convenience init(url: URL, options: KSOptions = KSOptions(), name: String = "", cover: URL? = nil, subtitleURLs: [URL]? = nil, extinf: [String: String]? = nil) {
-        let definition = KSPlayerResourceDefinition(url: url, definition: "", options: options)
+    public convenience init(url: URL, audioURL: URL? = nil, options: KSOptions = KSOptions(), name: String = "", cover: URL? = nil, subtitleURLs: [URL]? = nil, extinf: [String: String]? = nil) {
+        let definition = KSPlayerResourceDefinition(url: url, audioURL: audioURL, definition: "", options: options)
         let subtitleDataSouce: URLSubtitleDataSouce?
         if let subtitleURLs {
             subtitleDataSouce = URLSubtitleDataSouce(urls: subtitleURLs)
@@ -69,11 +69,14 @@ extension KSPlayerResource: Identifiable {
 
 public struct KSPlayerResourceDefinition: Hashable {
     public static func == (lhs: KSPlayerResourceDefinition, rhs: KSPlayerResourceDefinition) -> Bool {
-        lhs.url == rhs.url
+        lhs.url == rhs.url && lhs.audioURL == rhs.audioURL
     }
 
     public let url: URL
+    public let audioURL: URL?
     public let definition: String
+    /// Optional peak bandwidth in bits per second. When every definition provides this, automatic bitrate switching uses it to order variants.
+    public let bandwidth: Int64?
     public let options: KSOptions
     public init(url: URL) {
         self.init(url: url, definition: url.lastPathComponent)
@@ -83,17 +86,22 @@ public struct KSPlayerResourceDefinition: Hashable {
      Video recource item with defination name and specifying options
 
      - parameter url:        video url
+     - parameter audioURL:   optional separate audio url
      - parameter definition: url deifination
+     - parameter bandwidth:  optional peak bandwidth in bits per second
      - parameter options:    specifying options for the initialization of the AVURLAsset
      */
-    public init(url: URL, definition: String, options: KSOptions = KSOptions()) {
+    public init(url: URL, audioURL: URL? = nil, definition: String, bandwidth: Int64? = nil, options: KSOptions = KSOptions()) {
         self.url = url
+        self.audioURL = audioURL
         self.definition = definition
+        self.bandwidth = bandwidth
         self.options = options
     }
 
     public func hash(into hasher: inout Hasher) {
         hasher.combine(url)
+        hasher.combine(audioURL)
     }
 }
 

@@ -371,6 +371,23 @@ public func runOnMainThread(block: @escaping @Sendable () -> Void) {
 }
 
 public extension URL {
+    var ksNormalizedScheme: String? {
+        scheme?.lowercased()
+    }
+
+    var isFFmpegOnlyInputScheme: Bool {
+        guard let scheme = ksNormalizedScheme else {
+            return false
+        }
+        return Self.ffmpegOnlyInputSchemes.contains(scheme)
+    }
+
+    private static let ffmpegOnlyInputSchemes: Set<String> = [
+        "nfs",
+        "smb",
+        "srt",
+    ]
+
     var isMovie: Bool {
         if let typeID = try? resourceValues(forKeys: [.typeIdentifierKey]).typeIdentifier as CFString? {
             return UTTypeConformsTo(typeID, kUTTypeMovie)
@@ -385,8 +402,26 @@ public extension URL {
         return false
     }
 
-    var isSubtitle: Bool {
+    var isTextSubtitle: Bool {
         ["ass", "srt", "ssa", "vtt"].contains(pathExtension.lowercased())
+    }
+
+    var isImageSubtitle: Bool {
+        ["sup", "pgs"].contains(pathExtension.lowercased())
+    }
+
+    var subtitleKind: SubtitleKind {
+        if isTextSubtitle {
+            return .text
+        }
+        if isImageSubtitle {
+            return .image
+        }
+        return .unknown
+    }
+
+    var isSubtitle: Bool {
+        subtitleKind != .unknown
     }
 
     var isPlaylist: Bool {

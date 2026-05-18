@@ -228,6 +228,32 @@ final class Packet: ObjectQueueItem {
     }
 }
 
+extension Packet: MemorySeekCacheItem {
+    var memorySeekCacheTrackID: Int32 {
+        assetTrack.trackID
+    }
+
+    var memorySeekCacheMediaType: AVFoundation.AVMediaType {
+        assetTrack.mediaType
+    }
+
+    var memorySeekCacheIsKeyFrame: Bool {
+        isKeyFrame
+    }
+
+    func makeMemorySeekCacheCopy() -> (any MemorySeekCacheItem)? {
+        guard let corePacket else {
+            return nil
+        }
+        let copy = Packet()
+        guard let copyPacket = copy.corePacket, av_packet_ref(copyPacket, corePacket) == 0 else {
+            return nil
+        }
+        copy.assetTrack = assetTrack
+        return copy
+    }
+}
+
 final class SubtitleFrame: MEFrame {
     var timestamp: Int64 = 0
     var timebase: Timebase
@@ -426,6 +452,7 @@ public final class VideoVTBFrame: MEFrame {
     public var size: Int32 = 0
     public let fps: Float
     public let isDovi: Bool
+    public var interlacingType: VideoInterlacingType?
     public var edrMetaData: EDRMetaData? = nil
     var corePixelBuffer: PixelBufferProtocol?
     init(fps: Float, isDovi: Bool) {
@@ -465,6 +492,8 @@ public struct EDRMetaData {
     var displayData: MasteringDisplayMetadata?
     var contentData: ContentLightMetadata?
     var ambientViewingEnvironment: AmbientViewingEnvironment?
+    /// Diagnostics only: HDR10+ dynamic tone mapping is left to system decode/display paths.
+    var hasHDR10PlusMetadata = false
 }
 
 public struct MasteringDisplayMetadata {

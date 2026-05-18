@@ -596,8 +596,11 @@ struct VideoSubtitleView: View {
     fileprivate var model: SubtitleModel
     var body: some View {
         ZStack {
+            ForEach(model.secondaryParts) { part in
+                part.subtitleView(model: model, time: model.currentSecondarySubtitleTime, defaultPlacement: .secondary)
+            }
             ForEach(model.parts) { part in
-                part.subtitleView
+                part.subtitleView(model: model, time: model.currentSubtitleTime, defaultPlacement: .primary)
             }
         }
     }
@@ -617,33 +620,42 @@ struct VideoSubtitleView: View {
     }
 }
 
+private enum SubtitlePlacementRole {
+    case primary
+    case secondary
+}
+
 private extension SubtitlePart {
     @available(iOS 16, tvOS 16, macOS 13, *)
     @MainActor
-    var subtitleView: some View {
+    func subtitleView(model: SubtitleModel, time: TimeInterval, defaultPlacement: SubtitlePlacementRole) -> some View {
         VStack {
             if let image {
-                Spacer()
+                if defaultPlacement == .primary {
+                    Spacer()
+                }
                 GeometryReader { geometry in
-                    let fitRect = image.fitRect(geometry.size)
+                    let fitRect = self.imageFrame(in: CGRect(origin: .zero, size: geometry.size)) ?? image.fitRect(geometry.size)
                     VideoSubtitleView.imageView(image)
-                        .offset(CGSize(width: fitRect.origin.x, height: fitRect.origin.y))
                         .frame(width: fitRect.size.width, height: fitRect.size.height)
+                        .position(x: fitRect.midX, y: fitRect.midY)
                 }
                 // 不能加scaledToFit。不然的话图片的缩放比率会有问题。
 //                .scaledToFit()
                 .padding()
-            } else if let text {
-                let textPosition = textPosition ?? SubtitleModel.textPosition
+                if defaultPlacement == .secondary {
+                    Spacer()
+                }
+            } else if let text = attributedText(at: time, activeWordAttributes: model.activeWordAttributes) {
+                let textPosition = textPosition ?? defaultTextPosition(for: defaultPlacement)
+                let style = model.resolvedStyle()
+                let backgroundColor = SubtitleModel.alpha(of: style.windowColor) > 0 ? style.windowColor : style.backgroundColor
                 if textPosition.verticalAlign == .bottom || textPosition.verticalAlign == .center {
                     Spacer()
                 }
                 Text(AttributedString(text))
-                    .font(Font(SubtitleModel.textFont))
                     .shadow(color: .black.opacity(0.9), radius: 1, x: 1, y: 1)
-                    .foregroundColor(SubtitleModel.textColor)
-                    .italic(SubtitleModel.textItalic)
-                    .background(SubtitleModel.textBackgroundColor)
+                    .background(SubtitleModel.swiftUIColor(backgroundColor))
                     .multilineTextAlignment(.center)
                     .alignmentGuide(textPosition.horizontalAlign) {
                         $0[.leading]
@@ -660,6 +672,14 @@ private extension SubtitlePart {
                 Text("")
             }
         }
+    }
+
+    private func defaultTextPosition(for placement: SubtitlePlacementRole) -> TextPosition {
+        var position = SubtitleModel.textPosition
+        if placement == .secondary, textPosition == nil {
+            position.verticalAlign = .top
+        }
+        return position
     }
 }
 
@@ -691,7 +711,7 @@ struct VideoSettingView: View {
                 } label: {
                     Label("Video Track", systemImage: "video.fill")
                 }
-                LabeledContent("Video Type", value: (videoTracks.first { $0.isEnabled }?.dynamicRange ?? .sdr).description)
+                LabeledContent("Video Type", value: videoTracks.first { $0.isEnabled }?.dynamicRangeDescription ?? DynamicRange.sdr.description)
             }
             TextField("Sutitle delay", value: $subtitleModel.subtitleDelay, format: .number)
             TextField("Title", text: $subtitleTitle)

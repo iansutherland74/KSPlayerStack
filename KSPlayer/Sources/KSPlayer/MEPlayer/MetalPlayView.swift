@@ -40,14 +40,7 @@ public final class MetalPlayView: UIView, @preconcurrency VideoOutput {
     private var fps = Float(60) {
         didSet {
             if fps != oldValue {
-                if KSOptions.preferredFrame {
-                    let preferredFramesPerSecond = ceil(fps)
-                    if #available(iOS 15.0, tvOS 15.0, macOS 14.0, *) {
-                        displayLink.preferredFrameRateRange = CAFrameRateRange(minimum: preferredFramesPerSecond, maximum: 2 * preferredFramesPerSecond, __preferred: preferredFramesPerSecond)
-                    } else {
-                        displayLink.preferredFramesPerSecond = Int(preferredFramesPerSecond) << 1
-                    }
-                }
+                updateDisplayLinkFrameRate()
                 options.updateVideo(refreshRate: fps, isDovi: isDovi, formatDescription: formatDescription)
             }
         }
@@ -70,6 +63,7 @@ public final class MetalPlayView: UIView, @preconcurrency VideoOutput {
 
     private let metalView = MetalView()
     private let videoUpscaler = VideoUpscaler()
+    private var loggedHighPerformanceMessages = Set<String>()
     public weak var displayLayerDelegate: DisplayLayerDelegate?
     public init(options: KSOptions) {
         self.options = options
@@ -188,16 +182,22 @@ extension MetalPlayView {
                 if let dar = options.customizeDar(sar: sourcePixelBuffer.aspectRatio, par: sourcePar) {
                     cvPixelBuffer.aspectRatio = CGSize(width: dar.width, height: dar.height * sourcePar.width / sourcePar.height)
                 }
-                if let upscaledPixelBuffer = videoUpscaler.upscale(pixelBuffer: cvPixelBuffer, time: cmtime, mode: options.videoUpscaling) {
+                if HighPerformanceVideoPlaybackPolicy.shouldApplyUpscaling(mode: options.videoUpscaling, sourceSize: sourcePar, fps: frame.fps),
+                   let upscaledPixelBuffer = videoUpscaler.upscale(pixelBuffer: cvPixelBuffer, time: cmtime, mode: options.videoUpscaling)
+                {
                     renderPixelBuffer = upscaledPixelBuffer
                     pixelBuffer = upscaledPixelBuffer
+                } else if options.videoUpscaling != .none {
+                    logHighPerformanceOnce("[video] Skip video upscaling for \(Int(sourcePar.width))x\(Int(sourcePar.height)) @ \(String(format: "%.2f", frame.fps))fps")
+                    videoUpscaler.reset()
                 }
             } else {
                 videoUpscaler.reset()
             }
             let par = renderPixelBuffer.size
             let sar = renderPixelBuffer.aspectRatio
-            if let pixelBuffer = renderPixelBuffer.cvPixelBuffer, options.isUseDisplayLayer() {
+            let dynamicRange = videoDynamicRange(pixelBuffer: renderPixelBuffer, isDovi: isDovi)
+            if let pixelBuffer = renderPixelBuffer.cvPixelBuffer, options.isUseDisplayLayer(dynamicRange: dynamicRange) {
                 if displayView.isHidden {
                     displayView.isHidden = false
                     metalView.isHidden = true
@@ -227,10 +227,26 @@ extension MetalPlayView {
                     metalView.metalLayer.edrMetadata = frame.edrMetadata
                 }
                 #endif
-                metalView.draw(pixelBuffer: renderPixelBuffer, display: options.display, size: size)
+                metalView.draw(pixelBuffer: renderPixelBuffer, display: options.display, size: size, colorAdjustment: options.videoColorAdjustment, dynamicRange: dynamicRange)
             }
             renderSource?.setVideo(time: cmtime, position: frame.position)
         }
+    }
+
+    private func videoDynamicRange(pixelBuffer: PixelBufferProtocol, isDovi: Bool) -> DynamicRange? {
+        if isDovi {
+            return .dolbyVision
+        }
+        if let dynamicRange = pixelBuffer.formatDescription?.dynamicRange {
+            return dynamicRange
+        }
+        if pixelBuffer.transferFunction == kCVImageBufferTransferFunction_ITU_R_2100_HLG {
+            return .hlg
+        }
+        if pixelBuffer.transferFunction == kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ || pixelBuffer.bitDepth == 10 {
+            return .hdr10
+        }
+        return .sdr
     }
 
     private func checkFormatDescription(pixelBuffer: PixelBufferProtocol) {
@@ -248,6 +264,24 @@ extension MetalPlayView {
     private func set(pixelBuffer: CVPixelBuffer, time: CMTime) {
         guard let formatDescription else { return }
         displayView.enqueue(imageBuffer: pixelBuffer, formatDescription: formatDescription, time: time)
+    }
+
+    private func updateDisplayLinkFrameRate() {
+        guard KSOptions.preferredFrame else {
+            return
+        }
+        let range = HighPerformanceVideoPlaybackPolicy.displayFrameRateRange(fps: fps)
+        if #available(iOS 15.0, tvOS 15.0, macOS 14.0, *) {
+            displayLink.preferredFrameRateRange = CAFrameRateRange(minimum: range.minimum, maximum: range.maximum, __preferred: range.preferred)
+        } else {
+            displayLink.preferredFramesPerSecond = Int(range.maximum)
+        }
+    }
+
+    private func logHighPerformanceOnce(_ message: String) {
+        if loggedHighPerformanceMessages.insert(message).inserted {
+            KSLog(message)
+        }
     }
 }
 
@@ -283,7 +317,7 @@ class MetalView: UIView {
         }
     }
 
-    func draw(pixelBuffer: PixelBufferProtocol, display: DisplayEnum, size: CGSize) {
+    func draw(pixelBuffer: PixelBufferProtocol, display: DisplayEnum, size: CGSize, colorAdjustment: VideoColorAdjustment, dynamicRange: DynamicRange?) {
         metalLayer.drawableSize = size
         metalLayer.pixelFormat = KSOptions.colorPixelFormat(bitDepth: pixelBuffer.bitDepth)
         let colorspace = pixelBuffer.colorspace
@@ -309,7 +343,7 @@ class MetalView: UIView {
             KSLog("[video] CAMetalLayer not readyForMoreMediaData")
             return
         }
-        render.draw(pixelBuffer: pixelBuffer, display: display, drawable: drawable)
+        render.draw(pixelBuffer: pixelBuffer, display: display, drawable: drawable, colorAdjustment: colorAdjustment, dynamicRange: dynamicRange)
     }
 }
 

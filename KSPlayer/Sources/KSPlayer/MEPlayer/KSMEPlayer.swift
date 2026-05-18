@@ -168,7 +168,7 @@ private extension KSMEPlayer {
     @objc private func spatialCapabilityChange(notification _: Notification) {
         KSLog("[audio] spatialCapabilityChange")
         for track in tracks(mediaType: .audio) {
-            (track as? FFmpegAssetTrack)?.audioDescriptor?.updateAudioFormat()
+            (track as? FFmpegAssetTrack)?.audioDescriptor?.updateAudioFormat(options: options)
         }
     }
 
@@ -183,7 +183,7 @@ private extension KSMEPlayer {
 //            return
 //        }
         for track in tracks(mediaType: .audio) {
-            (track as? FFmpegAssetTrack)?.audioDescriptor?.updateAudioFormat()
+            (track as? FFmpegAssetTrack)?.audioDescriptor?.updateAudioFormat(options: options)
         }
         audioOutput.flush()
     }
@@ -204,6 +204,7 @@ extension KSMEPlayer: MEPlayerDelegate {
         runOnMainThread { [weak self] in
             guard let self else { return }
             if let audioDescriptor {
+                audioDescriptor.updateAudioFormat(options: options)
                 KSLog("[audio] audio type: \(audioOutput) prepare audioFormat )")
                 audioOutput.prepare(audioFormat: audioDescriptor.audioFormat)
             }
@@ -291,6 +292,13 @@ extension KSMEPlayer: MEPlayerDelegate {
 extension KSMEPlayer: @preconcurrency MediaPlayerProtocol {
     public var chapters: [Chapter] {
         playerItem.chapters
+    }
+
+    public var offlineSubtitleGeneratorInfo: (any SubtitleInfo)? {
+        guard options.isOfflineSubtitleGenerationEnabled else {
+            return nil
+        }
+        return options.offlineSubtitleGenerator
     }
 
     public var subtitleDataSouce: SubtitleDataSouce? { self }

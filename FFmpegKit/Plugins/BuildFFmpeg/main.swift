@@ -582,6 +582,11 @@ class BaseBuild {
         for framework in frameworks {
             var arguments = ["-create-xcframework"]
             let XCFrameworkFile = URL.currentDirectory + ["../Sources", framework + ".xcframework"]
+            let preservedSlicesURL = URL.currentDirectory + ["preserved-xcframework-slices", framework]
+            try? FileManager.default.removeItem(at: preservedSlicesURL)
+            defer {
+                try? FileManager.default.removeItem(at: preservedSlicesURL)
+            }
             for platform in selectedPlatforms {
                 if let frameworkPath = try createFramework(framework: framework, platform: platform) {
                     appendXCFrameworkInput(frameworkPath: frameworkPath, framework: framework, to: &arguments)
@@ -597,7 +602,13 @@ class BaseBuild {
                     if let sdk = supportedPlatform(frameworkPath: frameworkPath), selectedSDKs.contains(sdk) {
                         continue
                     }
-                    appendXCFrameworkInput(frameworkPath: frameworkPath, framework: framework, to: &arguments)
+                    let preservedSliceURL = preservedSlicesURL + sliceName
+                    try FileManager.default.createDirectory(at: preservedSlicesURL, withIntermediateDirectories: true)
+                    try FileManager.default.copyItem(at: sliceURL, to: preservedSliceURL)
+                    guard let preservedFrameworkPath = existingFrameworkPath(framework: framework, sliceURL: preservedSliceURL) else {
+                        continue
+                    }
+                    appendXCFrameworkInput(frameworkPath: preservedFrameworkPath, framework: framework, to: &arguments)
                 }
             }
             arguments.append("-output")

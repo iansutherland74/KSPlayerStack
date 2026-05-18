@@ -92,7 +92,7 @@ class MetalRender {
     }
 
     @MainActor
-    func draw(pixelBuffer: PixelBufferProtocol, display: DisplayEnum = .plane, drawable: CAMetalDrawable) {
+    func draw(pixelBuffer: PixelBufferProtocol, display: DisplayEnum = .plane, drawable: CAMetalDrawable, colorAdjustment: VideoColorAdjustment = .neutral, dynamicRange: DynamicRange? = nil) {
         let inputTextures = pixelBuffer.textures()
         renderPassDescriptor.colorAttachments[0].texture = drawable.texture
         guard !inputTextures.isEmpty, let commandBuffer = commandQueue?.makeCommandBuffer(), let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor) else {
@@ -107,6 +107,7 @@ class MetalRender {
             encoder.setFragmentTexture(texture, index: index)
         }
         setFragmentBuffer(pixelBuffer: pixelBuffer, encoder: encoder)
+        setColorAdjustment(colorAdjustment, dynamicRange: dynamicRange, encoder: encoder)
         display.set(encoder: encoder)
         encoder.popDebugGroup()
         encoder.endEncoding()
@@ -135,6 +136,17 @@ class MetalRender {
             let leftShift = pixelBuffer.leftShift == 0 ? leftShiftMatrixBuffer : leftShiftSixMatrixBuffer
             encoder.setFragmentBuffer(leftShift, offset: 0, index: 2)
         }
+    }
+
+    private func setColorAdjustment(_ colorAdjustment: VideoColorAdjustment, dynamicRange: DynamicRange?, encoder: MTLRenderCommandEncoder) {
+        let shouldApply = colorAdjustment.shouldApply(dynamicRange: dynamicRange)
+        var uniforms = SIMD4<Float>(
+            colorAdjustment.saturation,
+            colorAdjustment.brightness,
+            colorAdjustment.contrast,
+            shouldApply ? 1 : 0
+        )
+        encoder.setFragmentBytes(&uniforms, length: MemoryLayout<SIMD4<Float>>.stride, index: 3)
     }
 
     static func makePipelineState(fragmentFunction: String, isSphere: Bool = false, bitDepth: Int32 = 8) -> MTLRenderPipelineState {

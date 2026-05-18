@@ -558,15 +558,15 @@ extension KSPlayerLayer: AVPictureInPictureControllerDelegate {
 // MARK: - private functions
 
 extension KSPlayerLayer {
-    private static func preferredPlayerType(for url: URL, options: KSOptions) -> MediaPlayerProtocol.Type {
-        if options.display != .plane || url.isBluRayInputCandidate {
+    static func preferredPlayerType(for url: URL, options: KSOptions) -> MediaPlayerProtocol.Type {
+        if options.display != .plane || url.isBluRayInputCandidate || url.isFFmpegOnlyInputScheme || !options.videoColorAdjustment.isNeutral {
             return KSMEPlayer.self
         }
         return KSOptions.firstPlayerType
     }
 
     private func preferredPlayerType(for url: URL, respectsWirelessRoute: Bool) -> MediaPlayerProtocol.Type {
-        if respectsWirelessRoute, isWirelessRouteActive, !url.isBluRayInputCandidate {
+        if respectsWirelessRoute, isWirelessRouteActive, !url.isBluRayInputCandidate, !url.isFFmpegOnlyInputScheme {
             // airplay的话，默认使用KSAVPlayer
             return KSAVPlayer.self
         }

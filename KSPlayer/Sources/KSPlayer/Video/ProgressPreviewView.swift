@@ -60,7 +60,11 @@ final class ProgressPreviewView: UIView {
     }
 
     private func setup() {
+        #if canImport(UIKit)
         backgroundColor = UIColor.black.withAlphaComponent(0.78)
+        #else
+        backingLayer?.backgroundColor = UIColor.black.withAlphaComponent(0.78).cgColor
+        #endif
         cornerRadius = 8
         clipsToBounds = true
         isHidden = true

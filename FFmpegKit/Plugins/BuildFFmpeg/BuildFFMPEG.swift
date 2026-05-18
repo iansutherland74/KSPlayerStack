@@ -109,13 +109,17 @@ class BuildFFMPEG: BaseBuild {
             try FileManager.default.copyItem(at: buildURL + "src/libavdevice/avdevice.h", to: fftoolsFile + "include/libavdevice/avdevice.h")
             try FileManager.default.copyItem(at: buildURL + "src/libavdevice/version_major.h", to: fftoolsFile + "include/libavdevice/version_major.h")
             try FileManager.default.copyItem(at: buildURL + "src/libavdevice/version.h", to: fftoolsFile + "include/libavdevice/version.h")
-            if !FileManager.default.fileExists(atPath: (fftoolsFile + "include/libpostproc").path) {
-                try FileManager.default.createDirectory(at: fftoolsFile + "include/libpostproc", withIntermediateDirectories: true)
+            let libpostprocSource = buildURL + "src/libpostproc"
+            if FileManager.default.fileExists(atPath: libpostprocSource.path) {
+                let libpostprocHeaders = fftoolsFile + "include/libpostproc"
+                try FileManager.default.createDirectory(at: libpostprocHeaders, withIntermediateDirectories: true)
+                for header in ["postprocess.h", "version_major.h", "version.h"] {
+                    let source = libpostprocSource + header
+                    if FileManager.default.fileExists(atPath: source.path) {
+                        try FileManager.default.copyItem(at: source, to: libpostprocHeaders + header)
+                    }
+                }
             }
-            try FileManager.default.copyItem(at: buildURL + "src/libpostproc/postprocess_internal.h", to: fftoolsFile + "include/libpostproc/postprocess_internal.h")
-            try FileManager.default.copyItem(at: buildURL + "src/libpostproc/postprocess.h", to: fftoolsFile + "include/libpostproc/postprocess.h")
-            try FileManager.default.copyItem(at: buildURL + "src/libpostproc/version_major.h", to: fftoolsFile + "include/libpostproc/version_major.h")
-            try FileManager.default.copyItem(at: buildURL + "src/libpostproc/version.h", to: fftoolsFile + "include/libpostproc/version.h")
             let ffplayFile = URL.currentDirectory + "../Sources/ffplay"
             try? FileManager.default.removeItem(at: ffplayFile)
             try FileManager.default.createDirectory(at: ffplayFile, withIntermediateDirectories: true)
@@ -235,9 +239,18 @@ class BuildFFMPEG: BaseBuild {
         //        if platform == .isimulator || platform == .tvsimulator {
         //            arguments.append("--assert-level=1")
         //        }
-        for library in Library.allCases {
+        var ffmpegDependentLibraries = Library.allCases.filter { library in
             let path = URL.currentDirectory + [library.rawValue, platform.rawValue, "thin", arch.rawValue]
-            if FileManager.default.fileExists(atPath: path.path), library.isFFmpegDependentLibrary {
+            return FileManager.default.fileExists(atPath: path.path) && library.isFFmpegDependentLibrary
+        }
+        if ffmpegDependentLibraries.contains(.libshaderc), ffmpegDependentLibraries.contains(.libglslang) {
+            // FFmpeg supports one runtime GLSL-to-SPIR-V compiler backend. libplacebo is built
+            // against shaderc in this build, so prefer shaderc while preserving Vulkan filters.
+            ffmpegDependentLibraries.removeAll { $0 == .libglslang }
+        }
+        for library in ffmpegDependentLibraries {
+            let path = URL.currentDirectory + [library.rawValue, platform.rawValue, "thin", arch.rawValue]
+            if FileManager.default.fileExists(atPath: path.path) {
                 arguments.append("--enable-\(library.rawValue)")
                 if library == .libsrt || library == .libsmbclient {
                     arguments.append("--enable-protocol=\(library.rawValue)")

@@ -224,8 +224,11 @@ class AudioSwresample: FrameChange {
     private var swrContext: SwrContext?
     private var descriptor: AudioDescriptor
     private var outChannel: AVChannelLayout
-    init(audioDescriptor: AudioDescriptor) {
+    private let options: KSOptions
+    init(audioDescriptor: AudioDescriptor, options: KSOptions) {
+        self.options = options
         descriptor = audioDescriptor
+        descriptor.updateAudioFormat(options: options)
         outChannel = audioDescriptor.outChannel
         _ = setup(descriptor: descriptor)
     }
@@ -244,7 +247,7 @@ class AudioSwresample: FrameChange {
 
     func change(avframe: UnsafeMutablePointer<AVFrame>) throws -> MEFrame {
         if !(descriptor == avframe.pointee) || outChannel != descriptor.outChannel {
-            let newDescriptor = AudioDescriptor(frame: avframe.pointee)
+            let newDescriptor = AudioDescriptor(frame: avframe.pointee, options: options)
             if setup(descriptor: newDescriptor) {
                 descriptor = newDescriptor
             } else {
@@ -280,15 +283,15 @@ public class AudioDescriptor: Equatable {
         self.init(sampleFormat: AV_SAMPLE_FMT_FLT, sampleRate: 48000, channel: AVChannelLayout.defaultValue)
     }
 
-    convenience init(codecpar: AVCodecParameters) {
-        self.init(sampleFormat: AVSampleFormat(rawValue: codecpar.format), sampleRate: codecpar.sample_rate, channel: codecpar.ch_layout)
+    convenience init(codecpar: AVCodecParameters, options: KSOptions? = nil) {
+        self.init(sampleFormat: AVSampleFormat(rawValue: codecpar.format), sampleRate: codecpar.sample_rate, channel: codecpar.ch_layout, options: options)
     }
 
-    convenience init(frame: AVFrame) {
-        self.init(sampleFormat: AVSampleFormat(rawValue: frame.format), sampleRate: frame.sample_rate, channel: frame.ch_layout)
+    convenience init(frame: AVFrame, options: KSOptions? = nil) {
+        self.init(sampleFormat: AVSampleFormat(rawValue: frame.format), sampleRate: frame.sample_rate, channel: frame.ch_layout, options: options)
     }
 
-    init(sampleFormat: AVSampleFormat, sampleRate: Int32, channel: AVChannelLayout) {
+    init(sampleFormat: AVSampleFormat, sampleRate: Int32, channel: AVChannelLayout, options: KSOptions? = nil) {
         self.channel = channel
         outChannel = channel
         if sampleRate <= 0 {
@@ -297,11 +300,7 @@ public class AudioDescriptor: Equatable {
             self.sampleRate = sampleRate
         }
         self.sampleFormat = sampleFormat
-        #if os(macOS)
-        let channelCount = AVAudioChannelCount(2)
-        #else
-        let channelCount = KSOptions.outputNumberOfChannels(channelCount: AVAudioChannelCount(outChannel.nb_channels))
-        #endif
+        let channelCount = KSOptions.outputNumberOfChannels(channelCount: AVAudioChannelCount(outChannel.nb_channels), options: options)
         audioFormat = AudioDescriptor.audioFormat(sampleFormat: sampleFormat, sampleRate: self.sampleRate, outChannel: &outChannel, channelCount: channelCount)
     }
 
@@ -373,12 +372,9 @@ public class AudioDescriptor: Equatable {
         //        AVAudioChannelLayout(layout: outChannel.layoutTag.channelLayout)
     }
 
-    public func updateAudioFormat() {
-        #if os(macOS)
-        let channelCount = AVAudioChannelCount(2)
-        #else
-        let channelCount = KSOptions.outputNumberOfChannels(channelCount: AVAudioChannelCount(channel.nb_channels))
-        #endif
+    public func updateAudioFormat(options: KSOptions? = nil) {
+        outChannel = channel
+        let channelCount = KSOptions.outputNumberOfChannels(channelCount: AVAudioChannelCount(channel.nb_channels), options: options)
         audioFormat = AudioDescriptor.audioFormat(sampleFormat: sampleFormat, sampleRate: sampleRate, outChannel: &outChannel, channelCount: channelCount)
     }
 }

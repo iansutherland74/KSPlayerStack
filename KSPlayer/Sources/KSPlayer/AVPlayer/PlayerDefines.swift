@@ -106,6 +106,10 @@ extension DynamicRange: CustomStringConvertible {
 }
 
 extension DynamicRange {
+    var isHDR: Bool {
+        self != .sdr
+    }
+
     var colorPrimaries: CFString {
         switch self {
         case .sdr:
@@ -160,6 +164,72 @@ public struct VideoAdaptationState {
     public internal(set) var currentPlaybackTime: TimeInterval = 0
     public internal(set) var isPlayable: Bool = false
     public internal(set) var loadedCount: Int = 0
+}
+
+public struct KSAdaptiveBitrateSwitchingPolicy: Equatable {
+    public enum Decision: Equatable {
+        case stay
+        case switchToLower
+        case switchToHigher
+    }
+
+    /// Minimum seconds between automatic or manual definition changes.
+    public var minimumSwitchInterval: TimeInterval
+    /// Buffer seconds that allow an upgrade after stable playback.
+    public var upgradeBufferThreshold: TimeInterval
+    /// Buffer seconds that trigger a downgrade before playback stalls.
+    public var downgradeBufferThreshold: TimeInterval
+    /// Consecutive rebuffer recoveries that trigger a downgrade.
+    public var downgradeRebufferCount: Int
+    /// Seconds of healthy buffer required before upgrading.
+    public var upgradeObservationDuration: TimeInterval
+    /// Live/DVR streams default to avoiding automatic upgrades to preserve latency.
+    public var allowsLiveUpgrades: Bool
+
+    public init(minimumSwitchInterval: TimeInterval = 20,
+                upgradeBufferThreshold: TimeInterval = 12,
+                downgradeBufferThreshold: TimeInterval = 2,
+                downgradeRebufferCount: Int = 1,
+                upgradeObservationDuration: TimeInterval = 30,
+                allowsLiveUpgrades: Bool = false)
+    {
+        self.minimumSwitchInterval = minimumSwitchInterval
+        self.upgradeBufferThreshold = upgradeBufferThreshold
+        self.downgradeBufferThreshold = downgradeBufferThreshold
+        self.downgradeRebufferCount = downgradeRebufferCount
+        self.upgradeObservationDuration = upgradeObservationDuration
+        self.allowsLiveUpgrades = allowsLiveUpgrades
+    }
+
+    public func decision(definitionRank: Int, definitionCount: Int, bufferAhead: TimeInterval?, rebufferCount: Int, stableBufferDuration: TimeInterval,
+                         secondsSinceLastSwitch: TimeInterval?, isLive: Bool, isAdaptiveStreamingManifest: Bool) -> Decision
+    {
+        guard definitionCount > 1, !isAdaptiveStreamingManifest else {
+            return .stay
+        }
+        if let secondsSinceLastSwitch, secondsSinceLastSwitch < minimumSwitchInterval {
+            return .stay
+        }
+
+        let normalizedRebufferCount = max(downgradeRebufferCount, 1)
+        if definitionRank > 0, rebufferCount >= normalizedRebufferCount {
+            return .switchToLower
+        }
+
+        if let bufferAhead, bufferAhead.isFinite {
+            if definitionRank > 0, bufferAhead <= downgradeBufferThreshold {
+                return .switchToLower
+            }
+            if definitionRank < definitionCount - 1,
+               (!isLive || allowsLiveUpgrades),
+               bufferAhead >= upgradeBufferThreshold,
+               stableBufferDuration >= upgradeObservationDuration
+            {
+                return .switchToHigher
+            }
+        }
+        return .stay
+    }
 }
 
 public enum ClockProcessType {

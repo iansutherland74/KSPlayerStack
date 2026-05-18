@@ -26,6 +26,7 @@ let package = Package(
                 .product(name: "Libavutil", package: "FFmpegKit"),
                 .product(name: "Libswresample", package: "FFmpegKit"),
                 .product(name: "Libswscale", package: "FFmpegKit"),
+                .product(name: "libass", package: "FFmpegKit", condition: .when(platforms: [.visionOS])),
                 "DisplayCriteria",
             ],
             resources: [.process("Metal/Shaders.metal")],

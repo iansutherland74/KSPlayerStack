@@ -16,10 +16,10 @@ public class EmptySubtitleInfo: SubtitleInfo {
     }
 }
 
-public class URLSubtitleInfo: KSSubtitle, SubtitleInfo {
+public class URLSubtitleInfo: KSSubtitle, SubtitleInfo, SubtitleKindProviding {
     public var isEnabled: Bool = false {
         didSet {
-            if isEnabled, parts.isEmpty {
+            if isEnabled, parts.isEmpty, !downloadURL.isImageSubtitle {
                 Task {
                     try? await parse(url: downloadURL, userAgent: userAgent)
                 }
@@ -28,6 +28,8 @@ public class URLSubtitleInfo: KSSubtitle, SubtitleInfo {
     }
 
     public private(set) var downloadURL: URL
+    public var isImageSubtitle: Bool { downloadURL.isImageSubtitle }
+    public var subtitleKind: SubtitleKind { downloadURL.subtitleKind }
     public var delay: TimeInterval = 0
     public private(set) var name: String
     public let subtitleID: String
@@ -170,7 +172,7 @@ public class ShooterSubtitleDataSouce: FileURLSubtitleDataSouce {
             return
         }
         guard fileURL.isFileURL, let searchApi = URL(string: "https://www.shooter.cn/api/subapi.php")?
-            .add(queryItems: ["format": "json", "pathinfo": fileURL.path, "filehash": fileURL.shooterFilehash])
+            .add(queryItems: ["format": "json", "pathinfo": fileURL.lastPathComponent, "filehash": fileURL.shooterFilehash])
         else {
             return
         }
@@ -289,7 +291,7 @@ public class OpenSubtitleDataSouce: SearchSubtitleDataSouce {
             queryItems["query"] = query
         }
         if imdbID != 0 {
-            queryItems["imbd_id"] = String(imdbID)
+            queryItems["imdb_id"] = String(imdbID)
         }
         if tmdbID != 0 {
             queryItems["tmdb_id"] = String(tmdbID)
@@ -336,14 +338,8 @@ public class OpenSubtitleDataSouce: SearchSubtitleDataSouce {
     }
 
     func loadDetails(fileID: Int) async throws -> URLSubtitleInfo? {
-        guard let detailApi = URL(string: "https://api.opensubtitles.com/api/v1/download")?.add(queryItems: ["file_id": String(fileID)]) else {
+        guard let request = OpenSubtitlesOnlineSubtitleProvider.makeDownloadRequest(fileID: fileID, apiKey: apiKey, token: token) else {
             return nil
-        }
-        var request = URLRequest(url: detailApi)
-        request.httpMethod = "POST"
-        request.addValue(apiKey, forHTTPHeaderField: "Api-Key")
-        if let token {
-            request.addValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         }
         let (data, _) = try await URLSession.shared.data(for: request)
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {

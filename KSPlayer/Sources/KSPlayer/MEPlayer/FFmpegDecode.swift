@@ -30,7 +30,7 @@ class FFmpegDecode: DecodeProtocol {
         if assetTrack.mediaType == .video {
             frameChange = VideoSwresample(fps: assetTrack.nominalFrameRate, isDovi: assetTrack.dovi != nil)
         } else {
-            frameChange = AudioSwresample(audioDescriptor: assetTrack.audioDescriptor!)
+            frameChange = AudioSwresample(audioDescriptor: assetTrack.audioDescriptor!, options: options)
         }
     }
 
@@ -45,9 +45,7 @@ class FFmpegDecode: DecodeProtocol {
                 codecpar.codec_type = AVMEDIA_TYPE_SUBTITLE
                 codecpar.codec_id = AV_CODEC_ID_EIA_608
                 if let subtitleAssetTrack = FFmpegAssetTrack(codecpar: codecpar) {
-                    subtitleAssetTrack.name = "Closed Captions"
-                    subtitleAssetTrack.startTime = packet.assetTrack.startTime
-                    subtitleAssetTrack.timebase = packet.assetTrack.timebase
+                    subtitleAssetTrack.configureAsClosedCaptionsTrack(source: packet.assetTrack)
                     let subtitle = SyncPlayerItemTrack<SubtitleFrame>(mediaType: .subtitle, frameCapacity: 255, options: options)
                     subtitleAssetTrack.subtitle = subtitle
                     packet.assetTrack.closedCaptionsTrack = subtitleAssetTrack
@@ -58,9 +56,17 @@ class FFmpegDecode: DecodeProtocol {
         while true {
             let result = avcodec_receive_frame(codecContext, coreFrame)
             if result == 0, let inputFrame = coreFrame {
+                let frameInterlacingType: VideoInterlacingType?
+                if packet.assetTrack.mediaType == .video {
+                    frameInterlacingType = VideoDeinterlacePolicy.detectedInterlacingType(frameFlags: inputFrame.pointee.flags)
+                    options.videoInterlacingType = frameInterlacingType
+                } else {
+                    frameInterlacingType = nil
+                }
                 var displayData: MasteringDisplayMetadata?
                 var contentData: ContentLightMetadata?
                 var ambientViewingEnvironment: AmbientViewingEnvironment?
+                var hasHDR10PlusMetadata = false
                 // filter之后，side_data信息会丢失，所以放在这里
                 if inputFrame.pointee.nb_side_data > 0 {
                     for i in 0 ..< inputFrame.pointee.nb_side_data {
@@ -100,7 +106,8 @@ class FFmpegDecode: DecodeProtocol {
                                 let color = av_dovi_get_color(data)
 //                                frame.corePixelBuffer?.transferFunction = kCVImageBufferTransferFunction_ITU_R_2020
                             } else if sideData.type == AV_FRAME_DATA_DYNAMIC_HDR_PLUS { // AVDynamicHDRPlus
-                                let data = sideData.data.withMemoryRebound(to: AVDynamicHDRPlus.self, capacity: 1) { $0 }.pointee
+                                hasHDR10PlusMetadata = true
+                                packet.assetTrack.markHDR10PlusMetadataDetected()
                             } else if sideData.type == AV_FRAME_DATA_DYNAMIC_HDR_VIVID { // AVDynamicHDRVivid
                                 let data = sideData.data.withMemoryRebound(to: AVDynamicHDRVivid.self, capacity: 1) { $0 }.pointee
                             } else if sideData.type == AV_FRAME_DATA_MASTERING_DISPLAY_METADATA {
@@ -110,7 +117,7 @@ class FFmpegDecode: DecodeProtocol {
                                     display_primaries_r_y: UInt16(data.display_primaries.0.1.num).bigEndian,
                                     display_primaries_g_x: UInt16(data.display_primaries.1.0.num).bigEndian,
                                     display_primaries_g_y: UInt16(data.display_primaries.1.1.num).bigEndian,
-                                    display_primaries_b_x: UInt16(data.display_primaries.2.1.num).bigEndian,
+                                    display_primaries_b_x: UInt16(data.display_primaries.2.0.num).bigEndian,
                                     display_primaries_b_y: UInt16(data.display_primaries.2.1.num).bigEndian,
                                     white_point_x: UInt16(data.white_point.0.num).bigEndian,
                                     white_point_y: UInt16(data.white_point.1.num).bigEndian,
@@ -138,11 +145,17 @@ class FFmpegDecode: DecodeProtocol {
                     do {
                         var frame = try frameChange.change(avframe: avframe)
                         if let videoFrame = frame as? VideoVTBFrame, let pixelBuffer = videoFrame.corePixelBuffer {
+                            videoFrame.interlacingType = frameInterlacingType
                             if let pixelBuffer = pixelBuffer as? PixelBuffer {
                                 pixelBuffer.formatDescription = packet.assetTrack.formatDescription
                             }
-                            if displayData != nil || contentData != nil || ambientViewingEnvironment != nil {
-                                videoFrame.edrMetaData = EDRMetaData(displayData: displayData, contentData: contentData, ambientViewingEnvironment: ambientViewingEnvironment)
+                            if displayData != nil || contentData != nil || ambientViewingEnvironment != nil || hasHDR10PlusMetadata {
+                                videoFrame.edrMetaData = EDRMetaData(
+                                    displayData: displayData,
+                                    contentData: contentData,
+                                    ambientViewingEnvironment: ambientViewingEnvironment,
+                                    hasHDR10PlusMetadata: hasHDR10PlusMetadata
+                                )
                             }
                         }
                         frame.timebase = filter.timebase

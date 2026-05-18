@@ -3,6 +3,7 @@ import FFmpegKit
 import Libavcodec
 import Libavfilter
 import Libavformat
+import Libavutil
 
 func toDictionary(_ native: OpaquePointer?) -> [String: String] {
     var dict = [String: String]()
@@ -27,6 +28,13 @@ extension UnsafeMutablePointer where Pointee == AVCodecContext {
                 if fmt[i] == AV_PIX_FMT_VIDEOTOOLBOX {
                     let deviceCtx = av_hwdevice_ctx_alloc(AV_HWDEVICE_TYPE_VIDEOTOOLBOX)
                     if deviceCtx == nil {
+                        KSLog(level: .debug, "[video] FFmpeg VideoToolbox device allocation failed")
+                        break
+                    }
+                    if av_hwdevice_ctx_init(deviceCtx) < 0 {
+                        var unrefDeviceCtx = deviceCtx
+                        av_buffer_unref(&unrefDeviceCtx)
+                        KSLog(level: .debug, "[video] FFmpeg VideoToolbox device initialization failed")
                         break
                     }
                     // 只要有hw_device_ctx就可以了。不需要hw_frames_ctx
@@ -45,6 +53,7 @@ extension UnsafeMutablePointer where Pointee == AVCodecContext {
 //                        break
 //                    }
 //                    ctx.pointee.hw_frames_ctx = framesCtx
+                    KSLog(level: .debug, "[video] FFmpeg selected VideoToolbox hardware pixel format")
                     return fmt[i]
                 }
                 i += 1
@@ -323,6 +332,39 @@ extension AVPixelFormat {
     // swiftlint:enable cyclomatic_complexity
 }
 
+extension AVCodecParameters {
+    var mediaSubType: CMFormatDescription.MediaSubType {
+        switch codec_id {
+        case AV_CODEC_ID_PRORES:
+            switch profile {
+            case AV_PROFILE_PRORES_PROXY:
+                return CMFormatDescription.MediaSubType(rawValue: kCMVideoCodecType_AppleProRes422Proxy)
+            case AV_PROFILE_PRORES_LT:
+                return CMFormatDescription.MediaSubType(rawValue: kCMVideoCodecType_AppleProRes422LT)
+            case AV_PROFILE_PRORES_STANDARD:
+                return CMFormatDescription.MediaSubType(rawValue: kCMVideoCodecType_AppleProRes422)
+            case AV_PROFILE_PRORES_HQ:
+                return CMFormatDescription.MediaSubType(rawValue: kCMVideoCodecType_AppleProRes422HQ)
+            case AV_PROFILE_PRORES_4444:
+                return CMFormatDescription.MediaSubType(rawValue: kCMVideoCodecType_AppleProRes4444)
+            case AV_PROFILE_PRORES_XQ:
+                return CMFormatDescription.MediaSubType(rawValue: kCMVideoCodecType_AppleProRes4444XQ)
+            default:
+                return CMFormatDescription.MediaSubType(rawValue: kCMVideoCodecType_AppleProRes422)
+            }
+        case AV_CODEC_ID_PRORES_RAW:
+            switch profile {
+            case AV_PROFILE_PRORES_RAW_HQ:
+                return CMFormatDescription.MediaSubType(rawValue: kCMVideoCodecType_AppleProResRAWHQ)
+            default:
+                return CMFormatDescription.MediaSubType(rawValue: kCMVideoCodecType_AppleProResRAW)
+            }
+        default:
+            return codec_id.mediaSubType
+        }
+    }
+}
+
 extension AVCodecID {
     var mediaSubType: CMFormatDescription.MediaSubType {
         switch self {
@@ -332,6 +374,8 @@ extension AVCodecID {
             return .h264
         case AV_CODEC_ID_HEVC:
             return .hevc
+        case AV_CODEC_ID_AV1:
+            return CMFormatDescription.MediaSubType(rawValue: "av01".fourCharCode)
         case AV_CODEC_ID_MPEG1VIDEO:
             return .mpeg1Video
         case AV_CODEC_ID_MPEG2VIDEO:

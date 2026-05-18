@@ -19,14 +19,44 @@ class SubtitleDecode: DecodeProtocol {
     private var subtitle = AVSubtitle()
     private var startTime = TimeInterval(0)
     private let assParse = AssParse()
+    #if canImport(libass)
+    private var libassRenderer: LibassSubtitleRenderer?
+    #endif
     required init(assetTrack: FFmpegAssetTrack, options: KSOptions) {
         startTime = assetTrack.startTime.seconds
         do {
             codecContext = try assetTrack.createContext(options: options)
-            if let pointer = codecContext?.pointee.subtitle_header {
-                let subtitleHeader = String(cString: pointer)
+            let subtitleHeader: String?
+            let subtitleHeaderData: Data?
+            if let context = codecContext?.pointee,
+               context.subtitle_header_size > 0,
+               let pointer = context.subtitle_header
+            {
+                subtitleHeaderData = Data(bytes: pointer, count: Int(context.subtitle_header_size))
+                subtitleHeader = String(data: subtitleHeaderData ?? Data(), encoding: .utf8) ?? String(cString: pointer)
+            } else {
+                subtitleHeader = nil
+                subtitleHeaderData = nil
+            }
+            if let subtitleHeader {
                 _ = assParse.canParse(scanner: Scanner(string: subtitleHeader))
             }
+            #if canImport(libass)
+            if let context = codecContext?.pointee,
+               AssImageSubtitleRenderPolicy.canRender(codecID: context.codec_id)
+            {
+                let canvasSize = AssImageSubtitleRenderPolicy.canvasSize(
+                    codecWidth: context.width,
+                    codecHeight: context.height,
+                    subtitleHeader: subtitleHeader
+                )
+                libassRenderer = LibassSubtitleRenderer(
+                    subtitleHeader: subtitleHeaderData,
+                    canvasSize: canvasSize,
+                    fontDirectoryURL: assetTrack.embeddedFontDirectoryURL
+                )
+            }
+            #endif
         } catch {
             KSLog(error as CustomStringConvertible)
         }
@@ -55,7 +85,7 @@ class SubtitleDecode: DecodeProtocol {
         if duration == 0, packet.duration != 0 {
             duration = packet.assetTrack.timebase.cmtime(for: packet.duration).seconds
         }
-        var parts = text(subtitle: subtitle)
+        var parts = imageParts(from: packet, start: start, duration: duration) ?? text(subtitle: subtitle)
         /// 不用preSubtitleFrame来进行更新end。而是插入一个空的字幕来更新字幕。
         /// 因为字幕有可能不按顺序解码。这样就会导致end比start小，然后这个字幕就不会被清空了。
         if parts.isEmpty {
@@ -75,7 +105,11 @@ class SubtitleDecode: DecodeProtocol {
         avsubtitle_free(&subtitle)
     }
 
-    func doFlushCodec() {}
+    func doFlushCodec() {
+        #if canImport(libass)
+        libassRenderer?.flush()
+        #endif
+    }
 
     func shutdown() {
         scale.shutdown()
@@ -90,6 +124,12 @@ class SubtitleDecode: DecodeProtocol {
         var images = [(CGRect, CGImage)]()
         var origin: CGPoint = .zero
         var attributedString: NSMutableAttributedString?
+        let canvasSize: CGSize?
+        if let codecContext, codecContext.pointee.width > 0, codecContext.pointee.height > 0 {
+            canvasSize = CGSize(width: Int(codecContext.pointee.width), height: Int(codecContext.pointee.height))
+        } else {
+            canvasSize = nil
+        }
         for i in 0 ..< Int(subtitle.num_rects) {
             guard let rect = subtitle.rects[i]?.pointee else {
                 continue
@@ -125,11 +165,34 @@ class SubtitleDecode: DecodeProtocol {
             }
             part.image = image
             part.origin = origin
+            if let image {
+                part.imageRect = CGRect(origin: origin, size: image.size)
+            }
+            part.imageCanvasSize = canvasSize
             parts.append(part)
         }
         if let attributedString {
             parts.append(SubtitlePart(0, 0, attributedString: attributedString))
         }
         return parts
+    }
+
+    private func imageParts(from packet: Packet, start: TimeInterval, duration: TimeInterval) -> [SubtitlePart]? {
+        #if canImport(libass)
+        guard let libassRenderer,
+              let corePacket = packet.corePacket?.pointee,
+              let packetData = corePacket.data,
+              corePacket.size > 0
+        else {
+            return nil
+        }
+        let data = Data(bytes: packetData, count: Int(corePacket.size))
+        guard let part = libassRenderer.render(packetData: data, start: start, duration: duration) else {
+            return nil
+        }
+        return [part]
+        #else
+        return nil
+        #endif
     }
 }

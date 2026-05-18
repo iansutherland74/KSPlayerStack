@@ -40,19 +40,22 @@ enum KSVideoPlayerViewBuilder {
 
     @MainActor
     static func subtitleButton(config: KSVideoPlayer.Coordinator) -> some View {
-        MenuView(selection: Binding {
-            config.subtitleModel.selectedSubtitleInfo?.subtitleID
-        } set: { value in
-            let info = config.subtitleModel.subtitleInfos.first { $0.subtitleID == value }
-            config.subtitleModel.selectedSubtitleInfo = info
-            if let info = info as? MediaPlayerTrack {
-                // 因为图片字幕想要实时的显示，那就需要seek。所以需要走select track
-                config.playerLayer?.player.select(track: info)
+        Menu {
+            Picker(selection: subtitleSelectionBinding(config: config, isSecondary: false)) {
+                Text("Off").tag(nil as String?)
+                ForEach(config.subtitleModel.subtitleInfos, id: \.subtitleID) { track in
+                    Text(subtitleTitle(for: track)).tag(track.subtitleID as String?)
+                }
+            } label: {
+                Text("Main subtitles")
             }
-        }) {
-            Text("Off").tag(nil as String?)
-            ForEach(config.subtitleModel.subtitleInfos, id: \.subtitleID) { track in
-                Text(track.name).tag(track.subtitleID as String?)
+            Picker(selection: subtitleSelectionBinding(config: config, isSecondary: true)) {
+                Text("Off").tag(nil as String?)
+                ForEach(config.subtitleModel.subtitleInfos, id: \.subtitleID) { track in
+                    Text(subtitleTitle(for: track)).tag(track.subtitleID as String?)
+                }
+            } label: {
+                Text("Secondary subtitles")
             }
         } label: {
             Image(systemName: "text.bubble.fill")
@@ -137,6 +140,32 @@ private extension KSVideoPlayerViewBuilder {
         #else
         "speaker.slash.circle.fill"
         #endif
+    }
+
+    @MainActor
+    static func subtitleSelectionBinding(config: KSVideoPlayer.Coordinator, isSecondary: Bool) -> Binding<String?> {
+        Binding {
+            isSecondary ? config.subtitleModel.selectedSecondarySubtitleInfo?.subtitleID : config.subtitleModel.selectedSubtitleInfo?.subtitleID
+        } set: { value in
+            let info = config.subtitleModel.subtitleInfos.first { $0.subtitleID == value }
+            if isSecondary {
+                config.subtitleModel.selectedSecondarySubtitleInfo = info
+            } else {
+                config.subtitleModel.selectedSubtitleInfo = info
+            }
+            if let info = info as? MediaPlayerTrack {
+                // Image subtitles need a seek through the player track API to render immediately.
+                config.playerLayer?.player.select(track: info)
+            }
+        }
+    }
+
+    static func subtitleTitle(for info: any SubtitleInfo) -> String {
+        let displayName = info.displayName
+        guard let track = info as? MediaPlayerTrack, let language = track.language, !language.isEmpty, !displayName.contains(language) else {
+            return displayName
+        }
+        return "\(displayName) (\(language))"
     }
 
     @MainActor

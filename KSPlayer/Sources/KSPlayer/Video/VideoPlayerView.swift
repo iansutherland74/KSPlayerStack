@@ -20,6 +20,23 @@ public enum KSPanDirection {
     case vertical
 }
 
+private struct AdaptiveBitrateSwitchingState {
+    var rebufferCount = 0
+    var stableBufferStartedAt: TimeInterval?
+    var lastDefinitionSwitchTime: TimeInterval?
+
+    mutating func resetHealth() {
+        rebufferCount = 0
+        stableBufferStartedAt = nil
+    }
+}
+
+private extension URL {
+    var isAdaptiveStreamingManifest: Bool {
+        ["m3u", "m3u8", "mpd", "ism", "isml"].contains(pathExtension.lowercased())
+    }
+}
+
 @MainActor
 public protocol LoadingIndector {
     func startAnimating()
@@ -46,6 +63,8 @@ open class VideoPlayerView: PlayerView {
     private var progressPreviewThumbnailURL: URL?
     private var progressPreviewThumbnails = [FFThumbnail]()
     private var progressPreviewRequestedTime: TimeInterval?
+    var compactPresentation: KSPlayerCompactPresentation?
+    private var adaptiveBitrateState = AdaptiveBitrateSwitchingState()
 
     public let bottomMaskView = LayerContainerView()
     public let topMaskView = LayerContainerView()
@@ -70,6 +89,9 @@ open class VideoPlayerView: PlayerView {
                 subtitleBackView.isHidden = true
                 subtitleBackView.image = nil
                 subtitleLabel.attributedText = nil
+                secondarySubtitleBackView.isHidden = true
+                secondarySubtitleBackView.image = nil
+                secondarySubtitleLabel.attributedText = nil
                 titleLabel.text = resource.name
                 toolBar.definitionButton.isHidden = resource.definitions.count < 2
                 autoFadeOutViewWithAnimation()
@@ -85,6 +107,10 @@ open class VideoPlayerView: PlayerView {
     public var titleLabel = UILabel()
     public var subtitleLabel = UILabel()
     public var subtitleBackView = UIImageView()
+    private var subtitleBackViewPositionConstraints = [NSLayoutConstraint]()
+    public var secondarySubtitleLabel = UILabel()
+    public var secondarySubtitleBackView = UIImageView()
+    private var secondarySubtitleBackViewPositionConstraints = [NSLayoutConstraint]()
     /// Activty Indector for loading
     public var loadingIndector: UIView & LoadingIndector = UIActivityIndicatorView(frame: CGRect(x: 0, y: 0, width: 30, height: 30))
     public var seekToView: UIView & SeekViewProtocol = SeekView()
@@ -270,20 +296,16 @@ open class VideoPlayerView: PlayerView {
         guard !isSliderSliding else { return }
         super.player(layer: layer, currentTime: currentTime, totalTime: totalTime)
         if srtControl.subtitle(currentTime: currentTime) {
-            if let part = srtControl.parts.first {
-                subtitleBackView.image = part.image
-                subtitleLabel.attributedText = part.text
-                subtitleBackView.isHidden = false
-            } else {
-                subtitleBackView.image = nil
-                subtitleLabel.attributedText = nil
-                subtitleBackView.isHidden = true
-            }
+            updateSrt()
+            renderSubtitle(parts: srtControl.parts, time: srtControl.currentSubtitleTime, backView: subtitleBackView, label: subtitleLabel, positionConstraints: subtitleBackViewPositionConstraints)
+            renderSubtitle(parts: srtControl.secondaryParts, time: srtControl.currentSecondarySubtitleTime, backView: secondarySubtitleBackView, label: secondarySubtitleLabel, positionConstraints: secondarySubtitleBackViewPositionConstraints)
         }
+        updateAdaptiveBitrateSwitching(layer: layer)
     }
 
     override open func player(layer: KSPlayerLayer, state: KSPlayerState) {
         super.player(layer: layer, state: state)
+        updateAdaptiveBitrateSwitching(layer: layer)
         switch state {
         case .readyToPlay:
             toolBar.timeSlider.isPlayable = true
@@ -364,6 +386,10 @@ open class VideoPlayerView: PlayerView {
     }
 
     open func change(definitionIndex: Int) {
+        change(definitionIndex: definitionIndex, automatically: false)
+    }
+
+    private func change(definitionIndex: Int, automatically: Bool) {
         guard let resource else { return }
         var shouldSeekTo = 0.0
         if let playerLayer, playerLayer.state != .playedToTheEnd {
@@ -372,7 +398,14 @@ open class VideoPlayerView: PlayerView {
         currentDefinition = definitionIndex >= resource.definitions.count ? resource.definitions.count - 1 : definitionIndex
         let asset = resource.definitions[currentDefinition]
         resetProgressPreviewThumbnails()
+        srtControl.apply(options: asset.options)
+        updateSrt()
         srtControl.url = asset.url
+        adaptiveBitrateState.resetHealth()
+        adaptiveBitrateState.lastDefinitionSwitchTime = CACurrentMediaTime()
+        if automatically {
+            KSLog("[abr] switched definition to \(asset.definition)")
+        }
         if let playerLayer {
             playerLayer.set(url: asset.url, options: asset.options, preservingCurrentTime: shouldSeekTo)
         } else {
@@ -385,7 +418,10 @@ open class VideoPlayerView: PlayerView {
 
     open func set(resource: KSPlayerResource, definitionIndex: Int = 0, isSetUrl: Bool = true) {
         resetProgressPreviewThumbnails()
+        adaptiveBitrateState = AdaptiveBitrateSwitchingState()
         currentDefinition = definitionIndex >= resource.definitions.count ? resource.definitions.count - 1 : definitionIndex
+        srtControl.apply(options: resource.definitions[currentDefinition].options)
+        updateSrt()
         if isSetUrl {
             let asset = resource.definitions[currentDefinition]
             super.set(url: asset.url, options: asset.options)
@@ -395,6 +431,84 @@ open class VideoPlayerView: PlayerView {
 
     override open func set(url: URL, options: KSOptions) {
         set(resource: KSPlayerResource(url: url, options: options))
+    }
+
+    override open func player(layer: KSPlayerLayer, bufferedCount: Int, consumeTime: TimeInterval) {
+        super.player(layer: layer, bufferedCount: bufferedCount, consumeTime: consumeTime)
+        if bufferedCount > 0 {
+            adaptiveBitrateState.rebufferCount += 1
+        }
+        updateAdaptiveBitrateSwitching(layer: layer)
+    }
+
+    private func updateAdaptiveBitrateSwitching(layer: KSPlayerLayer) {
+        guard let resource,
+              resource.definitions.count > 1,
+              let options = adaptiveBitrateSwitchingOptions(for: resource),
+              currentDefinition < resource.definitions.count
+        else {
+            return
+        }
+
+        let policy = options.adaptiveBitrateSwitchingPolicy
+        let currentURL = resource.definitions[currentDefinition].url
+        let bufferAhead = adaptiveBufferAhead(player: layer.player)
+        let now = CACurrentMediaTime()
+        if let bufferAhead, bufferAhead >= policy.upgradeBufferThreshold, layer.state == .bufferFinished {
+            if adaptiveBitrateState.stableBufferStartedAt == nil {
+                adaptiveBitrateState.stableBufferStartedAt = now
+            }
+        } else {
+            adaptiveBitrateState.stableBufferStartedAt = nil
+        }
+
+        let orderedDefinitionIndices = adaptiveDefinitionOrder(for: resource)
+        guard let definitionRank = orderedDefinitionIndices.firstIndex(of: currentDefinition) else {
+            return
+        }
+        let stableBufferDuration = adaptiveBitrateState.stableBufferStartedAt.map { now - $0 } ?? 0
+        let secondsSinceLastSwitch = adaptiveBitrateState.lastDefinitionSwitchTime.map { now - $0 }
+        let decision = policy.decision(
+            definitionRank: definitionRank,
+            definitionCount: orderedDefinitionIndices.count,
+            bufferAhead: bufferAhead,
+            rebufferCount: adaptiveBitrateState.rebufferCount,
+            stableBufferDuration: stableBufferDuration,
+            secondsSinceLastSwitch: secondsSinceLastSwitch,
+            isLive: !layer.player.duration.isFinite || layer.player.duration <= 0,
+            isAdaptiveStreamingManifest: currentURL.isAdaptiveStreamingManifest
+        )
+
+        switch decision {
+        case .stay:
+            break
+        case .switchToLower:
+            change(definitionIndex: orderedDefinitionIndices[definitionRank - 1], automatically: true)
+        case .switchToHigher:
+            change(definitionIndex: orderedDefinitionIndices[definitionRank + 1], automatically: true)
+        }
+    }
+
+    private func adaptiveBitrateSwitchingOptions(for resource: KSPlayerResource) -> KSOptions? {
+        resource.definitions.map(\.options).first { $0.isAdaptiveBitrateSwitchingEnabled }
+    }
+
+    private func adaptiveDefinitionOrder(for resource: KSPlayerResource) -> [Int] {
+        let indices = Array(resource.definitions.indices)
+        guard resource.definitions.allSatisfy({ ($0.bandwidth ?? 0) > 0 }) else {
+            return indices
+        }
+        return indices.sorted {
+            resource.definitions[$0].bandwidth ?? 0 < resource.definitions[$1].bandwidth ?? 0
+        }
+    }
+
+    private func adaptiveBufferAhead(player: any MediaPlayerProtocol) -> TimeInterval? {
+        let bufferAhead = player.playableTime - player.currentPlaybackTime
+        guard bufferAhead.isFinite, bufferAhead >= 0 else {
+            return nil
+        }
+        return bufferAhead
     }
 
     @objc open func doubleTapGestureAction() {
@@ -535,10 +649,13 @@ extension VideoPlayerView {
             }
         }
         toolBar.srtButton.setMenu(title: NSLocalizedString("subtitle", comment: ""), current: srtControl.selectedSubtitleInfo, list: srtControl.subtitleInfos, addDisabled: true) { value in
-            value.name
+            value.displayName
         } completition: { [weak self] value in
             guard let self else { return }
             self.srtControl.selectedSubtitleInfo = value
+            if let track = value as? MediaPlayerTrack {
+                self.playerLayer?.player.select(track: track)
+            }
         }
         #if os(iOS)
         toolBar.definitionButton.showsMenuAsPrimaryAction = true
@@ -606,8 +723,9 @@ public extension VideoPlayerView {
                                                 preferredStyle: preferredStyle())
 
         let currentSub = srtControl.selectedSubtitleInfo
+        let currentSecondarySub = srtControl.selectedSecondarySubtitleInfo
 
-        let disableAction = UIAlertAction(title: NSLocalizedString("Disabled", comment: ""), style: .default) { [weak self] _ in
+        let disableAction = UIAlertAction(title: NSLocalizedString("Main subtitles: Off", comment: ""), style: .default) { [weak self] _ in
             self?.srtControl.selectedSubtitleInfo = nil
         }
         alertController.addAction(disableAction)
@@ -615,15 +733,37 @@ public extension VideoPlayerView {
             alertController.preferredAction = disableAction
             disableAction.setValue(true, forKey: "checked")
         }
+        let disableSecondaryAction = UIAlertAction(title: NSLocalizedString("Secondary subtitles: Off", comment: ""), style: .default) { [weak self] _ in
+            self?.srtControl.selectedSecondarySubtitleInfo = nil
+        }
+        alertController.addAction(disableSecondaryAction)
+        if currentSecondarySub == nil {
+            disableSecondaryAction.setValue(true, forKey: "checked")
+        }
 
         for (_, srt) in availableSubtitles.enumerated() {
-            let action = UIAlertAction(title: srt.name, style: .default) { [weak self] _ in
-                self?.srtControl.selectedSubtitleInfo = srt
+            let action = UIAlertAction(title: "Main subtitles: \(srt.displayName)", style: .default) { [weak self] _ in
+                guard let self else { return }
+                self.srtControl.selectedSubtitleInfo = srt
+                if let track = srt as? MediaPlayerTrack {
+                    self.playerLayer?.player.select(track: track)
+                }
             }
             alertController.addAction(action)
             if currentSub?.subtitleID == srt.subtitleID {
                 alertController.preferredAction = action
                 action.setValue(true, forKey: "checked")
+            }
+            let secondaryAction = UIAlertAction(title: "Secondary subtitles: \(srt.displayName)", style: .default) { [weak self] _ in
+                guard let self else { return }
+                self.srtControl.selectedSecondarySubtitleInfo = srt
+                if let track = srt as? MediaPlayerTrack {
+                    self.playerLayer?.player.select(track: track)
+                }
+            }
+            alertController.addAction(secondaryAction)
+            if currentSecondarySub?.subtitleID == srt.subtitleID {
+                secondaryAction.setValue(true, forKey: "checked")
             }
         }
 
@@ -803,38 +943,89 @@ extension VideoPlayerView {
 
     /// change during playback
     public func updateSrt() {
-        subtitleLabel.font = SubtitleModel.textFont
+        let style = srtControl.resolvedStyle()
+        subtitleLabel.font = style.font
+        secondarySubtitleLabel.font = style.font
         if #available(macOS 11.0, iOS 14, tvOS 14, *) {
-            subtitleLabel.textColor = UIColor(SubtitleModel.textColor)
-            subtitleBackView.backgroundColor = UIColor(SubtitleModel.textBackgroundColor)
+            subtitleLabel.textColor = style.foregroundColor
+            secondarySubtitleLabel.textColor = style.foregroundColor
+            subtitleBackView.backgroundColor = SubtitleModel.alpha(of: style.windowColor) > 0 ? style.windowColor : style.backgroundColor
+            secondarySubtitleBackView.backgroundColor = subtitleBackView.backgroundColor
         }
     }
 
     private func setupSrtControl() {
-        subtitleLabel.numberOfLines = 0
-        subtitleLabel.textAlignment = .center
-        subtitleLabel.backingLayer?.shadowColor = UIColor.black.cgColor
-        subtitleLabel.backingLayer?.shadowOffset = CGSize(width: 1.0, height: 1.0)
-        subtitleLabel.backingLayer?.shadowOpacity = 0.9
-        subtitleLabel.backingLayer?.shadowRadius = 1.0
-        subtitleLabel.backingLayer?.shouldRasterize = true
+        configureSubtitleLabel(subtitleLabel)
+        configureSubtitleLabel(secondarySubtitleLabel)
         updateSrt()
-        subtitleBackView.contentMode = .scaleAspectFit
-        subtitleBackView.cornerRadius = 2
-        subtitleBackView.addSubview(subtitleLabel)
-        subtitleBackView.isHidden = true
+        configureSubtitleBackView(subtitleBackView, label: subtitleLabel)
+        configureSubtitleBackView(secondarySubtitleBackView, label: secondarySubtitleLabel)
         addSubview(subtitleBackView)
+        addSubview(secondarySubtitleBackView)
         subtitleBackView.translatesAutoresizingMaskIntoConstraints = false
+        secondarySubtitleBackView.translatesAutoresizingMaskIntoConstraints = false
         subtitleLabel.translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([
+        secondarySubtitleLabel.translatesAutoresizingMaskIntoConstraints = false
+        subtitleBackViewPositionConstraints = [
             subtitleBackView.bottomAnchor.constraint(equalTo: safeBottomAnchor, constant: -5),
             subtitleBackView.centerXAnchor.constraint(equalTo: centerXAnchor),
             subtitleBackView.widthAnchor.constraint(lessThanOrEqualTo: widthAnchor, constant: -10),
+        ]
+        secondarySubtitleBackViewPositionConstraints = [
+            secondarySubtitleBackView.topAnchor.constraint(equalTo: safeTopAnchor, constant: 5),
+            secondarySubtitleBackView.centerXAnchor.constraint(equalTo: centerXAnchor),
+            secondarySubtitleBackView.widthAnchor.constraint(lessThanOrEqualTo: widthAnchor, constant: -10),
+        ]
+        NSLayoutConstraint.activate([
+            secondarySubtitleLabel.leadingAnchor.constraint(equalTo: secondarySubtitleBackView.leadingAnchor, constant: 10),
+            secondarySubtitleLabel.trailingAnchor.constraint(equalTo: secondarySubtitleBackView.trailingAnchor, constant: -10),
+            secondarySubtitleLabel.topAnchor.constraint(equalTo: secondarySubtitleBackView.topAnchor, constant: 2),
+            secondarySubtitleLabel.bottomAnchor.constraint(equalTo: secondarySubtitleBackView.bottomAnchor, constant: -2),
             subtitleLabel.leadingAnchor.constraint(equalTo: subtitleBackView.leadingAnchor, constant: 10),
             subtitleLabel.trailingAnchor.constraint(equalTo: subtitleBackView.trailingAnchor, constant: -10),
             subtitleLabel.topAnchor.constraint(equalTo: subtitleBackView.topAnchor, constant: 2),
             subtitleLabel.bottomAnchor.constraint(equalTo: subtitleBackView.bottomAnchor, constant: -2),
-        ])
+        ] + subtitleBackViewPositionConstraints + secondarySubtitleBackViewPositionConstraints)
+    }
+
+    private func configureSubtitleLabel(_ label: UILabel) {
+        label.numberOfLines = 0
+        label.textAlignment = .center
+        label.backingLayer?.shadowColor = UIColor.black.cgColor
+        label.backingLayer?.shadowOffset = CGSize(width: 1.0, height: 1.0)
+        label.backingLayer?.shadowOpacity = 0.9
+        label.backingLayer?.shadowRadius = 1.0
+        label.backingLayer?.shouldRasterize = true
+    }
+
+    private func configureSubtitleBackView(_ backView: UIImageView, label: UILabel) {
+        backView.contentMode = .scaleAspectFit
+        backView.cornerRadius = 2
+        backView.addSubview(label)
+        backView.isHidden = true
+    }
+
+    private func renderSubtitle(parts: [SubtitlePart], time: TimeInterval, backView: UIImageView, label: UILabel, positionConstraints: [NSLayoutConstraint]) {
+        if let part = parts.first {
+            if let image = part.image {
+                backView.image = image
+                label.attributedText = nil
+                NSLayoutConstraint.deactivate(positionConstraints)
+                if let frame = part.imageFrame(in: bounds.insetBy(dx: 5, dy: 5)) {
+                    backView.frame = frame
+                }
+            } else {
+                NSLayoutConstraint.activate(positionConstraints)
+                backView.image = nil
+                label.attributedText = part.attributedText(at: time, activeWordAttributes: srtControl.activeWordAttributes)
+            }
+            backView.isHidden = false
+        } else {
+            NSLayoutConstraint.activate(positionConstraints)
+            backView.image = nil
+            label.attributedText = nil
+            backView.isHidden = true
+        }
     }
 
     /**
