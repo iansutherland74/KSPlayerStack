@@ -6,7 +6,8 @@ import Foundation
 import PackagePlugin
 
 extension Build: CommandPlugin {
-    func performCommand(context _: PluginContext, arguments: [String]) throws {
+    func performCommand(context: PluginContext, arguments: [String]) throws {
+        FileManager.default.changeCurrentDirectoryPath(context.package.directory.string)
         try Build.performCommand(arguments: arguments)
     }
 }
@@ -15,7 +16,8 @@ extension Build: CommandPlugin {
 import XcodeProjectPlugin
 
 extension Build: XcodeCommandPlugin {
-    func performCommand(context _: XcodePluginContext, arguments: [String]) throws {
+    func performCommand(context: XcodePluginContext, arguments: [String]) throws {
+        FileManager.default.changeCurrentDirectoryPath(context.xcodeProject.directory.string)
         try Build.performCommand(arguments: arguments)
     }
 }
@@ -573,29 +575,67 @@ class BaseBuild {
 
     private func createXCFramework() throws {
         let frameworks = try frameworks()
+        let selectedPlatforms = platforms()
+        let selectedSDKs = Set(selectedPlatforms.map(\.sdk))
         for framework in frameworks {
             var arguments = ["-create-xcframework"]
-            for platform in platforms() {
+            let XCFrameworkFile = URL.currentDirectory + ["../Sources", framework + ".xcframework"]
+            for platform in selectedPlatforms {
                 if let frameworkPath = try createFramework(framework: framework, platform: platform) {
-                    if isFramework {
-                        arguments.append("-framework")
-                        arguments.append(frameworkPath)
-                    } else {
-                        arguments.append("-library")
-                        arguments.append(frameworkPath + "/" + framework + ".a")
-                        arguments.append("-headers")
-                        arguments.append(frameworkPath + "/Headers")
+                    appendXCFrameworkInput(frameworkPath: frameworkPath, framework: framework, to: &arguments)
+                }
+            }
+            if FileManager.default.fileExists(atPath: XCFrameworkFile.path) {
+                let sliceNames = try FileManager.default.contentsOfDirectory(atPath: XCFrameworkFile.path).sorted()
+                for sliceName in sliceNames where sliceName != "Info.plist" {
+                    let sliceURL = XCFrameworkFile + sliceName
+                    guard let frameworkPath = existingFrameworkPath(framework: framework, sliceURL: sliceURL) else {
+                        continue
                     }
+                    if let sdk = supportedPlatform(frameworkPath: frameworkPath), selectedSDKs.contains(sdk) {
+                        continue
+                    }
+                    appendXCFrameworkInput(frameworkPath: frameworkPath, framework: framework, to: &arguments)
                 }
             }
             arguments.append("-output")
-            let XCFrameworkFile = URL.currentDirectory + ["../Sources", framework + ".xcframework"]
             arguments.append(XCFrameworkFile.path)
             if FileManager.default.fileExists(atPath: XCFrameworkFile.path) {
                 try FileManager.default.removeItem(at: XCFrameworkFile)
             }
             try Utility.launch(path: "/usr/bin/xcodebuild", arguments: arguments)
         }
+    }
+
+    private func appendXCFrameworkInput(frameworkPath: String, framework: String, to arguments: inout [String]) {
+        if isFramework {
+            arguments.append("-framework")
+            arguments.append(frameworkPath)
+        } else {
+            arguments.append("-library")
+            arguments.append(frameworkPath + "/" + framework + ".a")
+            arguments.append("-headers")
+            arguments.append(frameworkPath + "/Headers")
+        }
+    }
+
+    private func existingFrameworkPath(framework: String, sliceURL: URL) -> String? {
+        if isFramework {
+            let frameworkURL = sliceURL + "\(framework).framework"
+            return FileManager.default.fileExists(atPath: frameworkURL.path) ? frameworkURL.path : nil
+        }
+        let libraryURL = sliceURL + "\(framework).a"
+        return FileManager.default.fileExists(atPath: libraryURL.path) ? sliceURL.path : nil
+    }
+
+    private func supportedPlatform(frameworkPath: String) -> String? {
+        let plistURL = URL(fileURLWithPath: frameworkPath) + "Info.plist"
+        guard let plist = NSDictionary(contentsOf: plistURL),
+              let platforms = plist["CFBundleSupportedPlatforms"] as? [String]
+        else {
+            return nil
+        }
+        return platforms.first
     }
 
     private func createFramework(framework: String, platform: PlatformType) throws -> String? {
