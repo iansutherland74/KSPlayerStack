@@ -718,7 +718,7 @@ class AVMediaPlayerTrack: @preconcurrency MediaPlayerTrack, SubtitleKindProvidin
         #endif
         // swiftlint:disable force_cast
         if let first = track.assetTrack?.formatDescriptions.first {
-            formatDescription = first as! CMFormatDescription
+            formatDescription = (first as! CMFormatDescription)
         } else {
             formatDescription = nil
         }
