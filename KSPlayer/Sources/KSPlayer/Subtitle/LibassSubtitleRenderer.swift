@@ -10,8 +10,8 @@ import AppKit
 import libass
 
 final class LibassSubtitleRenderer {
-    private let library: UnsafeMutablePointer<ASS_Library>
-    private let renderer: UnsafeMutablePointer<ASS_Renderer>
+    private let library: OpaquePointer
+    private let renderer: OpaquePointer
     private let track: UnsafeMutablePointer<ASS_Track>
     private let canvasSize: CGSize
 

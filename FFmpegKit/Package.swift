@@ -26,7 +26,7 @@ let package = Package(
         .library(name: "nettle", targets: ["nettle"]),
         .library(name: "hogweed", targets: ["hogweed"]),
         .library(name: "gnutls", targets: ["gnutls"]),
-        .library(name: "libass", targets: ["libfreetype", "libfribidi", "libharfbuzz", "libass"]),
+        .library(name: "libass", targets: ["libfreetype", "libfribidi", "libharfbuzz", "libunibreak", "libass"]),
         .library(name: "libmpv", targets: ["FFmpegKit", "libass", "libmpv"]),
         .executable(name: "ffmpeg", targets: ["ffmpeg"]),
         .executable(name: "ffplay", targets: ["ffplay"]),
@@ -47,7 +47,7 @@ let package = Package(
                 "libplacebo",
                 .target(name: "libzvbi", condition: .when(platforms: [.macOS, .iOS, .tvOS, .visionOS])),
                 "libsrt",
-                "libfreetype", "libfribidi", "libharfbuzz", "libass",
+                "libfreetype", "libfribidi", "libharfbuzz", "libunibreak", "libass",
                 "libfontconfig",
                 .target(name: "libudfread", condition: .when(platforms: [.macOS, .iOS, .tvOS, .visionOS])),
                 .target(name: "libbluray", condition: .when(platforms: [.macOS, .iOS, .tvOS, .visionOS])),
@@ -203,6 +203,10 @@ let package = Package(
         .binaryTarget(
             name: "libharfbuzz",
             path: "Sources/libharfbuzz.xcframework"
+        ),
+        .binaryTarget(
+            name: "libunibreak",
+            path: "Sources/libunibreak.xcframework"
         ),
         .binaryTarget(
             name: "libass",

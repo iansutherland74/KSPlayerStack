@@ -55,7 +55,7 @@ class BuildVulkan: BaseBuild {
         var arguments = platforms().map {
             "--\($0.name)"
         }
-        if !FileManager.default.fileExists(atPath: (directoryURL + "External/build/Release").path) {
+        if !FileManager.default.fileExists(atPath: (directoryURL + "External/build/Release").path) || !BaseBuild.notRecompile {
             try Utility.launch(path: (directoryURL + "fetchDependencies").path, arguments: arguments, currentDirectoryURL: directoryURL)
         }
         arguments = platforms().map(\.name)

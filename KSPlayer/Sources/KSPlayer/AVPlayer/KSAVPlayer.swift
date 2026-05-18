@@ -612,12 +612,16 @@ extension KSAVPlayer: @preconcurrency MediaPlayerProtocol {
     }
 
     private func legibleMediaSelectionTracks(for item: AVPlayerItem) -> [AVMediaPlayerTrack] {
+        #if os(xrOS)
+        return []
+        #else
         guard let group = item.asset.mediaSelectionGroup(forMediaCharacteristic: .legible) else {
             return []
         }
         return group.options.map { option in
             AVMediaPlayerTrack(mediaSelectionOption: option, group: group, playerItem: item)
         }
+        #endif
     }
 }
 
