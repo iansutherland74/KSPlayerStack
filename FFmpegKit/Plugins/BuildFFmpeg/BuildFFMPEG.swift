@@ -364,6 +364,27 @@ class BuildBluray: BaseBuild {
         [.libfreetype, .libfontconfig, .libudfread]
     }
 
+    override func build(platform: PlatformType, arch: ArchType, buildURL: URL) throws {
+        try super.build(platform: platform, arch: arch, buildURL: buildURL)
+        let prefix = thinDir(platform: platform, arch: arch)
+        let pcFile = prefix + "lib/pkgconfig/libbluray.pc"
+        if let data = FileManager.default.contents(atPath: pcFile.path), var text = String(data: data, encoding: .utf8) {
+            let fontconfig = thinDir(library: .libfontconfig, platform: platform, arch: arch).path
+            let freetype = thinDir(library: .libfreetype, platform: platform, arch: arch).path
+            let udfread = thinDir(library: .libudfread, platform: platform, arch: arch).path
+            text = text.replacingOccurrences(of: "Requires: fontconfig, freetype2, libudfread >=  1.2.0, libxml-2.0 >=  2.6\n", with: "")
+            text = text.replacingOccurrences(
+                of: "Libs: -L${libdir} -lbluray\n",
+                with: "Libs: -L${libdir} -lbluray -L\(udfread)/lib -ludfread -L\(fontconfig)/lib -lfontconfig -L\(freetype)/lib -lfreetype -lexpat -lxml2 -lz -lbz2 -licucore -lm\n"
+            )
+            text = text.replacingOccurrences(
+                of: "Cflags: -I${includedir}\n",
+                with: "Cflags: -I${includedir} -I\(udfread)/include -I\(fontconfig)/include -I\(freetype)/include/freetype2\n"
+            )
+            try text.write(to: pcFile, atomically: true, encoding: .utf8)
+        }
+    }
+
     override func arguments(platform _: PlatformType, arch _: ArchType) -> [String] {
         [
             "-Dbdj_jar=disabled",
