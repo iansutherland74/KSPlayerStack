@@ -26,6 +26,26 @@ public protocol VideoOutput: FrameOutput {
 }
 
 public final class MetalPlayView: UIView, @preconcurrency VideoOutput {
+    private struct UpscalingSourceKey: Equatable {
+        let width: Int
+        let height: Int
+        let pixelFormat: OSType?
+        let dynamicRange: DynamicRange?
+        let colorPrimaries: String?
+        let transferFunction: String?
+        let yCbCrMatrix: String?
+
+        init(pixelBuffer: PixelBufferProtocol, dynamicRange: DynamicRange?) {
+            width = pixelBuffer.width
+            height = pixelBuffer.height
+            pixelFormat = pixelBuffer.cvPixelBuffer.map(CVPixelBufferGetPixelFormatType)
+            self.dynamicRange = dynamicRange
+            colorPrimaries = pixelBuffer.colorPrimaries.map { $0 as String }
+            transferFunction = pixelBuffer.transferFunction.map { $0 as String }
+            yCbCrMatrix = pixelBuffer.yCbCrMatrix.map { $0 as String }
+        }
+    }
+
     public var displayLayer: AVSampleBufferDisplayLayer {
         displayView.displayLayer
     }
@@ -52,7 +72,15 @@ public final class MetalPlayView: UIView, @preconcurrency VideoOutput {
     /// 用MTKView的draw(in:)也是不行，会卡顿
     private var displayLink: CADisplayLink!
 //    private let timer = DispatchSource.makeTimerSource(queue: DispatchQueue.main)
-    public var options: KSOptions
+    public var options: KSOptions {
+        didSet {
+            guard oldValue !== options || oldValue.videoUpscaling != options.videoUpscaling else {
+                return
+            }
+            resetUpscalingState()
+            oldValue.videoUpscalingState = .inactive
+        }
+    }
     public weak var renderSource: OutputRenderSourceDelegate?
     // AVSampleBufferAudioRenderer AVSampleBufferRenderSynchronizer AVSampleBufferDisplayLayer
     var displayView = AVSampleBufferDisplayView() {
@@ -63,6 +91,7 @@ public final class MetalPlayView: UIView, @preconcurrency VideoOutput {
 
     private let metalView = MetalView()
     private let videoUpscaler = VideoUpscaler()
+    private var sourceUpscalingKey: UpscalingSourceKey?
     private var loggedHighPerformanceMessages = Set<String>()
     public weak var displayLayerDelegate: DisplayLayerDelegate?
     public init(options: KSOptions) {
@@ -138,7 +167,7 @@ public final class MetalPlayView: UIView, @preconcurrency VideoOutput {
 
     public func flush() {
         pixelBuffer = nil
-        videoUpscaler.reset()
+        resetUpscalingState()
         if displayView.isHidden {
             metalView.clear()
         } else {
@@ -147,6 +176,8 @@ public final class MetalPlayView: UIView, @preconcurrency VideoOutput {
     }
 
     public func invalidate() {
+        pixelBuffer = nil
+        resetUpscalingState()
         displayLink.invalidate()
     }
 
@@ -171,6 +202,9 @@ extension MetalPlayView {
             }
             pixelBuffer = frame.corePixelBuffer
             guard let sourcePixelBuffer = pixelBuffer else {
+                videoUpscaler.reset()
+                sourceUpscalingKey = nil
+                updateVideoUpscalingState(.inactive)
                 return
             }
             var renderPixelBuffer: PixelBufferProtocol = sourcePixelBuffer
@@ -182,17 +216,34 @@ extension MetalPlayView {
                 if let dar = options.customizeDar(sar: sourcePixelBuffer.aspectRatio, par: sourcePar) {
                     cvPixelBuffer.aspectRatio = CGSize(width: dar.width, height: dar.height * sourcePar.width / sourcePar.height)
                 }
-                if HighPerformanceVideoPlaybackPolicy.shouldApplyUpscaling(mode: options.videoUpscaling, sourceSize: sourcePar, fps: frame.fps),
-                   let upscaledPixelBuffer = videoUpscaler.upscale(pixelBuffer: cvPixelBuffer, time: cmtime, mode: options.videoUpscaling)
-                {
+                let sourceDynamicRange = videoDynamicRange(pixelBuffer: sourcePixelBuffer, isDovi: isDovi)
+                resetUpscalerIfSourceChanged(sourcePixelBuffer, dynamicRange: sourceDynamicRange)
+                let upscalingSkipReason = HighPerformanceVideoPlaybackPolicy.upscalingSkipReason(
+                    mode: options.videoUpscaling,
+                    sourceSize: sourcePar,
+                    fps: frame.fps,
+                    dynamicRange: sourceDynamicRange
+                )
+                if upscalingSkipReason == nil, let upscaledPixelBuffer = videoUpscaler.upscale(pixelBuffer: cvPixelBuffer, time: cmtime, mode: options.videoUpscaling) {
                     renderPixelBuffer = upscaledPixelBuffer
                     pixelBuffer = upscaledPixelBuffer
+                    updateVideoUpscalingState(videoUpscaler.state)
                 } else if options.videoUpscaling != .none {
-                    logHighPerformanceOnce("[video] Skip video upscaling for \(Int(sourcePar.width))x\(Int(sourcePar.height)) @ \(String(format: "%.2f", frame.fps))fps")
+                    if let reason = upscalingSkipReason {
+                        logHighPerformanceOnce("[video] Skip video upscaling for \(Int(sourcePar.width))x\(Int(sourcePar.height)) @ \(String(format: "%.2f", frame.fps))fps: \(reason)")
+                        videoUpscaler.reset()
+                        updateVideoUpscalingState(.unavailable(reason: reason))
+                    } else {
+                        updateVideoUpscalingState(videoUpscaler.state)
+                    }
+                } else {
                     videoUpscaler.reset()
+                    updateVideoUpscalingState(.inactive)
                 }
             } else {
                 videoUpscaler.reset()
+                sourceUpscalingKey = nil
+                updateVideoUpscalingState(.inactive)
             }
             let par = renderPixelBuffer.size
             let sar = renderPixelBuffer.aspectRatio
@@ -231,6 +282,18 @@ extension MetalPlayView {
             }
             renderSource?.setVideo(time: cmtime, position: frame.position)
         }
+    }
+
+    private func resetUpscalerIfSourceChanged(_ pixelBuffer: PixelBufferProtocol, dynamicRange: DynamicRange?) {
+        let sourceKey = UpscalingSourceKey(pixelBuffer: pixelBuffer, dynamicRange: dynamicRange)
+        if let previous = sourceUpscalingKey, previous == sourceKey {
+            return
+        }
+        if sourceUpscalingKey != nil {
+            videoUpscaler.reset()
+            updateVideoUpscalingState(.inactive)
+        }
+        sourceUpscalingKey = sourceKey
     }
 
     private func videoDynamicRange(pixelBuffer: PixelBufferProtocol, isDovi: Bool) -> DynamicRange? {
@@ -282,6 +345,18 @@ extension MetalPlayView {
         if loggedHighPerformanceMessages.insert(message).inserted {
             KSLog(message)
         }
+    }
+
+    private func updateVideoUpscalingState(_ state: VideoUpscalingState) {
+        if options.videoUpscalingState != state {
+            options.videoUpscalingState = state
+        }
+    }
+
+    private func resetUpscalingState() {
+        sourceUpscalingKey = nil
+        videoUpscaler.reset()
+        updateVideoUpscalingState(.inactive)
     }
 }
 

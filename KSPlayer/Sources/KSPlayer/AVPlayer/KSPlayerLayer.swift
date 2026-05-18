@@ -559,7 +559,7 @@ extension KSPlayerLayer: AVPictureInPictureControllerDelegate {
 
 extension KSPlayerLayer {
     static func preferredPlayerType(for url: URL, options: KSOptions) -> MediaPlayerProtocol.Type {
-        if options.display != .plane || url.isBluRayInputCandidate || url.isFFmpegOnlyInputScheme || !options.videoColorAdjustment.isNeutral {
+        if options.display != .plane || url.isBluRayInputCandidate || url.isFFmpegOnlyInputScheme || !options.videoColorAdjustment.isNeutral || options.videoUpscaling.isEnabled {
             return KSMEPlayer.self
         }
         return KSOptions.firstPlayerType
@@ -568,6 +568,9 @@ extension KSPlayerLayer {
     private func preferredPlayerType(for url: URL, respectsWirelessRoute: Bool) -> MediaPlayerProtocol.Type {
         if respectsWirelessRoute, isWirelessRouteActive, !url.isBluRayInputCandidate, !url.isFFmpegOnlyInputScheme {
             // airplay的话，默认使用KSAVPlayer
+            if options.videoUpscaling.isEnabled {
+                options.videoUpscalingState = .unavailable(reason: "video upscaling is unavailable during wireless route playback")
+            }
             return KSAVPlayer.self
         }
         return Self.preferredPlayerType(for: url, options: options)

@@ -132,7 +132,7 @@ public extension SubtitlePart {
     }
 }
 
-public struct TextPosition {
+public struct TextPosition: Sendable {
     public var verticalAlign: VerticalAlignment = .bottom
     public var horizontalAlign: HorizontalAlignment = .center
     public var leftMargin: CGFloat = 0
@@ -490,6 +490,11 @@ open class SubtitleModel: ObservableObject {
     public var subtitleDelay = 0.0 // s
     private var activeWordIndexes = [ObjectIdentifier: Int?]()
     private var secondaryActiveWordIndexes = [ObjectIdentifier: Int?]()
+    private var isExternalSubtitleTranslationEnabled = KSOptions.isExternalSubtitleTranslationEnabled
+    private var externalSubtitleTranslationProvider: (any SubtitleTranslationProvider)? = KSOptions.externalSubtitleTranslationProvider
+    private var externalSubtitleTranslationDisplayMode = KSOptions.externalSubtitleTranslationDisplayMode
+    private var externalSubtitleTranslationSourceLanguage = KSOptions.externalSubtitleTranslationSourceLanguage
+    private var externalSubtitleTranslationTargetLanguage = KSOptions.externalSubtitleTranslationTargetLanguage
     private var lastAppliedCaptionAppearancePolicy: SubtitleCaptionAppearancePolicy?
     private var lastAppliedHDREffectPolicy: SubtitleHDREffectPolicy?
     private var lastAppliedVideoDynamicRange: DynamicRange?
@@ -546,11 +551,20 @@ open class SubtitleModel: ObservableObject {
         }
         captionAppearancePolicy = options.subtitleCaptionAppearancePolicy
         hdrEffectPolicy = options.subtitleHDREffectPolicy
+        isExternalSubtitleTranslationEnabled = options.isExternalSubtitleTranslationEnabled
+        externalSubtitleTranslationProvider = options.externalSubtitleTranslationProvider
+        externalSubtitleTranslationDisplayMode = options.externalSubtitleTranslationDisplayMode
+        externalSubtitleTranslationSourceLanguage = options.externalSubtitleTranslationSourceLanguage
+        externalSubtitleTranslationTargetLanguage = options.externalSubtitleTranslationTargetLanguage
+        subtitleInfos.compactMap { $0 as? URLSubtitleInfo }.forEach(configureExternalSubtitleTranslation)
         updateSystemCaptionAppearance()
     }
 
     public func addSubtitle(info: any SubtitleInfo) {
         if subtitleInfos.first(where: { $0.subtitleID == info.subtitleID }) == nil {
+            if let info = info as? URLSubtitleInfo {
+                configureExternalSubtitleTranslation(info)
+            }
             subtitleInfos.append(info)
         }
     }
@@ -596,6 +610,7 @@ open class SubtitleModel: ObservableObject {
                 }
                 Task { @MainActor in
                     try? await dataSouce.searchSubtitle(query: query, languages: languages)
+                    dataSouce.infos.compactMap { $0 as? URLSubtitleInfo }.forEach(configureExternalSubtitleTranslation)
                     subtitleInfos.append(contentsOf: dataSouce.infos)
                 }
             }
@@ -606,9 +621,11 @@ open class SubtitleModel: ObservableObject {
         if let dataSouce = dataSouce as? FileURLSubtitleDataSouce {
             Task { @MainActor in
                 try? await dataSouce.searchSubtitle(fileURL: url)
+                    dataSouce.infos.compactMap { $0 as? URLSubtitleInfo }.forEach(configureExternalSubtitleTranslation)
                 subtitleInfos.append(contentsOf: dataSouce.infos)
             }
         } else {
+                dataSouce.infos.compactMap { $0 as? URLSubtitleInfo }.forEach(configureExternalSubtitleTranslation)
             subtitleInfos.append(contentsOf: dataSouce.infos)
         }
     }
@@ -652,6 +669,16 @@ open class SubtitleModel: ObservableObject {
 
     private func isSubtitleSelected(_ info: any SubtitleInfo) -> Bool {
         selectedSubtitleInfo === info || selectedSecondarySubtitleInfo === info
+    }
+
+    private func configureExternalSubtitleTranslation(_ info: URLSubtitleInfo) {
+        info.configureExternalSubtitleTranslation(
+            isEnabled: isExternalSubtitleTranslationEnabled,
+            provider: externalSubtitleTranslationProvider,
+            displayMode: externalSubtitleTranslationDisplayMode,
+            sourceLanguage: externalSubtitleTranslationSourceLanguage,
+            targetLanguage: externalSubtitleTranslationTargetLanguage
+        )
     }
 
     private func updateSystemCaptionAppearance() {

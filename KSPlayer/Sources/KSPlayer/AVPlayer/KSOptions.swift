@@ -228,6 +228,16 @@ open class KSOptions {
     public var onlineSubtitleProviders: [any OnlineSubtitleProvider] = KSOptions.onlineSubtitleProviders
     /// Default languages used by online subtitle providers when a search UI does not pass explicit languages.
     public var onlineSubtitleLanguages = KSOptions.onlineSubtitleLanguages
+    /// Enables provider-backed translation for parsed external text subtitles. Disabled unless an app opts in and supplies a provider.
+    public var isExternalSubtitleTranslationEnabled = KSOptions.isExternalSubtitleTranslationEnabled
+    /// App-supplied translator for external subtitles. KSPlayer does not bundle cloud credentials or model weights.
+    public var externalSubtitleTranslationProvider: (any SubtitleTranslationProvider)? = KSOptions.externalSubtitleTranslationProvider
+    /// Controls whether translated external subtitles replace text or show bilingual text.
+    public var externalSubtitleTranslationDisplayMode = KSOptions.externalSubtitleTranslationDisplayMode
+    /// Optional source language hint passed to the translation provider.
+    public var externalSubtitleTranslationSourceLanguage = KSOptions.externalSubtitleTranslationSourceLanguage
+    /// Optional target language hint passed to the translation provider.
+    public var externalSubtitleTranslationTargetLanguage = KSOptions.externalSubtitleTranslationTargetLanguage
     // video
     public var display = DisplayEnum.plane
     public var panoramaMode = KSOptions.panoramaMode
@@ -246,7 +256,11 @@ open class KSOptions {
     public var destinationDynamicRange: DynamicRange?
     public var videoAdaptable = true
     public var videoFilters = [String]()
+    /// GPU-side VideoToolbox upscaling for the MEPlayer/Metal path. `.none` preserves the native AVPlayer path.
     public var videoUpscaling = VideoUpscalingMode.none
+    /// Last observed upscaling state for the MEPlayer/Metal renderer.
+    @Published
+    public internal(set) var videoUpscalingState = VideoUpscalingState.inactive
     /// GPU-side SDR color controls for the Metal renderer. Neutral defaults preserve existing output.
     public var videoColorAdjustment = KSOptions.videoColorAdjustment
     /// Shows a floating time bubble while hovering or scrubbing the progress bar.
@@ -811,9 +825,80 @@ enum VideoDeinterlacePolicy {
     }
 }
 
+public enum VideoUpscalingHDRPolicy: Equatable, Sendable {
+    /// Keep HDR and Dolby Vision on the existing system-managed path.
+    case preserveHDR
+    /// Allow upscaling for HDR frames when the runtime scaler accepts the source.
+    case allowHDR
+}
+
+/// Last observed VideoToolbox upscaling state for the MEPlayer/Metal renderer.
+///
+/// `KSOptions.videoUpscalingState` is updated by the renderer on the main thread. The state remains `.inactive`
+/// for AVPlayer/native playback because AVPlayer does not expose the per-frame output required by this scaler.
+public enum VideoUpscalingState: Equatable, Sendable {
+    /// Upscaling is disabled, not yet attempted, or reset after a source/lifecycle change.
+    case inactive
+    /// The last rendered frame was upscaled.
+    case active(sourceSize: CGSize, outputSize: CGSize, scaleFactor: Float)
+    /// Upscaling was requested but skipped by policy or rejected by the current runtime/source.
+    case unavailable(reason: String)
+
+    public var isActive: Bool {
+        if case .active = self {
+            return true
+        }
+        return false
+    }
+
+    public var unavailableReason: String? {
+        if case let .unavailable(reason) = self {
+            return reason
+        }
+        return nil
+    }
+}
+
 public enum VideoUpscalingMode: Equatable, Sendable {
+    public static let defaultScaleFactor: Float = 2
+    public static let scaleFactorRange: ClosedRange<Float> = 1 ... 4
+
     case none
-    case appleSuperResolution(scaleFactor: Float = 2)
+    /// Uses VideoToolbox low-latency super-resolution when available.
+    ///
+    /// The requested scale is clamped to `scaleFactorRange`, then rounded down to the closest runtime-supported scale for the source size.
+    /// HDR/Dolby Vision is preserved by default because unsupported conversions can silently change output appearance.
+    /// Enabling this mode routes playback through `KSMEPlayer`/Metal; AVPlayer and wireless-route playback cannot apply it.
+    case appleSuperResolution(scaleFactor: Float = Self.defaultScaleFactor, hdrPolicy: VideoUpscalingHDRPolicy = .preserveHDR)
+
+    public var isEnabled: Bool {
+        self != .none
+    }
+
+    public var requestedScaleFactor: Float {
+        switch self {
+        case .none:
+            return Self.defaultScaleFactor
+        case let .appleSuperResolution(scaleFactor, _):
+            return Self.validatedScaleFactor(scaleFactor)
+        }
+    }
+
+    var hdrPolicy: VideoUpscalingHDRPolicy {
+        switch self {
+        case .none:
+            return .preserveHDR
+        case let .appleSuperResolution(_, hdrPolicy):
+            return hdrPolicy
+        }
+    }
+
+    public static func validatedScaleFactor(_ scaleFactor: Float) -> Float {
+        guard scaleFactor.isFinite else {
+            return defaultScaleFactor
+        }
+        return min(max(scaleFactor, scaleFactorRange.lowerBound), scaleFactorRange.upperBound)
+    }
 }
 
 public struct VideoColorAdjustment: Equatable, Sendable {
@@ -884,11 +969,27 @@ public enum HighPerformanceVideoPlaybackPolicy {
         return (minimum: preferred, maximum: preferred * 2, preferred: preferred)
     }
 
-    static func shouldApplyUpscaling(mode: VideoUpscalingMode, sourceSize: CGSize, fps: Float) -> Bool {
-        guard mode != .none else {
-            return false
+    static func shouldApplyUpscaling(mode: VideoUpscalingMode, sourceSize: CGSize, fps: Float, dynamicRange: DynamicRange? = nil) -> Bool {
+        upscalingSkipReason(mode: mode, sourceSize: sourceSize, fps: fps, dynamicRange: dynamicRange) == nil
+    }
+
+    static func upscalingSkipReason(mode: VideoUpscalingMode, sourceSize: CGSize, fps: Float, dynamicRange: DynamicRange? = nil) -> String? {
+        guard mode.isEnabled else {
+            return "disabled"
         }
-        return !isHighWorkload(fps: fps, naturalSize: sourceSize)
+        guard mode.requestedScaleFactor > 1 else {
+            return "scale factor is 1x"
+        }
+        if dynamicRange?.isHDR == true, mode.hdrPolicy == .preserveHDR {
+            return "HDR output is preserved"
+        }
+        if isHighWorkload(fps: fps, naturalSize: sourceSize) {
+            return "high workload"
+        }
+        guard sourceSize.width > 0, sourceSize.height > 0 else {
+            return "unknown source size"
+        }
+        return nil
     }
 
     private static func pixelCount(_ size: CGSize) -> Int {
@@ -998,9 +1099,11 @@ public enum SeamlessLoopPlaybackPolicy {
 public enum ProgressPreviewThumbnailMode: Equatable, Sendable {
     /// Never generate progress-bar preview thumbnails.
     case disabled
-    /// Generate thumbnails only for local file URLs.
+    /// Generate thumbnails only for finite, seekable local file URLs.
     case localOnly
-    /// Allow thumbnail generation for any playable URL.
+    /// Allow thumbnail generation for finite, seekable VOD URLs, including remote URLs.
+    ///
+    /// Live and DVR streams are still skipped because thumbnail warming performs background seeks.
     case always
 }
 
@@ -1044,6 +1147,11 @@ public extension KSOptions {
     nonisolated(unsafe) static var offlineSubtitleGenerator: (any AudioRecognize)?
     nonisolated(unsafe) static var onlineSubtitleProviders: [any OnlineSubtitleProvider] = []
     nonisolated(unsafe) static var onlineSubtitleLanguages = ["zh-cn"]
+    nonisolated(unsafe) static var isExternalSubtitleTranslationEnabled = false
+    nonisolated(unsafe) static var externalSubtitleTranslationProvider: (any SubtitleTranslationProvider)?
+    nonisolated(unsafe) static var externalSubtitleTranslationDisplayMode = ExternalSubtitleTranslationDisplayMode.translation
+    nonisolated(unsafe) static var externalSubtitleTranslationSourceLanguage: String?
+    nonisolated(unsafe) static var externalSubtitleTranslationTargetLanguage: String?
     nonisolated(unsafe) static var audioSpatializationPreference = AudioSpatializationPreference.automatic
     nonisolated(unsafe) static var multichannelAudioPreference = MultichannelAudioPreference.automatic
     // 默认不用自研的硬解，因为有些视频的AVPacket的pts顺序是不对的，只有解码后的AVFrame里面的pts是对的。

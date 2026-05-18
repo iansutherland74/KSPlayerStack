@@ -45,6 +45,10 @@ In Xcode or your app `Package.swift`:
 
 Product: **KSPlayer**. Deployment target: **26.0**. Do not use CocoaPods for this stack.
 
+Video upscaling is opt-in via `KSOptions.videoUpscaling = .appleSuperResolution(scaleFactor: 2)`. It routes playback through `KSMEPlayer` because AVPlayer does not expose per-frame super-resolution output; HDR/Dolby Vision and high-workload 8K/90+ FPS sources are skipped by default.
+
+Progress preview thumbnails are enabled by default for local, finite, seekable VOD through `KSOptions.progressPreviewThumbnailMode = .localOnly`; use `.always` only when remote thumbnail warming is acceptable.
+
 ## 3. Push to your forks (optional)
 
 ```bash

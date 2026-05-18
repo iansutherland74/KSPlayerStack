@@ -20,6 +20,60 @@ class VideoPlayerViewTest: XCTestCase {
         XCTAssertNil(ProgressPreviewResolver.nearestThumbnailIndex(times: [], target: 12))
     }
 
+    func testProgressPreviewThumbnailPolicyKeepsRemoteOptIn() throws {
+        let localURL = URL(fileURLWithPath: "/tmp/movie.mp4")
+        let remoteURL = try XCTUnwrap(URL(string: "https://example.com/movie.mp4"))
+
+        XCTAssertTrue(ProgressPreviewResolver.shouldGenerateThumbnails(url: localURL, mode: .localOnly, duration: 120, isSeekable: true, isLiveStream: false))
+        XCTAssertFalse(ProgressPreviewResolver.shouldGenerateThumbnails(url: remoteURL, mode: .localOnly, duration: 120, isSeekable: true, isLiveStream: false))
+        XCTAssertTrue(ProgressPreviewResolver.shouldGenerateThumbnails(url: remoteURL, mode: .always, duration: 120, isSeekable: true, isLiveStream: false))
+        XCTAssertFalse(ProgressPreviewResolver.shouldGenerateThumbnails(url: localURL, mode: .disabled, duration: 120, isSeekable: true, isLiveStream: false))
+    }
+
+    func testProgressPreviewThumbnailPolicySkipsLiveAndNonSeekableSources() {
+        let localURL = URL(fileURLWithPath: "/tmp/movie.mp4")
+
+        XCTAssertFalse(ProgressPreviewResolver.shouldGenerateThumbnails(url: localURL, mode: .always, duration: 0, isSeekable: true, isLiveStream: true))
+        XCTAssertFalse(ProgressPreviewResolver.shouldGenerateThumbnails(url: localURL, mode: .always, duration: .infinity, isSeekable: true, isLiveStream: true))
+        XCTAssertFalse(ProgressPreviewResolver.shouldGenerateThumbnails(url: localURL, mode: .always, duration: 120, isSeekable: false, isLiveStream: false))
+    }
+
+    func testProgressPreviewRemoteWarmingRequiresExplicitAlwaysMode() throws {
+        let remoteURL = try XCTUnwrap(URL(string: "https://example.com/movie.mp4"))
+
+        XCTAssertFalse(ProgressPreviewResolver.shouldGenerateThumbnails(url: remoteURL, mode: .localOnly, duration: 120, isSeekable: true, isLiveStream: false))
+        XCTAssertTrue(ProgressPreviewResolver.shouldGenerateThumbnails(url: remoteURL, mode: .always, duration: 120, isSeekable: true, isLiveStream: false))
+        XCTAssertFalse(ProgressPreviewResolver.shouldGenerateThumbnails(url: remoteURL, mode: .always, duration: 0, isSeekable: true, isLiveStream: true))
+    }
+
+    func testProgressPreviewSourceChangeRequiresThumbnailReset() throws {
+        let firstURL = URL(fileURLWithPath: "/tmp/first.mp4")
+        let secondURL = URL(fileURLWithPath: "/tmp/second.mp4")
+
+        XCTAssertFalse(ProgressPreviewResolver.shouldResetThumbnailState(currentURL: firstURL, newURL: firstURL))
+        XCTAssertTrue(ProgressPreviewResolver.shouldResetThumbnailState(currentURL: firstURL, newURL: secondURL))
+        XCTAssertTrue(ProgressPreviewResolver.shouldResetThumbnailState(currentURL: nil, newURL: firstURL))
+    }
+
+    @MainActor
+    func testProgressPreviewShowsPlaceholderWithoutImage() {
+        let previewView = ProgressPreviewView()
+
+        previewView.set(timeText: "00:10", image: nil, isLoading: true)
+        #if canImport(UIKit)
+        XCTAssertEqual(previewView.accessibilityLabel, "00:10, Loading preview")
+        #else
+        XCTAssertEqual(previewView.accessibilityLabel(), "00:10, Loading preview")
+        #endif
+
+        previewView.set(timeText: "00:10", image: nil, isLoading: false)
+        #if canImport(UIKit)
+        XCTAssertEqual(previewView.accessibilityLabel, "00:10, Preview unavailable")
+        #else
+        XCTAssertEqual(previewView.accessibilityLabel(), "00:10, Preview unavailable")
+        #endif
+    }
+
     func testHighPerformanceVideoPolicyPreservesNormalFrameCapacity() {
         XCTAssertEqual(HighPerformanceVideoPlaybackPolicy.frameCapacity(fps: 24, naturalSize: CGSize(width: 3840, height: 2160), isLive: false), 16)
         XCTAssertEqual(HighPerformanceVideoPlaybackPolicy.frameCapacity(fps: 24, naturalSize: CGSize(width: 3840, height: 2160), isLive: true), 4)
@@ -73,6 +127,20 @@ class VideoPlayerViewTest: XCTestCase {
         XCTAssertTrue(KSPlayerLayer.preferredPlayerType(for: try XCTUnwrap(URL(string: "nfs://server/export/movie.mkv")), options: options) == KSMEPlayer.self)
         XCTAssertTrue(KSPlayerLayer.preferredPlayerType(for: try XCTUnwrap(URL(string: "srt://example.com:9000")), options: options) == KSMEPlayer.self)
         XCTAssertTrue(KSPlayerLayer.preferredPlayerType(for: try XCTUnwrap(URL(string: "https://example.com/movie.mkv")), options: options) == KSAVPlayer.self)
+    }
+
+    @MainActor
+    func testPreferredPlayerTypeRoutesUpscalingToMEPlayer() throws {
+        let originalFirstPlayerType = KSOptions.firstPlayerType
+        defer {
+            KSOptions.firstPlayerType = originalFirstPlayerType
+        }
+        KSOptions.firstPlayerType = KSAVPlayer.self
+
+        let options = KSOptions()
+        options.videoUpscaling = .appleSuperResolution(scaleFactor: 2)
+
+        XCTAssertTrue(KSPlayerLayer.preferredPlayerType(for: try XCTUnwrap(URL(string: "https://example.com/movie.mp4")), options: options) == KSMEPlayer.self)
     }
 
     func testFFmpegOnlyProtocolWhitelistIsExtendedWhenConstrained() throws {
@@ -365,6 +433,13 @@ class VideoPlayerViewTest: XCTestCase {
         XCTAssertEqual(toolbar.mediaTime(forSliderValue: 10), 130)
         XCTAssertEqual(toolbar.mediaTime(forSliderValue: 100), 165)
         XCTAssertEqual(toolbar.displayTime(for: 150), 30)
+    }
+
+    @MainActor
+    func testProgressPreviewPositionUsesDVRWindowDuration() {
+        let range = MediaPlaybackTimeRange(start: 120, duration: 45)
+
+        XCTAssertEqual(ProgressPreviewResolver.previewCenterX(time: 30, totalTime: range?.duration ?? 0, sliderWidth: 300, previewWidth: 120), 200)
     }
 
     @MainActor

@@ -10,12 +10,14 @@ import VideoToolbox
 
 @MainActor
 final class VideoUpscaler {
+    private(set) var state = VideoUpscalingState.inactive
     private var loggedMessages = Set<String>()
     #if !targetEnvironment(simulator) && (os(iOS) || os(tvOS) || os(visionOS) || os(macOS))
     private var appleSuperResolutionScaler: AnyObject?
     #endif
 
     func reset() {
+        state = .inactive
         #if !targetEnvironment(simulator) && (os(iOS) || os(tvOS) || os(visionOS) || os(macOS))
         if #available(iOS 26.0, tvOS 26.0, visionOS 26.0, macOS 26.0, *) {
             (appleSuperResolutionScaler as? AppleVideoSuperResolutionScaler)?.reset()
@@ -29,7 +31,11 @@ final class VideoUpscaler {
         case .none:
             reset()
             return nil
-        case let .appleSuperResolution(scaleFactor):
+        case .appleSuperResolution:
+            guard mode.requestedScaleFactor > 1 else {
+                state = .unavailable(reason: "scale factor is 1x")
+                return nil
+            }
             #if !targetEnvironment(simulator) && (os(iOS) || os(tvOS) || os(visionOS) || os(macOS))
             if #available(iOS 26.0, tvOS 26.0, visionOS 26.0, macOS 26.0, *) {
                 let scaler: AppleVideoSuperResolutionScaler
@@ -39,10 +45,21 @@ final class VideoUpscaler {
                     scaler = AppleVideoSuperResolutionScaler(log: logOnce)
                     appleSuperResolutionScaler = scaler
                 }
-                return scaler.upscale(pixelBuffer: pixelBuffer, time: time, requestedScaleFactor: scaleFactor)
+                guard let output = scaler.upscale(pixelBuffer: pixelBuffer, time: time, requestedScaleFactor: mode.requestedScaleFactor) else {
+                    state = .unavailable(reason: scaler.unavailableReason ?? "VideoToolbox low-latency super-resolution failed")
+                    return nil
+                }
+                state = .active(
+                    sourceSize: CGSize(width: CVPixelBufferGetWidth(pixelBuffer), height: CVPixelBufferGetHeight(pixelBuffer)),
+                    outputSize: CGSize(width: CVPixelBufferGetWidth(output.pixelBuffer), height: CVPixelBufferGetHeight(output.pixelBuffer)),
+                    scaleFactor: output.scaleFactor
+                )
+                return output.pixelBuffer
             }
             #endif
-            logOnce("[video] Apple super-resolution upscaling is unavailable on this platform or runtime")
+            let reason = "Apple super-resolution upscaling is unavailable on this platform or runtime"
+            state = .unavailable(reason: reason)
+            logOnce("[video] \(reason)")
             return nil
         }
     }
@@ -51,6 +68,17 @@ final class VideoUpscaler {
         if loggedMessages.insert(message).inserted {
             KSLog(message)
         }
+    }
+}
+
+public extension VideoUpscalingMode {
+    static var isAppleSuperResolutionRuntimeAvailable: Bool {
+        #if !targetEnvironment(simulator) && (os(iOS) || os(tvOS) || os(visionOS) || os(macOS))
+        if #available(iOS 26.0, tvOS 26.0, visionOS 26.0, macOS 26.0, *) {
+            return VTLowLatencySuperResolutionScalerConfiguration.isSupported
+        }
+        #endif
+        return false
     }
 }
 
@@ -72,6 +100,7 @@ private final class AppleVideoSuperResolutionScaler {
     private var processor: VTFrameProcessor?
     private var configuration: VTLowLatencySuperResolutionScalerConfiguration?
     private var sessionKey: SessionKey?
+    private(set) var unavailableReason: String?
 
     init(log: @escaping (String) -> Void) {
         self.log = log
@@ -82,18 +111,18 @@ private final class AppleVideoSuperResolutionScaler {
         processor = nil
         configuration = nil
         sessionKey = nil
+        unavailableReason = nil
     }
 
-    func upscale(pixelBuffer: CVPixelBuffer, time: CMTime, requestedScaleFactor: Float) -> CVPixelBuffer? {
+    func upscale(pixelBuffer: CVPixelBuffer, time: CMTime, requestedScaleFactor: Float) -> (pixelBuffer: CVPixelBuffer, scaleFactor: Float)? {
+        unavailableReason = nil
         guard VTLowLatencySuperResolutionScalerConfiguration.isSupported else {
-            log("[video] VideoToolbox low-latency super-resolution is not supported on this device")
-            return nil
+            return unavailable("VideoToolbox low-latency super-resolution is not supported on this device")
         }
         let width = CVPixelBufferGetWidth(pixelBuffer)
         let height = CVPixelBufferGetHeight(pixelBuffer)
         guard let scaleFactor = Self.supportedScaleFactor(width: width, height: height, requestedScaleFactor: requestedScaleFactor) else {
-            log("[video] VideoToolbox low-latency super-resolution does not support \(width)x\(height)")
-            return nil
+            return unavailable("VideoToolbox low-latency super-resolution does not support \(width)x\(height) at \(requestedScaleFactor)x")
         }
         let pixelFormat = CVPixelBufferGetPixelFormatType(pixelBuffer)
         let key = SessionKey(width: width, height: height, pixelFormat: pixelFormat, scaleFactor: scaleFactor)
@@ -101,8 +130,7 @@ private final class AppleVideoSuperResolutionScaler {
             return nil
         }
         guard let configuration, configuration.supportedPixelFormats.contains(pixelFormat) else {
-            log("[video] VideoToolbox low-latency super-resolution does not support pixel format \(pixelFormat)")
-            return nil
+            return unavailable("VideoToolbox low-latency super-resolution does not support pixel format \(pixelFormat)")
         }
         guard let destinationBuffer = makeDestinationBuffer(configuration: configuration, key: key) else {
             return nil
@@ -110,8 +138,7 @@ private final class AppleVideoSuperResolutionScaler {
         guard let sourceFrame = VTFrameProcessorFrame(buffer: pixelBuffer, presentationTimeStamp: time),
               let destinationFrame = VTFrameProcessorFrame(buffer: destinationBuffer, presentationTimeStamp: time)
         else {
-            log("[video] VideoToolbox low-latency super-resolution requires IOSurface-backed pixel buffers")
-            return nil
+            return unavailable("VideoToolbox low-latency super-resolution requires IOSurface-backed pixel buffers")
         }
 
         let parameters = VTLowLatencySuperResolutionScalerParameters(sourceFrame: sourceFrame, destinationFrame: destinationFrame)
@@ -122,23 +149,25 @@ private final class AppleVideoSuperResolutionScaler {
             semaphore.signal()
         }
         guard semaphore.wait(timeout: .now() + .milliseconds(100)) == .success else {
-            log("[video] VideoToolbox low-latency super-resolution timed out")
+            let reason = "VideoToolbox low-latency super-resolution timed out"
+            unavailableReason = reason
+            log("[video] \(reason)")
             reset()
+            unavailableReason = reason
             return nil
         }
         if let error = result.error {
-            log("[video] VideoToolbox low-latency super-resolution failed: \(error.localizedDescription)")
-            return nil
+            return unavailable("VideoToolbox low-latency super-resolution failed: \(error.localizedDescription)")
         }
         CVBufferPropagateAttachments(pixelBuffer, destinationBuffer)
-        return destinationBuffer
+        return (destinationBuffer, scaleFactor)
     }
 
     private static func supportedScaleFactor(width: Int, height: Int, requestedScaleFactor: Float) -> Float? {
         let scaleFactors = VTLowLatencySuperResolutionScalerConfiguration.supportedScaleFactors(frameWidth: width, frameHeight: height)
         return scaleFactors
             .filter { $0 > 1 && $0 <= requestedScaleFactor }
-            .max() ?? scaleFactors.filter { $0 > 1 }.min()
+            .max()
     }
 
     private func ensureSession(key: SessionKey) -> Bool {
@@ -155,7 +184,8 @@ private final class AppleVideoSuperResolutionScaler {
             sessionKey = key
             return true
         } catch {
-            log("[video] VideoToolbox low-latency super-resolution session failed: \(error.localizedDescription)")
+            unavailableReason = "VideoToolbox low-latency super-resolution session failed: \(error.localizedDescription)"
+            log("[video] \(unavailableReason!)")
             return false
         }
     }
@@ -173,10 +203,17 @@ private final class AppleVideoSuperResolutionScaler {
         var buffer: CVPixelBuffer?
         let status = CVPixelBufferCreate(kCFAllocatorDefault, width, height, key.pixelFormat, attributes as CFDictionary, &buffer)
         guard status == kCVReturnSuccess, let buffer else {
-            log("[video] VideoToolbox low-latency super-resolution could not allocate \(width)x\(height) output buffer: \(status)")
+            unavailableReason = "VideoToolbox low-latency super-resolution could not allocate \(width)x\(height) output buffer: \(status)"
+            log("[video] \(unavailableReason!)")
             return nil
         }
         return buffer
+    }
+
+    private func unavailable(_ reason: String) -> (pixelBuffer: CVPixelBuffer, scaleFactor: Float)? {
+        unavailableReason = reason
+        log("[video] \(reason)")
+        return nil
     }
 }
 #endif

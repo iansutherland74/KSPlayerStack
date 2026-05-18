@@ -415,6 +415,96 @@ class SubtitleTest: XCTestCase {
         XCTAssertEqual(info.comment, "fixture")
     }
 
+    func testExternalSubtitleTranslationModeReplacesParsedText() async throws {
+        let provider = RecordingSubtitleTranslationProvider(translations: ["你好"])
+        let info = URLSubtitleInfo(url: try makeSubtitleFile(extension: "srt", text: simpleSrt(text: "hello")))
+        info.configureExternalSubtitleTranslation(
+            isEnabled: true,
+            provider: provider,
+            displayMode: .translation,
+            sourceLanguage: "en",
+            targetLanguage: "zh-Hans"
+        )
+
+        try await info.loadIfNeeded()
+        await info.waitForExternalSubtitleTranslation()
+
+        let part = try XCTUnwrap(info.search(for: 0.5).first)
+        XCTAssertEqual(part.text?.string, "你好")
+        XCTAssertEqual(part.identifier, nil)
+        XCTAssertEqual(part.start, 0)
+        XCTAssertEqual(part.end, 1)
+        let requests = await provider.requests()
+        XCTAssertEqual(requests, [["hello"]])
+    }
+
+    func testExternalSubtitleBilingualModePreservesOriginalAndWords() async throws {
+        let provider = RecordingSubtitleTranslationProvider(translations: ["世界"])
+        let info = URLSubtitleInfo(url: try makeSubtitleFile(extension: "srt", text: simpleSrt(text: "world")))
+        info.parts = [
+            SubtitlePart(
+                0,
+                1,
+                "world",
+                wordTimings: [SubtitleWordTiming(start: 0, end: 1, text: "world")]
+            ),
+        ]
+        info.configureExternalSubtitleTranslation(
+            isEnabled: true,
+            provider: provider,
+            displayMode: .bilingual(separator: "\n"),
+            sourceLanguage: "en",
+            targetLanguage: "zh-Hans"
+        )
+
+        info.translateParsedPartsIfNeeded()
+        await info.waitForExternalSubtitleTranslation()
+
+        let part = try XCTUnwrap(info.search(for: 0.5).first)
+        XCTAssertEqual(part.text?.string, "world\n世界")
+        XCTAssertEqual(part.activeWordIndex(at: 0.5), 0)
+    }
+
+    func testExternalSubtitleTranslationCachesProviderWork() async throws {
+        let provider = RecordingSubtitleTranslationProvider(translations: ["hola"])
+        let info = URLSubtitleInfo(url: try makeSubtitleFile(extension: "srt", text: simpleSrt(text: "hello")))
+        info.configureExternalSubtitleTranslation(
+            isEnabled: true,
+            provider: provider,
+            displayMode: .translation,
+            sourceLanguage: "en",
+            targetLanguage: "es"
+        )
+
+        try await info.loadIfNeeded()
+        await info.waitForExternalSubtitleTranslation()
+        info.translateParsedPartsIfNeeded()
+        await info.waitForExternalSubtitleTranslation()
+
+        XCTAssertEqual(info.search(for: 0.5).first?.text?.string, "hola")
+        let requestCount = await provider.requestCount()
+        XCTAssertEqual(requestCount, 1)
+    }
+
+    func testExternalSubtitleTranslationSkipsImageSubtitles() async throws {
+        let provider = RecordingSubtitleTranslationProvider(translations: ["ignored"])
+        let info = URLSubtitleInfo(url: URL(fileURLWithPath: "/tmp/movie.sup"))
+        info.configureExternalSubtitleTranslation(
+            isEnabled: true,
+            provider: provider,
+            displayMode: .translation,
+            sourceLanguage: nil,
+            targetLanguage: "en"
+        )
+
+        try await info.loadIfNeeded()
+        await info.waitForExternalSubtitleTranslation()
+
+        XCTAssertTrue(info.parts.isEmpty)
+        let requestCount = await provider.requestCount()
+        XCTAssertEqual(requestCount, 0)
+    }
+
     func testAssImageSubtitleRenderPolicyUsesCodecCanvasBeforePlayRes() {
         let header = """
         [Script Info]
@@ -546,7 +636,8 @@ class SubtitleTest: XCTestCase {
         try await Task.sleep(nanoseconds: 10_000_000)
 
         XCTAssertTrue(generator.search(for: 0.5).isEmpty)
-        XCTAssertEqual(await provider.resetCount(), 1)
+        let resetCount = await provider.resetCount()
+        XCTAssertEqual(resetCount, 1)
     }
 
     func testOfflineSubtitleGeneratorIgnoresStaleProviderResultsAfterReset() async throws {
@@ -559,8 +650,10 @@ class SubtitleTest: XCTestCase {
         try await Task.sleep(nanoseconds: 100_000_000)
 
         XCTAssertTrue(generator.search(for: 0.01).isEmpty)
-        XCTAssertEqual(await provider.processCount(), 1)
-        XCTAssertEqual(await provider.resetCount(), 1)
+        let processCount = await provider.processCount()
+        let resetCount = await provider.resetCount()
+        XCTAssertEqual(processCount, 1)
+        XCTAssertEqual(resetCount, 1)
     }
 }
 
@@ -577,6 +670,29 @@ private struct StaticOnlineSubtitleProvider: OnlineSubtitleProvider {
 
     func searchSubtitles(request _: OnlineSubtitleSearchRequest) async throws -> [OnlineSubtitleSearchResult] {
         results
+    }
+}
+
+private actor RecordingSubtitleTranslationProvider: SubtitleTranslationProvider {
+    let providerID = "recording"
+    private let translations: [String]
+    private var recordedRequests = [[String]]()
+
+    init(translations: [String]) {
+        self.translations = translations
+    }
+
+    func translateSubtitles(_ texts: [String], request _: SubtitleTranslationRequest) async throws -> [String] {
+        recordedRequests.append(texts)
+        return translations
+    }
+
+    func requests() -> [[String]] {
+        recordedRequests
+    }
+
+    func requestCount() -> Int {
+        recordedRequests.count
     }
 }
 
@@ -675,6 +791,23 @@ private func makeAudioFrame() -> AudioFrame {
         pointer.update(from: samples, count: samples.count)
     }
     return frame
+}
+
+private func simpleSrt(text: String) -> String {
+    """
+    1
+    00:00:00,000 --> 00:00:01,000
+    \(text)
+
+    """
+}
+
+private func makeSubtitleFile(extension fileExtension: String, text: String) throws -> URL {
+    let url = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString)
+        .appendingPathExtension(fileExtension)
+    try text.write(to: url, atomically: true, encoding: .utf8)
+    return url
 }
 
 private func makeSubtitleImage(width: Int, height: Int) -> UIImage {

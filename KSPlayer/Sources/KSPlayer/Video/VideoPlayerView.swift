@@ -345,6 +345,9 @@ open class VideoPlayerView: PlayerView {
             replayButton.isHidden = false
             seekToView.isHidden = true
             delayItem?.cancel()
+            if state != .paused {
+                hideProgressPreview()
+            }
             isMaskShow = true
             if state == .playedToTheEnd {
                 replayButton.isSelected = true
@@ -398,6 +401,7 @@ open class VideoPlayerView: PlayerView {
         currentDefinition = definitionIndex >= resource.definitions.count ? resource.definitions.count - 1 : definitionIndex
         let asset = resource.definitions[currentDefinition]
         resetProgressPreviewThumbnails()
+        hideProgressPreview()
         srtControl.apply(options: asset.options)
         updateSrt()
         srtControl.url = asset.url
@@ -418,6 +422,7 @@ open class VideoPlayerView: PlayerView {
 
     open func set(resource: KSPlayerResource, definitionIndex: Int = 0, isSetUrl: Bool = true) {
         resetProgressPreviewThumbnails()
+        hideProgressPreview()
         adaptiveBitrateState = AdaptiveBitrateSwitchingState()
         currentDefinition = definitionIndex >= resource.definitions.count ? resource.definitions.count - 1 : definitionIndex
         srtControl.apply(options: resource.definitions[currentDefinition].options)
@@ -829,14 +834,21 @@ extension VideoPlayerView: KSProgressPreviewInteractionDelegate {
 }
 
 private extension VideoPlayerView {
-    func showProgressPreview(time: TimeInterval) {
-        guard playerLayer?.options.isProgressPreviewEnabled == true, totalTime > 0 else {
+    func showProgressPreview(time sliderValue: TimeInterval) {
+        let previewDuration = toolBar.sliderDuration
+        guard playerLayer?.options.isProgressPreviewEnabled == true, toolBar.isSeekable, previewDuration > 0 else {
+            hideProgressPreview()
             return
         }
-        let time = min(max(time, 0), totalTime)
-        progressPreviewRequestedTime = time
-        progressPreviewView.set(timeText: time.toString(for: toolBar.timeType), image: progressPreviewThumbnail(for: time))
-        updateProgressPreviewPosition(time: time)
+        let sliderValue = min(max(sliderValue, 0), previewDuration)
+        let mediaTime = toolBar.mediaTime(forSliderValue: sliderValue)
+        progressPreviewRequestedTime = sliderValue
+        progressPreviewView.set(
+            timeText: sliderValue.toString(for: toolBar.timeType),
+            image: progressPreviewThumbnail(for: mediaTime),
+            isLoading: progressPreviewIsLoadingThumbnail
+        )
+        updateProgressPreviewPosition(time: sliderValue)
         progressPreviewView.isHidden = false
         isMaskShow = true
     }
@@ -851,7 +863,7 @@ private extension VideoPlayerView {
         let sliderWidth = toolBar.timeSlider.bounds.width
         let centerX = toolBar.timeSlider.frame.minX + ProgressPreviewResolver.previewCenterX(
             time: time,
-            totalTime: totalTime,
+            totalTime: toolBar.sliderDuration,
             sliderWidth: sliderWidth,
             previewWidth: ProgressPreviewView.preferredWidth
         )
@@ -866,11 +878,24 @@ private extension VideoPlayerView {
         return progressPreviewThumbnails[index].image
     }
 
+    var progressPreviewIsLoadingThumbnail: Bool {
+        progressPreviewThumbnailTask != nil && progressPreviewThumbnails.isEmpty
+    }
+
     func prepareProgressPreviewThumbnails(for layer: KSPlayerLayer) {
-        guard layer.options.isProgressPreviewEnabled, canGenerateProgressPreviewThumbnails(for: layer.url, mode: layer.options.progressPreviewThumbnailMode) else {
+        guard layer.options.isProgressPreviewEnabled,
+              ProgressPreviewResolver.shouldGenerateThumbnails(
+                  url: layer.url,
+                  mode: layer.options.progressPreviewThumbnailMode,
+                  duration: layer.player.duration,
+                  isSeekable: layer.player.seekable,
+                  isLiveStream: layer.player.duration <= 0 || !layer.player.duration.isFinite
+              )
+        else {
+            resetProgressPreviewThumbnails()
             return
         }
-        guard progressPreviewThumbnailURL != layer.url else {
+        guard ProgressPreviewResolver.shouldResetThumbnailState(currentURL: progressPreviewThumbnailURL, newURL: layer.url) else {
             return
         }
 
@@ -886,11 +911,26 @@ private extension VideoPlayerView {
                 await MainActor.run { [weak self] in
                     guard let self, self.progressPreviewThumbnailURL == url else { return }
                     self.progressPreviewThumbnails = thumbnails.sorted { $0.time < $1.time }
+                    self.progressPreviewThumbnailTask = nil
                     if let time = self.progressPreviewRequestedTime, !self.progressPreviewView.isHidden {
-                        self.progressPreviewView.set(timeText: time.toString(for: self.toolBar.timeType), image: self.progressPreviewThumbnail(for: time))
+                        self.progressPreviewView.set(
+                            timeText: time.toString(for: self.toolBar.timeType),
+                            image: self.progressPreviewThumbnail(for: self.toolBar.mediaTime(forSliderValue: time)),
+                            isLoading: false
+                        )
                     }
                 }
             } catch {
+                if error is CancellationError {
+                    return
+                }
+                await MainActor.run { [weak self] in
+                    guard let self, self.progressPreviewThumbnailURL == url else { return }
+                    self.progressPreviewThumbnailTask = nil
+                    if let time = self.progressPreviewRequestedTime, !self.progressPreviewView.isHidden {
+                        self.progressPreviewView.set(timeText: time.toString(for: self.toolBar.timeType), image: nil, isLoading: false)
+                    }
+                }
                 KSLog(level: .debug, "progress preview thumbnails unavailable: \(error)")
             }
         }
@@ -903,16 +943,6 @@ private extension VideoPlayerView {
         progressPreviewThumbnails.removeAll()
     }
 
-    func canGenerateProgressPreviewThumbnails(for url: URL, mode: ProgressPreviewThumbnailMode) -> Bool {
-        switch mode {
-        case .disabled:
-            return false
-        case .localOnly:
-            return url.isFileURL
-        case .always:
-            return true
-        }
-    }
 }
 
 // MARK: - private functions

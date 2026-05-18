@@ -187,6 +187,29 @@ let asset = KSPlayerResource(name: "Video Name",
 playerView.set(resource: asset)
 ```
 
+#### Video upscaling
+
+```swift
+let options = KSOptions()
+options.videoUpscaling = .appleSuperResolution(scaleFactor: 2)
+playerView.set(url: url, options: options)
+```
+
+Video upscaling uses the MEPlayer/Metal path because AVPlayer does not expose per-frame super-resolution output. The requested scale factor is clamped to the supported range and then matched to the closest VideoToolbox-supported scale for the source. HDR and Dolby Vision sources are preserved by default; use `.appleSuperResolution(scaleFactor: 2, hdrPolicy: .allowHDR)` only after validating output on your target devices. Upscaling is skipped for high-workload sources such as 8K or 90+ FPS video.
+
+Check `VideoUpscalingMode.isAppleSuperResolutionRuntimeAvailable` before presenting the option as available, and observe `options.videoUpscalingState` to learn whether the renderer is active or why the request is unavailable. The state resets to `.inactive` on source replacement, flush, and renderer teardown; wireless-route playback falls back to the native AVPlayer path and reports upscaling as unavailable.
+
+#### Progress preview thumbnails
+
+```swift
+let options = KSOptions()
+options.isProgressPreviewEnabled = true
+options.progressPreviewThumbnailMode = .localOnly
+playerView.set(url: url, options: options)
+```
+
+Progress previews show a scrubber time bubble and can warm thumbnail images for finite, seekable VOD. The default `.localOnly` mode avoids network work; use `.always` only when remote thumbnail warming is acceptable. Live and DVR streams keep the time preview but skip thumbnail warming because generation performs background seeks.
+
 #### Listening status change
 
 ```swift

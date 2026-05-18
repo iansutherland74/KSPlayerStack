@@ -29,12 +29,18 @@ public class ThumbnailController: @unchecked Sendable {
     }
 
     public func generateThumbnail(for url: URL, thumbWidth: Int32 = 240) async throws -> [FFThumbnail] {
-        try await Task.detached(priority: .utility) {
+        let task = Task.detached(priority: .utility) {
             try self.getPeeks(for: url, thumbWidth: thumbWidth)
-        }.value
+        }
+        return try await withTaskCancellationHandler {
+            try await task.value
+        } onCancel: {
+            task.cancel()
+        }
     }
 
     private func getPeeks(for url: URL, thumbWidth: Int32 = 240) throws -> [FFThumbnail] {
+        try Task.checkCancellation()
         let urlString: String
         if url.isFileURL {
             urlString = url.path
@@ -91,6 +97,7 @@ public class ThumbnailController: @unchecked Sendable {
             throw NSError(description: "can not av_frame_alloc")
         }
         for i in 0 ..< thumbnailCount {
+            try Task.checkCancellation()
             let seek_pos = interval * Int64(i) + videoStream.pointee.start_time
             avcodec_flush_buffers(codecContext)
             result = av_seek_frame(formatCtx, Int32(videoStreamIndex), seek_pos, AVSEEK_FLAG_BACKWARD)
@@ -99,6 +106,7 @@ public class ThumbnailController: @unchecked Sendable {
             }
             avcodec_flush_buffers(codecContext)
             while av_read_frame(formatCtx, &packet) >= 0 {
+                try Task.checkCancellation()
                 if packet.stream_index == Int32(videoStreamIndex) {
                     if avcodec_send_packet(codecContext, &packet) < 0 {
                         break

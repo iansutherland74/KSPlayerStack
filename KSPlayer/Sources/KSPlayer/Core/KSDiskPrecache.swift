@@ -8,6 +8,7 @@ public enum KSDiskPrecache {
     private static let unsupportedExtensions: Set<String> = ["m3u", "m3u8", "mpd", "ism", "isml"]
     private static let queue = DispatchQueue(label: "KSPlayer.KSDiskPrecache")
     nonisolated(unsafe) private static var activeDownloads = Set<String>()
+    nonisolated(unsafe) private static var activeDownloadTasks = [String: URLSessionTask]()
 
     public static func playbackURL(for url: URL, options: KSOptions) -> URL {
         guard options.isDiskPrecacheEnabled else {
@@ -58,10 +59,11 @@ public enum KSDiskPrecache {
             }
             storeDownloadedFile(from: temporaryURL, to: targetURL, directory: directory, maxFileSize: maxFileSize, maxCacheSize: maxCacheSize)
         }
+        markDownloadTask(task, key: key)
         task.resume()
     }
 
-    private static func downloadRequest(for url: URL, options: KSOptions) -> URLRequest {
+    static func downloadRequest(for url: URL, options: KSOptions) -> URLRequest {
         var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData)
         if let headers = options.avOptions["AVURLAssetHTTPHeaderFieldsKey"] as? [String: String] {
             for (field, value) in headers {
@@ -87,6 +89,37 @@ public enum KSDiskPrecache {
         }
         touchCachedFile(at: fileURL)
         return fileURL
+    }
+
+    public static func cacheSize(options: KSOptions) -> Int64 {
+        cacheSize(directory: cacheDirectoryURL(options: options))
+    }
+
+    public static func trimCache(options: KSOptions) {
+        trimCache(directory: cacheDirectoryURL(options: options), maxSize: options.diskPrecacheMaxCacheSize)
+    }
+
+    public static func clearCache(options: KSOptions) {
+        cancelAllPrecache()
+        try? FileManager.default.removeItem(at: cacheDirectoryURL(options: options))
+    }
+
+    public static func cancelPrecache(for url: URL) {
+        let key = cacheKey(for: url)
+        let task = queue.sync {
+            activeDownloadTasks[key]
+        }
+        task?.cancel()
+    }
+
+    public static func cancelAllPrecache() {
+        let tasks = queue.sync {
+            let tasks = Array(activeDownloadTasks.values)
+            activeDownloads.removeAll()
+            activeDownloadTasks.removeAll()
+            return tasks
+        }
+        tasks.forEach { $0.cancel() }
     }
 
     public static func cacheKey(for url: URL) -> String {
@@ -130,9 +163,19 @@ public enum KSDiskPrecache {
         }
     }
 
+    private static func markDownloadTask(_ task: URLSessionTask, key: String) {
+        queue.sync {
+            guard activeDownloads.contains(key) else {
+                return
+            }
+            activeDownloadTasks[key] = task
+        }
+    }
+
     private static func markDownloadFinished(key: String) {
         queue.sync {
             _ = activeDownloads.remove(key)
+            activeDownloadTasks[key] = nil
         }
     }
 
@@ -150,6 +193,7 @@ public enum KSDiskPrecache {
 
     private static func storeDownloadedFile(from temporaryURL: URL, to targetURL: URL, directory: URL, maxFileSize: Int64, maxCacheSize: Int64) {
         let fileManager = FileManager.default
+        let cacheTemporaryURL = temporaryFileURL(for: targetURL)
         do {
             try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
             guard let size = cachedFileSize(at: temporaryURL), size > 0, size <= min(maxFileSize, maxCacheSize) else {
@@ -159,7 +203,15 @@ public enum KSDiskPrecache {
             if fileManager.fileExists(atPath: targetURL.path) {
                 return
             }
-            try fileManager.moveItem(at: temporaryURL, to: targetURL)
+            try? fileManager.removeItem(at: cacheTemporaryURL)
+            try fileManager.moveItem(at: temporaryURL, to: cacheTemporaryURL)
+            defer {
+                try? fileManager.removeItem(at: cacheTemporaryURL)
+            }
+            if fileManager.fileExists(atPath: targetURL.path) {
+                return
+            }
+            try fileManager.moveItem(at: cacheTemporaryURL, to: targetURL)
             touchCachedFile(at: targetURL)
             trimCache(directory: directory, maxSize: maxCacheSize)
         } catch {
@@ -167,7 +219,7 @@ public enum KSDiskPrecache {
         }
     }
 
-    private static func trimCache(directory: URL, maxSize: Int64) {
+    static func trimCache(directory: URL, maxSize: Int64) {
         guard maxSize > 0 else {
             try? FileManager.default.removeItem(at: directory)
             return
@@ -199,6 +251,31 @@ public enum KSDiskPrecache {
             try? fileManager.removeItem(at: entry.url)
             totalSize -= entry.size
         }
+    }
+
+    private static func cacheSize(directory: URL) -> Int64 {
+        guard let files = try? FileManager.default.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: [.fileSizeKey, .isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return 0
+        }
+        return files.reduce(Int64(0)) { total, url in
+            guard url.pathExtension != temporaryExtension,
+                  let size = cachedFileSize(at: url)
+            else {
+                return total
+            }
+            return total + size
+        }
+    }
+
+    private static func temporaryFileURL(for targetURL: URL) -> URL {
+        targetURL
+            .deletingLastPathComponent()
+            .appendingPathComponent(".\(targetURL.lastPathComponent).\(UUID().uuidString)")
+            .appendingPathExtension(temporaryExtension)
     }
 
     private static func cachedFileSize(at url: URL) -> Int64? {

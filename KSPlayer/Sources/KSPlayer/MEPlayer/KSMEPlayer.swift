@@ -116,6 +116,7 @@ public class KSMEPlayer: NSObject, @unchecked Sendable {
 
     public required init(url: URL, options: KSOptions) {
         KSOptions.setAudioSession(options: options)
+        options.videoUpscalingState = .inactive
         audioOutput = KSOptions.audioPlayerType.init()
         playerItem = MEPlayerItem(url: url, options: options)
         if options.videoDisable {
@@ -327,6 +328,7 @@ extension KSMEPlayer: @preconcurrency MediaPlayerProtocol {
         KSLog("replaceUrl \(self)")
         KSOptions.setAudioSession(options: options)
         shutdown()
+        options.videoUpscalingState = .inactive
         playerItem.delegate = nil
         playerItem = MEPlayerItem(url: url, options: options)
         if options.videoDisable {
@@ -416,6 +418,7 @@ extension KSMEPlayer: @preconcurrency MediaPlayerProtocol {
 
     public func shutdown() {
         KSLog("shutdown \(self)")
+        options.videoUpscalingState = .inactive
         playbackState = .stopped
         loadState = .idle
         isReadyToPlay = false

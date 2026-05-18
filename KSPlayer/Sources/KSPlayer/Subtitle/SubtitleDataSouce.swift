@@ -19,9 +19,15 @@ public class EmptySubtitleInfo: SubtitleInfo {
 public class URLSubtitleInfo: KSSubtitle, SubtitleInfo, SubtitleKindProviding, @unchecked Sendable {
     public var isEnabled: Bool = false {
         didSet {
-            if isEnabled, parts.isEmpty, !downloadURL.isImageSubtitle {
+            if isEnabled, parts.isEmpty, downloadURL.isTextSubtitle {
                 Task {
-                    try? await parse(url: downloadURL, userAgent: userAgent)
+                    try? await loadIfNeeded()
+                }
+            } else if !isEnabled {
+                translationLock.locked {
+                    translationGeneration += 1
+                    translationTask?.cancel()
+                    activeTranslationCacheKey = nil
                 }
             }
         }
@@ -36,6 +42,13 @@ public class URLSubtitleInfo: KSSubtitle, SubtitleInfo, SubtitleKindProviding, @
     public var comment: String?
     public var userInfo: NSMutableDictionary?
     private let userAgent: String?
+    private let translationLock = NSLock()
+    private var translationConfiguration: SubtitleTranslationConfiguration?
+    private var originalPartSnapshots: [SubtitlePartSnapshot]?
+    private var translatedPartCache = [String: [SubtitlePartSnapshot]]()
+    private var activeTranslationCacheKey: String?
+    private var translationGeneration = 0
+    private var translationTask: Task<Void, Never>?
     public convenience init(url: URL) {
         self.init(subtitleID: url.absoluteString, name: url.lastPathComponent, url: url)
     }
@@ -59,6 +72,153 @@ public class URLSubtitleInfo: KSSubtitle, SubtitleInfo, SubtitleKindProviding, @
                 self.downloadURL = fileURL
             }
         }
+    }
+
+    deinit {
+        translationTask?.cancel()
+    }
+
+    public func loadIfNeeded() async throws {
+        guard parts.isEmpty, downloadURL.isTextSubtitle else {
+            return
+        }
+        try await parse(url: downloadURL, userAgent: userAgent)
+        originalPartSnapshots = parts.compactMap(SubtitlePartSnapshot.init(part:))
+        translateParsedPartsIfNeeded()
+    }
+
+    public func waitForExternalSubtitleTranslation() async {
+        let task = translationLock.locked {
+            translationTask
+        }
+        await task?.value
+    }
+
+    public func configureExternalSubtitleTranslation(
+        isEnabled: Bool,
+        provider: (any SubtitleTranslationProvider)?,
+        displayMode: ExternalSubtitleTranslationDisplayMode,
+        sourceLanguage: String?,
+        targetLanguage: String?
+    ) {
+        translationLock.locked {
+            translationGeneration += 1
+            translationTask?.cancel()
+            activeTranslationCacheKey = nil
+            guard isEnabled, let provider, downloadURL.isTextSubtitle else {
+                translationConfiguration = nil
+                if let originalPartSnapshots {
+                    parts = originalPartSnapshots.map { $0.part() }
+                }
+                return
+            }
+            translationConfiguration = SubtitleTranslationConfiguration(
+                provider: provider,
+                displayMode: displayMode,
+                sourceLanguage: sourceLanguage,
+                targetLanguage: targetLanguage
+            )
+        }
+        translateParsedPartsIfNeeded()
+    }
+
+    func translateParsedPartsIfNeeded() {
+        guard downloadURL.isTextSubtitle else {
+            return
+        }
+        let snapshots = originalPartSnapshots ?? parts.compactMap(SubtitlePartSnapshot.init(part:))
+        guard !snapshots.isEmpty else {
+            return
+        }
+        originalPartSnapshots = snapshots
+
+        let configuration: SubtitleTranslationConfiguration?
+        let generation: Int
+        translationLock.lock()
+        configuration = translationConfiguration
+        generation = translationGeneration
+        translationLock.unlock()
+
+        guard let configuration else {
+            return
+        }
+
+        let cacheKey = translationCacheKey(configuration: configuration, snapshots: snapshots)
+        if let cached = translationLock.locked({ translatedPartCache[cacheKey] }) {
+            parts = cached.map { $0.part() }
+            activeTranslationCacheKey = cacheKey
+            return
+        }
+        guard activeTranslationCacheKey != cacheKey else {
+            return
+        }
+
+        let texts = snapshots.map(\.text)
+        let request = SubtitleTranslationRequest(
+            subtitleID: subtitleID,
+            subtitleName: name,
+            sourceLanguage: configuration.sourceLanguage,
+            targetLanguage: configuration.targetLanguage
+        )
+        activeTranslationCacheKey = cacheKey
+        translationTask?.cancel()
+        translationTask = Task { [weak self] in
+            do {
+                let translations = try await configuration.provider.translateSubtitles(texts, request: request)
+                try Task.checkCancellation()
+                self?.applyTranslations(
+                    translations,
+                    snapshots: snapshots,
+                    configuration: configuration,
+                    cacheKey: cacheKey,
+                    generation: generation
+                )
+            } catch is CancellationError {
+            } catch {
+                KSLog(error)
+            }
+        }
+    }
+
+    private func applyTranslations(
+        _ translations: [String],
+        snapshots: [SubtitlePartSnapshot],
+        configuration: SubtitleTranslationConfiguration,
+        cacheKey: String,
+        generation: Int
+    ) {
+        translationLock.lock()
+        defer {
+            translationLock.unlock()
+        }
+        guard generation == translationGeneration, activeTranslationCacheKey == cacheKey else {
+            return
+        }
+        let translatedSnapshots = snapshots.enumerated().map { index, snapshot in
+            let translation = translations.indices.contains(index) ? translations[index] : snapshot.text
+            let displayText = configuration.displayMode.displayText(original: snapshot.text, translation: translation)
+            let preserveWords = configuration.displayMode.preservesOriginalText || displayText == snapshot.text
+            return SubtitlePartSnapshot(
+                start: snapshot.start,
+                end: snapshot.end,
+                identifier: snapshot.identifier,
+                text: displayText,
+                wordTimings: preserveWords ? snapshot.wordTimings : [],
+                textPosition: snapshot.textPosition
+            )
+        }
+        translatedPartCache[cacheKey] = translatedSnapshots
+        parts = translatedSnapshots.map { $0.part() }
+    }
+
+    private func translationCacheKey(configuration: SubtitleTranslationConfiguration, snapshots: [SubtitlePartSnapshot]) -> String {
+        [
+            configuration.provider.providerID,
+            configuration.displayMode.cacheComponent,
+            configuration.sourceLanguage ?? "",
+            configuration.targetLanguage ?? "",
+            snapshots.map { "\($0.identifier ?? ""):\($0.start)-\($0.end):\($0.text)" }.joined(separator: "|"),
+        ].joined(separator: "\u{1F}")
     }
 }
 
@@ -399,5 +559,15 @@ extension URL {
             return file.readData(ofLength: 4096).md5()
         }.joined(separator: ";")
         return hash
+    }
+}
+
+private extension NSLock {
+    func locked<Result>(_ body: () throws -> Result) rethrows -> Result {
+        lock()
+        defer {
+            unlock()
+        }
+        return try body()
     }
 }
