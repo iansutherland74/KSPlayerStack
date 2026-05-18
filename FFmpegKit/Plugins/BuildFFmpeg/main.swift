@@ -175,7 +175,7 @@ enum Library: String, CaseIterable {
         case .nettle:
             return "nettle_3.9.1_release_20230601"
         case .libdav1d:
-            return "1.1.0"
+            return "1.5.3"
         case .gmp:
             return "v6.2.1"
         case .libtls:
@@ -185,7 +185,7 @@ enum Library: String, CaseIterable {
         case .boringssl:
             return "master"
         case .libplacebo:
-            return "v6.338.2"
+            return "v7.360.1"
         case .vulkan:
             return "v1.2.8"
         case .libshaderc:
@@ -228,7 +228,7 @@ enum Library: String, CaseIterable {
         case .gmp:
             return "https://github.com/alisw/GMP"
         case .libdav1d:
-            return "https://github.com/videolan/dav1d"
+            return "https://code.videolan.org/videolan/dav1d.git"
         case .libtls:
             return "https://github.com/libressl/portable"
         case .libzvbi:
