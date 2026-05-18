@@ -11,7 +11,7 @@ import Libavcodec
 import Libavfilter
 import Libavformat
 
-public final class MEPlayerItem: Sendable {
+public final class MEPlayerItem: @unchecked Sendable {
     private let url: URL
     private let options: KSOptions
     private let operationQueue = OperationQueue()
@@ -91,7 +91,7 @@ public final class MEPlayerItem: Sendable {
         Int(8 * (self?.videoTrack?.bitrate ?? 0))
     }
 
-    private static var onceInitial: Void = {
+    private static let onceInitial: Void = {
         var result = avformat_network_init()
         av_log_set_callback { ptr, level, format, args in
             guard let format else {

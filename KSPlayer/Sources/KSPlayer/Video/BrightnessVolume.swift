@@ -63,6 +63,7 @@ open class BrightnessVolume {
     }
 }
 
+@MainActor
 public protocol BrightnessVolumeViewProtocol {
     // type: 0 brightness type: 1 volume
     func setProgress(_ progress: Float, type: UInt)

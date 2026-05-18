@@ -359,7 +359,7 @@ extension KSAVPlayer {
     }
 }
 
-extension KSAVPlayer: MediaPlayerProtocol {
+extension KSAVPlayer: @preconcurrency MediaPlayerProtocol {
     public var subtitleDataSouce: SubtitleDataSouce? { nil }
     public var isPlaying: Bool { player.rate > 0 ? true : playbackState == .playing }
     public var view: UIView? { playerView }
@@ -511,7 +511,7 @@ extension AVAssetTrack {
     func toMediaPlayerTrack() {}
 }
 
-class AVMediaPlayerTrack: MediaPlayerTrack {
+class AVMediaPlayerTrack: @preconcurrency MediaPlayerTrack {
     let formatDescription: CMFormatDescription?
     let description: String
     private let track: AVPlayerItemTrack
@@ -559,11 +559,6 @@ class AVMediaPlayerTrack: MediaPlayerTrack {
         bitDepth = formatDescription?.bitDepth ?? 0
         // swiftlint:enable force_cast
         description = (formatDescription?.mediaSubType ?? .boxed).rawValue.string
-        #if os(xrOS)
-        Task {
-            isPlayable = await (try? track.assetTrack?.load(.isPlayable)) ?? false
-        }
-        #endif
     }
 
     func load() {}

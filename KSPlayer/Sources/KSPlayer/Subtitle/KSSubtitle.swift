@@ -147,7 +147,7 @@ public extension SubtitleInfo {
     }
 }
 
-public class KSSubtitle {
+public class KSSubtitle: @unchecked Sendable {
     public var parts: [SubtitlePart] = []
     public init() {}
 }
@@ -277,17 +277,17 @@ open class SubtitleModel: ObservableObject {
         }
     }
 
-    public static var textColor: Color = .white
-    public static var textBackgroundColor: Color = .clear
+    nonisolated(unsafe) public static var textColor: Color = .white
+    nonisolated(unsafe) public static var textBackgroundColor: Color = .clear
     public static var textFont: UIFont {
         textBold ? .boldSystemFont(ofSize: textFontSize) : .systemFont(ofSize: textFontSize)
     }
 
-    public static var textFontSize = SubtitleModel.Size.standard.rawValue
-    public static var textBold = false
-    public static var textItalic = false
-    public static var textPosition = TextPosition()
-    public static var audioRecognizes = [any AudioRecognize]()
+    nonisolated(unsafe) public static var textFontSize = SubtitleModel.Size.standard.rawValue
+    nonisolated(unsafe) public static var textBold = false
+    nonisolated(unsafe) public static var textItalic = false
+    nonisolated(unsafe) public static var textPosition = TextPosition()
+    nonisolated(unsafe) public static var audioRecognizes = [any AudioRecognize]()
     private var subtitleDataSouces: [SubtitleDataSouce] = KSOptions.subtitleDataSouces
     @Published
     public private(set) var subtitleInfos = [any SubtitleInfo]()
@@ -305,7 +305,7 @@ open class SubtitleModel: ObservableObject {
                 addSubtitle(dataSouce: datasouce)
             }
             // 要用async，不能在更新UI的时候，修改Publishe变量
-            DispatchQueue.main.async { [weak self] in
+            runOnMainThread { [weak self] in
                 self?.parts = []
                 self?.selectedSubtitleInfo = nil
             }

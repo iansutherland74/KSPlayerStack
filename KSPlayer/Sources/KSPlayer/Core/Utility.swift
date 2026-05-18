@@ -5,7 +5,7 @@
 //  Created by kintan on 2018/3/9.
 //
 
-import AVFoundation
+@preconcurrency import AVFoundation
 import CryptoKit
 import SwiftUI
 
@@ -222,9 +222,9 @@ extension AVAsset {
         return exportSession
     }
 
-    func exportMp4(beginTime: TimeInterval, endTime: TimeInterval, outputURL: URL, progress: @escaping (Double) -> Void, completion: @escaping (Result<URL, Error>) -> Void) throws {
+    func exportMp4(beginTime: TimeInterval, endTime: TimeInterval, outputURL: URL, progress: @escaping @Sendable (Double) -> Void, completion: @escaping @Sendable (Result<URL, Error>) -> Void) throws {
         try FileManager.default.removeItem(at: outputURL)
-        Task {
+        Task { @MainActor in
             guard let exportSession = try await createExportSession(beginTime: beginTime, endTime: endTime) else { return }
             exportSession.outputURL = outputURL
             await exportSession.export()
@@ -250,7 +250,7 @@ extension AVAsset {
         }
     }
 
-    func exportMp4(beginTime: TimeInterval, endTime: TimeInterval, progress: @escaping (Double) -> Void, completion: @escaping (Result<URL, Error>) -> Void) throws {
+    func exportMp4(beginTime: TimeInterval, endTime: TimeInterval, progress: @escaping @Sendable (Double) -> Void, completion: @escaping @Sendable (Result<URL, Error>) -> Void) throws {
         guard var exportURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else { return }
         exportURL = exportURL.appendingPathExtension("Export.mp4")
         try exportMp4(beginTime: beginTime, endTime: endTime, outputURL: exportURL, progress: progress, completion: completion)
@@ -352,12 +352,12 @@ func - (left: CGSize, right: CGSize) -> CGSize {
 @inline(__always)
 @preconcurrency
 // @MainActor
-public func runOnMainThread(block: @escaping () -> Void) {
+public func runOnMainThread(block: @escaping @Sendable () -> Void) {
     if Thread.isMainThread {
         block()
     } else {
-        Task {
-            await MainActor.run(body: block)
+        DispatchQueue.main.async {
+            block()
         }
     }
 }

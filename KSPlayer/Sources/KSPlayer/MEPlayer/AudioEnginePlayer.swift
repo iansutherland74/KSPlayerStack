@@ -199,7 +199,7 @@ public class AudioEnginePlayer: AudioOutput {
         if isRunning {
             try? engine.start()
             // 从多声道切换到2声道马上调用start会不生效。需要异步主线程才可以
-            DispatchQueue.main.async { [weak self] in
+            runOnMainThread { [weak self] in
                 self?.play()
             }
         }

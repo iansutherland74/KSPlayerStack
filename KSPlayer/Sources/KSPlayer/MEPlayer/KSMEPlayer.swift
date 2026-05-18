@@ -13,7 +13,7 @@ import UIKit
 import AppKit
 #endif
 
-public class KSMEPlayer: NSObject {
+public class KSMEPlayer: NSObject, @unchecked Sendable {
     private var loopCount = 1
     private var playerItem: MEPlayerItem
     public let audioOutput: AudioOutput
@@ -288,7 +288,7 @@ extension KSMEPlayer: MEPlayerDelegate {
     }
 }
 
-extension KSMEPlayer: MediaPlayerProtocol {
+extension KSMEPlayer: @preconcurrency MediaPlayerProtocol {
     public var chapters: [Chapter] {
         playerItem.chapters
     }
@@ -501,7 +501,7 @@ extension KSMEPlayer: AVPictureInPictureSampleBufferPlaybackDelegate {
 
 @available(macOS 12.0, iOS 15.0, tvOS 15.0, *)
 extension KSMEPlayer: AVPlaybackCoordinatorPlaybackControlDelegate {
-    public func playbackCoordinator(_: AVDelegatingPlaybackCoordinator, didIssue playCommand: AVDelegatingPlaybackCoordinatorPlayCommand, completionHandler: @escaping () -> Void) {
+    public func playbackCoordinator(_: AVDelegatingPlaybackCoordinator, didIssue playCommand: AVDelegatingPlaybackCoordinatorPlayCommand, completionHandler: @escaping @Sendable () -> Void) {
         guard playCommand.expectedCurrentItemIdentifier == (playbackCoordinator as? AVDelegatingPlaybackCoordinator)?.currentItemIdentifier else {
             completionHandler()
             return
@@ -517,7 +517,7 @@ extension KSMEPlayer: AVPlaybackCoordinatorPlaybackControlDelegate {
         }
     }
 
-    public func playbackCoordinator(_: AVDelegatingPlaybackCoordinator, didIssue pauseCommand: AVDelegatingPlaybackCoordinatorPauseCommand, completionHandler: @escaping () -> Void) {
+    public func playbackCoordinator(_: AVDelegatingPlaybackCoordinator, didIssue pauseCommand: AVDelegatingPlaybackCoordinatorPauseCommand, completionHandler: @escaping @Sendable () -> Void) {
         guard pauseCommand.expectedCurrentItemIdentifier == (playbackCoordinator as? AVDelegatingPlaybackCoordinator)?.currentItemIdentifier else {
             completionHandler()
             return
@@ -544,7 +544,7 @@ extension KSMEPlayer: AVPlaybackCoordinatorPlaybackControlDelegate {
         seek(time: seekTime) { _ in }
     }
 
-    public func playbackCoordinator(_: AVDelegatingPlaybackCoordinator, didIssue bufferingCommand: AVDelegatingPlaybackCoordinatorBufferingCommand, completionHandler: @escaping () -> Void) {
+    public func playbackCoordinator(_: AVDelegatingPlaybackCoordinator, didIssue bufferingCommand: AVDelegatingPlaybackCoordinatorBufferingCommand, completionHandler: @escaping @Sendable () -> Void) {
         guard bufferingCommand.expectedCurrentItemIdentifier == (playbackCoordinator as? AVDelegatingPlaybackCoordinator)?.currentItemIdentifier else {
             completionHandler()
             return

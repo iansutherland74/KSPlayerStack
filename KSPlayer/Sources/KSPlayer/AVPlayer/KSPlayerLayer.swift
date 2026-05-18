@@ -64,7 +64,7 @@ public protocol KSPlayerLayerDelegate: AnyObject {
     func player(layer: KSPlayerLayer, bufferedCount: Int, consumeTime: TimeInterval)
 }
 
-open class KSPlayerLayer: NSObject {
+open class KSPlayerLayer: NSObject, @unchecked Sendable {
     public weak var delegate: KSPlayerLayerDelegate?
     @Published
     public var bufferingProgress: Int = 0
@@ -80,7 +80,7 @@ open class KSPlayerLayer: NSObject {
 
                 if isPipActive {
                     // 一定要async才不会pip之后就暂停播放
-                    DispatchQueue.main.async { [weak self] in
+                    runOnMainThread { [weak self] in
                         guard let self else { return }
                         pipController.start(view: self)
                     }
@@ -173,16 +173,18 @@ open class KSPlayerLayer: NSObject {
     }
 
     private lazy var timer: Timer = .scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
-        guard let self, self.player.isReadyToPlay else {
-            return
-        }
-        self.delegate?.player(layer: self, currentTime: self.player.currentPlaybackTime, totalTime: self.player.duration)
-        if self.player.playbackState == .playing, self.player.loadState == .playable, self.state == .buffering {
-            // 一个兜底保护，正常不能走到这里
-            self.state = .bufferFinished
-        }
-        if self.player.isPlaying {
-            MPNowPlayingInfoCenter.default().nowPlayingInfo?[MPNowPlayingInfoPropertyElapsedPlaybackTime] = self.player.currentPlaybackTime
+        MainActor.assumeIsolated {
+            guard let self, self.player.isReadyToPlay else {
+                return
+            }
+            self.delegate?.player(layer: self, currentTime: self.player.currentPlaybackTime, totalTime: self.player.duration)
+            if self.player.playbackState == .playing, self.player.loadState == .playable, self.state == .buffering {
+                // 一个兜底保护，正常不能走到这里
+                self.state = .bufferFinished
+            }
+            if self.player.isPlaying {
+                MPNowPlayingInfoCenter.default().nowPlayingInfo?[MPNowPlayingInfoPropertyElapsedPlaybackTime] = self.player.currentPlaybackTime
+            }
         }
     }
 

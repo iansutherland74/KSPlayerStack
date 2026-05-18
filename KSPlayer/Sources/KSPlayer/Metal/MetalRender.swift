@@ -4,7 +4,7 @@
 //
 //  Created by kintan on 2020/1/11.
 //
-import Accelerate
+@preconcurrency import Accelerate
 import CoreVideo
 import Foundation
 import Metal
@@ -21,6 +21,8 @@ class MetalRender {
         }
         return library
     }()
+    private static let colorMatrix601 = kvImage_YpCbCrToARGBMatrix_ITU_R_601_4.pointee
+    private static let colorMatrix709 = kvImage_YpCbCrToARGBMatrix_ITU_R_709_2.pointee
 
     private let renderPassDescriptor = MTLRenderPassDescriptor()
     private let commandQueue = MetalRender.device.makeCommandQueue()
@@ -31,13 +33,13 @@ class MetalRender {
         return MetalRender.device.makeSamplerState(descriptor: samplerDescriptor)
     }()
 
-    private lazy var colorConversion601VideoRangeMatrixBuffer: MTLBuffer? = kvImage_YpCbCrToARGBMatrix_ITU_R_601_4.pointee.videoRange.buffer
+    private lazy var colorConversion601VideoRangeMatrixBuffer: MTLBuffer? = Self.colorMatrix601.videoRange.buffer
 
-    private lazy var colorConversion601FullRangeMatrixBuffer: MTLBuffer? = kvImage_YpCbCrToARGBMatrix_ITU_R_601_4.pointee.buffer
+    private lazy var colorConversion601FullRangeMatrixBuffer: MTLBuffer? = Self.colorMatrix601.buffer
 
-    private lazy var colorConversion709VideoRangeMatrixBuffer: MTLBuffer? = kvImage_YpCbCrToARGBMatrix_ITU_R_709_2.pointee.videoRange.buffer
+    private lazy var colorConversion709VideoRangeMatrixBuffer: MTLBuffer? = Self.colorMatrix709.videoRange.buffer
 
-    private lazy var colorConversion709FullRangeMatrixBuffer: MTLBuffer? = kvImage_YpCbCrToARGBMatrix_ITU_R_709_2.pointee.buffer
+    private lazy var colorConversion709FullRangeMatrixBuffer: MTLBuffer? = Self.colorMatrix709.buffer
 
     private lazy var colorConversionSMPTE240MVideoRangeMatrixBuffer: MTLBuffer? = kvImage_YpCbCrToARGBMatrix_SMPTE_240M_1995.videoRange.buffer
 
