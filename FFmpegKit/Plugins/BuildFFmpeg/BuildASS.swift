@@ -128,11 +128,24 @@ class BuildASS: BaseBuild {
             let fribidi = thinDir(library: .libfribidi, platform: platform, arch: arch).path
             let harfbuzz = thinDir(library: .libharfbuzz, platform: platform, arch: arch).path
             let unibreak = thinDir(library: .libunibreak, platform: platform, arch: arch).path
-            text = text.replacingOccurrences(of: "Requires: libunibreak >= 1.1, harfbuzz >= 1.2.3, fribidi >= 0.19.1, freetype2 >= 9.17.3\n", with: "")
-            text = text.replacingOccurrences(
-                of: "Libs: -L${libdir} -lass -liconv  -framework CoreText -framework CoreFoundation\n",
-                with: "Libs: -L${libdir} -lass -L\(unibreak)/lib -lunibreak -L\(harfbuzz)/lib -lharfbuzz -L\(fribidi)/lib -lfribidi -L\(freetype)/lib -lfreetype -lz -lbz2 -liconv -framework CoreText -framework CoreFoundation -lm\n"
-            )
+            let libsLine = "Libs: -L${libdir} -lass -L\(unibreak)/lib -lunibreak -L\(harfbuzz)/lib -lharfbuzz -L\(fribidi)/lib -lfribidi -L\(freetype)/lib -lfreetype -lz -lbz2 -liconv -framework CoreText -framework CoreFoundation -lm\n"
+            let dependencyNames = ["libunibreak", "harfbuzz", "fribidi", "freetype2"]
+            let lines = text.components(separatedBy: "\n").compactMap { line -> String? in
+                if line.hasPrefix("Requires:"), dependencyNames.allSatisfy(line.contains) {
+                    return nil
+                }
+                if line.hasPrefix("Requires.private:"), dependencyNames.allSatisfy(line.contains) {
+                    return "Requires.private:"
+                }
+                if line.hasPrefix("Libs: -L${libdir} -lass") {
+                    return libsLine.trimmingCharacters(in: .newlines)
+                }
+                if line.hasPrefix("Libs.private:") {
+                    return "Libs.private:"
+                }
+                return line
+            }
+            text = lines.joined(separator: "\n")
             text = text.replacingOccurrences(
                 of: "Cflags: -I${includedir}\n",
                 with: "Cflags: -I${includedir} -I\(unibreak)/include -I\(harfbuzz)/include/harfbuzz -I\(fribidi)/include/fribidi -I\(freetype)/include/freetype2\n"
@@ -142,8 +155,20 @@ class BuildASS: BaseBuild {
     }
 
     override func arguments(platform: PlatformType, arch: ArchType) -> [String] {
-        var result =
-            [
+        var result: [String]
+        if FileManager.default.fileExists(atPath: (directoryURL + "meson.build").path) {
+            result = [
+                "-Dfontconfig=disabled",
+                "-Drequire-system-font-provider=false",
+                "-Dtest=disabled",
+                "-Dcompare=disabled",
+                "-Dprofile=disabled",
+                "-Dfuzz=disabled",
+                "-Dcheckasm=disabled",
+                "-Dlibunibreak=enabled",
+            ]
+        } else {
+            result = [
                 "--disable-libtool-lock",
                 "--disable-fontconfig",
                 "--disable-require-system-font-provider",
@@ -157,8 +182,9 @@ class BuildASS: BaseBuild {
                 "--host=\(platform.host(arch: arch))",
                 "--prefix=\(thinDir(platform: platform, arch: arch).path)",
             ]
+        }
         if arch == .x86_64 {
-            result.append("--enable-asm")
+            result.append(FileManager.default.fileExists(atPath: (directoryURL + "meson.build").path) ? "-Dasm=enabled" : "--enable-asm")
         }
         return result
     }

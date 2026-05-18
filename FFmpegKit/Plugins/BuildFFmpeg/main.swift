@@ -159,7 +159,7 @@ enum Library: String, CaseIterable {
         case .libunibreak:
             return "libunibreak_7_0"
         case .libass:
-            return "0.17.1-branch"
+            return "0.17.4"
         case .libpng:
             return "v1.6.43"
         case .libmpv:
