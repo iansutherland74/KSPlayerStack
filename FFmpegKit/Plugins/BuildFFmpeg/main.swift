@@ -161,11 +161,11 @@ enum Library: String, CaseIterable {
         case .libass:
             return "0.17.4"
         case .libpng:
-            return "v1.6.43"
+            return "v1.6.58"
         case .libmpv:
             return "v0.41.0"
         case .openssl:
-            return "openssl-3.2.1"
+            return "openssl-3.5.6"
         case .libsrt:
             return "v1.5.5"
         case .libsmbclient:
@@ -191,17 +191,17 @@ enum Library: String, CaseIterable {
         case .libshaderc:
             return "v2026.2"
         case .readline:
-            return "readline-8.2"
+            return "readline-8.3"
         case .libglslang:
-            return "13.1.1"
+            return "16.3.0"
         case .libdovi:
-            return "2.1.0"
+            return "libdovi-3.3.2"
         case .lcms2:
             return "lcms2.19.1"
         case .libupnp:
-            return "release-1.14.18"
+            return "release-1.18.5"
         case .libnfs:
-            return "libnfs-5.0.2"
+            return "libnfs-6.0.2"
         case .libbluray:
             return "1.4.1"
         case .libudfread:
@@ -209,14 +209,14 @@ enum Library: String, CaseIterable {
         case .libfontconfig:
             return "2.17.1"
         case .libsmb2:
-            return "master"
+            return "libsmb2-6.2"
         }
     }
 
     var url: String {
         switch self {
         case .libpng:
-            return "https://github.com/glennrp/libpng"
+            return "https://github.com/pnggroup/libpng"
         case .libmpv:
             return "https://github.com/mpv-player/mpv"
         case .libsrt:
