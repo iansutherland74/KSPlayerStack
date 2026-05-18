@@ -28,6 +28,8 @@ class BuildPlacebo: BaseBuild {
 }
 
 class BuildVulkan: BaseBuild {
+    private let vulkanSDKVersion = "1.4.350.0"
+
     init() {
         super.init(library: .vulkan)
         let path = directoryURL + "fetchDependencies"
@@ -97,7 +99,7 @@ class BuildVulkan: BaseBuild {
 
                 Name: Vulkan-Loader
                 Description: Vulkan Loader
-                Version: 1.2
+                Version: \(vulkanSDKVersion)
                 Libs: -L${libdir} -lMoltenVK \(libframework)
                 Cflags: -I${includedir}
                 """

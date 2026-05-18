@@ -167,11 +167,11 @@ enum Library: String, CaseIterable {
         case .openssl:
             return "openssl-3.2.1"
         case .libsrt:
-            return "v1.5.3"
+            return "v1.5.5"
         case .libsmbclient:
             return "samba-4.15.13"
         case .gnutls:
-            return "3.8.3"
+            return "3.8.13"
         case .nettle:
             return "nettle_4.0_release_20260205"
         case .libdav1d:
@@ -181,15 +181,15 @@ enum Library: String, CaseIterable {
         case .libtls:
             return "OPENBSD_7_3"
         case .libzvbi:
-            return "v0.2.42"
+            return "v0.2.44"
         case .boringssl:
             return "master"
         case .libplacebo:
             return "v7.360.1"
         case .vulkan:
-            return "v1.2.8"
+            return "v1.4.1"
         case .libshaderc:
-            return "v2024.0"
+            return "v2026.2"
         case .readline:
             return "readline-8.2"
         case .libglslang:
@@ -197,7 +197,7 @@ enum Library: String, CaseIterable {
         case .libdovi:
             return "2.1.0"
         case .lcms2:
-            return "lcms2.16"
+            return "lcms2.19.1"
         case .libupnp:
             return "release-1.14.18"
         case .libnfs:
@@ -220,9 +220,11 @@ enum Library: String, CaseIterable {
         case .libmpv:
             return "https://github.com/mpv-player/mpv"
         case .libsrt:
-            return "https://github.com/Haivision/srt"
+            return "https://github.com/Haivision/srt.git"
         case .libsmbclient:
             return "https://github.com/samba-team/samba"
+        case .gnutls:
+            return "https://gitlab.com/gnutls/gnutls.git"
         case .nettle:
             return "https://git.lysator.liu.se/nettle/nettle.git"
         case .gmp:
@@ -232,13 +234,13 @@ enum Library: String, CaseIterable {
         case .libtls:
             return "https://github.com/libressl/portable"
         case .libzvbi:
-            return "https://github.com/zapping-vbi/zvbi"
+            return "https://github.com/zapping-vbi/zvbi.git"
         case .boringssl:
             return "https://github.com/google/boringssl"
         case .libplacebo:
             return "https://github.com/haasn/libplacebo"
         case .libunibreak:
-            return "https://github.com/adah1972/libunibreak"
+            return "https://github.com/adah1972/libunibreak.git"
         case .vulkan:
             return "https://github.com/KhronosGroup/MoltenVK"
         case .libshaderc:
@@ -250,7 +252,7 @@ enum Library: String, CaseIterable {
         case .libdovi:
             return "https://github.com/quietvoid/dovi_tool"
         case .lcms2:
-            return "https://github.com/mm2/Little-CMS"
+            return "https://github.com/mm2/Little-CMS.git"
         case .libupnp:
             return "https://github.com/pupnp/pupnp"
         case .libnfs:
@@ -258,7 +260,7 @@ enum Library: String, CaseIterable {
         case .libbluray:
             return "https://code.videolan.org/videolan/libbluray"
         case .libudfread:
-            return "https://code.videolan.org/videolan/libudfread"
+            return "https://code.videolan.org/videolan/libudfread.git"
         case .libfontconfig:
             return "https://gitlab.freedesktop.org/fontconfig/fontconfig.git"
         case .libsmb2:
