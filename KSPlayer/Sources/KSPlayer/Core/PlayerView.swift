@@ -150,6 +150,7 @@ open class PlayerView: UIView, KSPlayerLayerDelegate, KSSliderDelegate {
     open func set(url: URL, options: KSOptions) {
         srtControl.url = url
         toolBar.currentTime = 0
+        toolBar.seekableTimeRange = nil
         totalTime = 0
         playerLayer = KSPlayerLayer(url: url, options: options)
     }
@@ -157,11 +158,12 @@ open class PlayerView: UIView, KSPlayerLayerDelegate, KSSliderDelegate {
     // MARK: - KSSliderDelegate
 
     open func slider(value: Double, event: ControlEvents) {
+        let mediaTime = toolBar.mediaTime(forSliderValue: value)
         if event == .valueChanged {
-            toolBar.currentTime = value
+            toolBar.currentTime = mediaTime
         } else if event == .touchUpInside {
-            seek(time: value) { [weak self] _ in
-                self?.delegate?.playerController(seek: value)
+            seek(time: mediaTime) { [weak self] _ in
+                self?.delegate?.playerController(seek: mediaTime)
             }
         }
     }
@@ -171,6 +173,7 @@ open class PlayerView: UIView, KSPlayerLayerDelegate, KSSliderDelegate {
     open func player(layer: KSPlayerLayer, state: KSPlayerState) {
         delegate?.playerController(state: state)
         if state == .readyToPlay {
+            toolBar.seekableTimeRange = layer.player.seekableTimeRange
             totalTime = layer.player.duration
             toolBar.isSeekable = layer.player.seekable
             toolBar.playButton.isSelected = true
@@ -179,9 +182,11 @@ open class PlayerView: UIView, KSPlayerLayerDelegate, KSSliderDelegate {
         }
     }
 
-    open func player(layer _: KSPlayerLayer, currentTime: TimeInterval, totalTime: TimeInterval) {
+    open func player(layer: KSPlayerLayer, currentTime: TimeInterval, totalTime: TimeInterval) {
         delegate?.playerController(currentTime: currentTime, totalTime: totalTime)
         playTimeDidChange?(currentTime, totalTime)
+        toolBar.seekableTimeRange = layer.player.seekableTimeRange
+        toolBar.isSeekable = layer.player.seekable
         toolBar.currentTime = currentTime
         self.totalTime = totalTime
     }

@@ -19,7 +19,7 @@
    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#include <gen_ndr/netlogon.h>
+#include "librpc/gen_ndr/netlogon.h"
 
 /* The 7 here seems to be required to get Win2k not to downgrade us
    to NT4.  Actually, anything other than 1ff would seem to do... */

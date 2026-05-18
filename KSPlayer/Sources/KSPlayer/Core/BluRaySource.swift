@@ -19,6 +19,12 @@ enum KSBluRayURLResolver {
         guard url.isFileURL else {
             return nil
         }
+        let shouldStopAccessing = url.startAccessingSecurityScopedResource()
+        defer {
+            if shouldStopAccessing {
+                url.stopAccessingSecurityScopedResource()
+            }
+        }
 
         if url.pathExtension.caseInsensitiveCompare("iso") == .orderedSame {
             return KSBluRaySource(kind: .isoImage, url: url)

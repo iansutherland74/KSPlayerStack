@@ -1,6 +1,8 @@
+diff --git a/buildtools/wafsamba/pkgconfig.py b/buildtools/wafsamba/pkgconfig.py
+index 417bf03..e109231 100644
 --- a/buildtools/wafsamba/pkgconfig.py
 +++ b/buildtools/wafsamba/pkgconfig.py
-@@ -60,6 +60,15 @@
+@@ -60,6 +60,15 @@ def PKG_CONFIG_FILES(bld, pc_files, vnum=None, extra_name=None):
              t.env.LIB_RPATH = ''
          if vnum:
              t.env.PACKAGE_VERSION = vnum
@@ -16,9 +18,11 @@
          for v in [ 'PREFIX', 'EXEC_PREFIX', 'LIB_RPATH' ]:
              t.vars.append(t.env[v])
          bld.INSTALL_FILES(dest, target, flat=True, destname=base)
+diff --git a/buildtools/wafsamba/wafsamba.py b/buildtools/wafsamba/wafsamba.py
+index 8dff3d6..ea88533 100644
 --- a/buildtools/wafsamba/wafsamba.py
 +++ b/buildtools/wafsamba/wafsamba.py
-@@ -241,7 +241,7 @@
+@@ -322,7 +322,7 @@ def SAMBA_LIBRARY(bld, libname, source,
      if bld.env['ENABLE_RELRO'] is True:
          ldflags.extend(TO_LIST('-Wl,-z,relro,-z,now'))
  
@@ -27,9 +31,11 @@
      if pyext:
          features += ' pyext'
      if pyembed:
+diff --git a/source3/libsmb/smbclient.pc.in b/source3/libsmb/smbclient.pc.in
+index bcef2f2..2cf4df5 100644
 --- a/source3/libsmb/smbclient.pc.in
 +++ b/source3/libsmb/smbclient.pc.in
-@@ -7,5 +7,7 @@
+@@ -7,5 +7,7 @@ Name: smbclient
  Description: A SMB library interface
  Version: @PACKAGE_VERSION@
  Libs: @LIB_RPATH@ -L${libdir} -lsmbclient
@@ -37,9 +43,11 @@
 +Requires.private: @REQUIRES_PRIVATE@
  Cflags: -I${includedir}
  URL: http://www.samba.org/
---- a/source4/heimdal/lib/hcrypto/camellia-ntt.h
-+++ b/source4/heimdal/lib/hcrypto/camellia-ntt.h
-@@ -35,6 +35,10 @@
+diff --git a/third_party/heimdal/lib/hcrypto/camellia-ntt.h b/third_party/heimdal/lib/hcrypto/camellia-ntt.h
+index cc0b70d..e79b1da 100644
+--- a/third_party/heimdal/lib/hcrypto/camellia-ntt.h
++++ b/third_party/heimdal/lib/hcrypto/camellia-ntt.h
+@@ -40,6 +40,10 @@ typedef unsigned char u8;
  
  typedef u32 KEY_TABLE_TYPE[CAMELLIA_TABLE_WORD_LEN];
  

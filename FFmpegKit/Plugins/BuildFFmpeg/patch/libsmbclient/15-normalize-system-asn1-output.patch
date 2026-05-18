@@ -1,0 +1,21 @@
+diff --git a/third_party/heimdal_build/wscript_build b/third_party/heimdal_build/wscript_build
+index 8f8ed3cdb60..1787476e9c6 100644
+--- a/third_party/heimdal_build/wscript_build
++++ b/third_party/heimdal_build/wscript_build
+@@ -69,7 +69,15 @@ def HEIMDAL_ASN1(name, source,
+         no_leak_check + \
+         ' "${ASN1_COMPILE}" ${OPTION_FILE} ${ASN1OPTIONS} ' \
+         + template_str \
+-        + ' --one-code-file "${SRC[0].abspath(env)}" ${ASN1NAME}'
++        + ' --one-code-file "${SRC[0].abspath(env)}" ${ASN1NAME}' \
++        + ' && _asn1_c="${TGT[0].abspath(env)}"' \
++        + ' && _asn1_dir="${TGT[0].parent.abspath(env)}"' \
++        + ' && _asn1_name="${ASN1NAME}"' \
++        + ' && _asn1_x=$(echo "$_asn1_c" | sed "s/\\\\.c$/.x/")' \
++        + ' && if [ -f "$_asn1_x" ]; then mv "$_asn1_x" "$_asn1_c"; fi' \
++        + ' && if [ -f "$_asn1_dir/$_asn1_name.hx" ]; then mv "$_asn1_dir/$_asn1_name.hx" "$_asn1_dir/$_asn1_name.h"; fi' \
++        + ' && if [ -f "$_asn1_dir/$_asn1_name-priv.hx" ]; then mv "$_asn1_dir/$_asn1_name-priv.hx" "$_asn1_dir/$_asn1_name-priv.h"; fi' \
++        + ' && if [ ! -f "$_asn1_dir/$_asn1_name"_oids.c ]; then : > "$_asn1_dir/$_asn1_name"_oids.c; fi'
+
+     source = TO_LIST(source)
+

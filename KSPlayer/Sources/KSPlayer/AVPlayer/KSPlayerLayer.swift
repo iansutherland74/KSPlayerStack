@@ -403,9 +403,11 @@ open class KSPlayerLayer: NSObject, @unchecked Sendable {
     open func seek(time: TimeInterval, autoPlay: Bool, completion: @escaping ((Bool) -> Void)) {
         if time.isInfinite || time.isNaN {
             completion(false)
+            return
         }
         if player.isReadyToPlay, player.seekable {
-            player.seek(time: time) { [weak self] finished in
+            let seekTime = player.seekableTimeRange?.clamped(time) ?? time
+            player.seek(time: seekTime) { [weak self] finished in
                 guard let self else { return }
                 if finished, autoPlay {
                     self.play()
@@ -570,6 +572,31 @@ extension KSPlayerLayer {
         }
         return Self.preferredPlayerType(for: url, options: options)
     }
+
+    #if canImport(UIKit) && !os(xrOS)
+    @MainActor
+    private func switchToWirelessRoutePlayerIfNeeded() {
+        guard type(of: player) != KSAVPlayer.self,
+              preferredPlayerType(for: url, respectsWirelessRoute: true) == KSAVPlayer.self
+        else {
+            return
+        }
+        let oldPlayer = player
+        let targetTime = oldPlayer.currentPlaybackTime
+        if targetTime.isFinite, targetTime > 0 {
+            shouldSeekTo = targetTime
+        }
+        let nextPlayer = KSAVPlayer(url: url, options: options)
+        nextPlayer.playbackRate = oldPlayer.playbackRate
+        nextPlayer.playbackVolume = oldPlayer.playbackVolume
+        nextPlayer.isMuted = oldPlayer.isMuted
+        nextPlayer.allowsExternalPlayback = true
+        nextPlayer.usesExternalPlaybackWhileExternalScreenIsActive = true
+        nextPlayer.contentMode = oldPlayer.contentMode
+        player = nextPlayer
+        oldPlayer.shutdown()
+    }
+    #endif
 
     open func prepareToPlay() {
         state = .preparing
@@ -883,13 +910,11 @@ extension KSPlayerLayer {
     @MainActor
     @objc private func wirelessRouteActiveDidChange(notification: Notification) {
         guard let volumeView = notification.object as? MPVolumeView, isWirelessRouteActive != volumeView.isWirelessRouteActive else { return }
-        if volumeView.isWirelessRouteActive {
-            if !player.allowsExternalPlayback {
-                isWirelessRouteActive = true
-            }
-            player.usesExternalPlaybackWhileExternalScreenIsActive = true
-        }
         isWirelessRouteActive = volumeView.isWirelessRouteActive
+        if volumeView.isWirelessRouteActive {
+            player.usesExternalPlaybackWhileExternalScreenIsActive = true
+            switchToWirelessRoutePlayerIfNeeded()
+        }
     }
     #endif
     #if !os(macOS)

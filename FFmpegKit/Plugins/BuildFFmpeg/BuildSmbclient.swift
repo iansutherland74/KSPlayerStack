@@ -26,6 +26,7 @@ class BuildSmbclient: BaseBuild {
 
     override func environment(platform: PlatformType, arch: ArchType) -> [String: String] {
         var env = super.environment(platform: platform, arch: arch)
+        env["PATH"] = "/usr/local/opt/bison/bin:/opt/homebrew/opt/bison/bin:" + (env["PATH"] ?? "")
         env["PATH"]? += (":" + (URL.currentDirectory + "../Plugins/BuildFFmpeg/\(library.rawValue)/bin").path + ":" + (directoryURL + "buildtools/bin").path)
         env["PYTHONHASHSEED"] = "1"
         env["WAF_MAKE"] = "1"

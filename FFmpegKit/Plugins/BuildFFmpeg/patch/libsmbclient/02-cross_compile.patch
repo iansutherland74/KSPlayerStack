@@ -1,15 +1,17 @@
+diff --git a/buildtools/wafsamba/samba_autoconf.py b/buildtools/wafsamba/samba_autoconf.py
+index 979d5a3..feac4c1 100644
 --- a/buildtools/wafsamba/samba_autoconf.py
 +++ b/buildtools/wafsamba/samba_autoconf.py
-@@ -320,7 +320,7 @@
- 
- 
+@@ -323,7 +323,7 @@ def CHECK_FUNCS(conf, list, link=True, lib=None, headers=None):
+
+
  @conf
 -def CHECK_SIZEOF(conf, vars, headers=None, define=None, critical=True):
 +def CHECK_SIZEOF(conf, vars, headers=None, define=None, cflags='', critical=True):
      '''check the size of a type'''
      for v in TO_LIST(vars):
          v_define = define
-@@ -333,6 +333,7 @@
+@@ -336,6 +336,7 @@ def CHECK_SIZEOF(conf, vars, headers=None, define=None, critical=True):
                        define=v_define,
                        quote=False,
                        headers=headers,
@@ -17,20 +19,22 @@
                        local_include=False,
                        msg="Checking if size of %s == %d" % (v, size)):
                  conf.DEFINE(v_define, size)
-@@ -843,7 +844,6 @@
+@@ -907,7 +908,6 @@ int main(void) {
      for key in conf.env.define_key:
          conf.undefine(key, from_env=False)
      conf.env.define_key = []
 -    conf.SAMBA_CROSS_CHECK_COMPLETE()
- 
- 
+
+
  @conf
+diff --git a/buildtools/wafsamba/samba_conftests.py b/buildtools/wafsamba/samba_conftests.py
+index 0bae1df..29c63bc 100644
 --- a/buildtools/wafsamba/samba_conftests.py
 +++ b/buildtools/wafsamba/samba_conftests.py
-@@ -101,25 +101,24 @@
+@@ -103,25 +103,24 @@ def CHECK_LARGEFILE(conf, define='HAVE_LARGEFILE'):
                      else:
                          conf.DEFINE(flag_split[0], flag_split[1])
- 
+
 -    if conf.CHECK_CODE('if (sizeof(off_t) < 8) return 1',
 -                       define,
 -                       execute=True,
@@ -41,7 +45,7 @@
 +        conf.undefine("SIZEOF_OFF_T")
 +        conf.DEFINE(define, 1)
          return True
- 
+
 -    if conf.CHECK_CODE('if (sizeof(off_t) < 8) return 1',
 -                       define,
 -                       execute=True,
@@ -53,7 +57,7 @@
 +        conf.undefine("SIZEOF_OFF_T")
          conf.DEFINE('_FILE_OFFSET_BITS', 64)
          return True
- 
+
 -    if conf.CHECK_CODE('if (sizeof(off_t) < 8) return 1',
 -                       define,
 -                       execute=True,
@@ -66,20 +70,11 @@
          conf.DEFINE('_LARGE_FILES', 1)
          return True
      return False
---- a/buildtools/wafsamba/wscript
-+++ b/buildtools/wafsamba/wscript
-@@ -317,7 +317,7 @@
-     conf.CHECK_CODE('printf("hello world")',
-                     define='HAVE_SIMPLE_C_PROG',
-                     mandatory=True,
--                    execute=True,
-+                    execute=False,
-                     headers='stdio.h',
-                     msg='Checking simple C program')
- 
+diff --git a/lib/replace/wscript b/lib/replace/wscript
+index 4621d90..a3870bd 100644
 --- a/lib/replace/wscript
 +++ b/lib/replace/wscript
-@@ -41,6 +41,7 @@
+@@ -41,6 +41,7 @@ def configure(conf):
      conf.CHECK_HEADERS('linux/types.h crypt.h locale.h acl/libacl.h compat.h')
      conf.CHECK_HEADERS('acl/libacl.h attr/xattr.h compat.h ctype.h dustat.h')
      conf.CHECK_HEADERS('fcntl.h fnmatch.h glob.h history.h krb5.h langinfo.h')
@@ -87,7 +82,7 @@
      conf.CHECK_HEADERS('locale.h ndir.h pwd.h')
      conf.CHECK_HEADERS('shadow.h sys/acl.h')
      conf.CHECK_HEADERS('sys/attributes.h attr/attributes.h sys/capability.h sys/dir.h sys/epoll.h')
-@@ -692,7 +693,7 @@
+@@ -735,7 +736,7 @@ syscall(SYS_copy_file_range,0,NULL,0,NULL,0,0);
      conf.CHECK_CODE('''#define LIBREPLACE_CONFIGURE_TEST_STRPTIME
                         #include "tests/strptime.c"''',
                         define='HAVE_WORKING_STRPTIME',
@@ -95,26 +90,26 @@
 +                       execute=False,
                         addmain=False,
                         msg='Checking for working strptime')
- 
-@@ -707,7 +708,7 @@
- 
+
+@@ -750,7 +751,7 @@ syscall(SYS_copy_file_range,0,NULL,0,NULL,0,0);
+
      conf.CHECK_CODE('#include "tests/snprintf.c"',
                      define="HAVE_C99_VSNPRINTF",
 -                    execute=True,
 +                    execute=False,
                      addmain=False,
                      msg="Checking for C99 vsnprintf")
- 
-@@ -802,7 +803,7 @@
+
+@@ -845,7 +846,7 @@ syscall(SYS_copy_file_range,0,NULL,0,NULL,0,0);
                      exit(0);
                      ''',
                      define='HAVE_SECURE_MKSTEMP',
 -                    execute=True,
 +                    execute=False,
                      mandatory=True) # lets see if we get a mandatory failure for this one
- 
+
      # look for a method of finding the list of network interfaces
-@@ -814,6 +815,7 @@
+@@ -857,6 +858,7 @@ syscall(SYS_copy_file_range,0,NULL,0,NULL,0,0);
                             #define %s 1
                             #define NO_CONFIG_H 1
                             #define AUTOCONF_TEST 1
@@ -122,41 +117,47 @@
                             #include "replace.c"
                             #include "inet_ntop.c"
                             #include "snprintf.c"
-@@ -824,7 +826,7 @@
+@@ -867,7 +869,7 @@ syscall(SYS_copy_file_range,0,NULL,0,NULL,0,0);
                             method,
                             lib='nsl socket' + bsd_for_strlcpy,
                             addmain=False,
 -                           execute=True):
 +                           execute=False):
              break
- 
+
      conf.RECURSE('system')
+diff --git a/lib/socket/wscript b/lib/socket/wscript
+index d8c269a..636331b 100644
 --- a/lib/socket/wscript
 +++ b/lib/socket/wscript
-@@ -4,4 +4,5 @@
+@@ -4,4 +4,5 @@ def configure(conf):
      conf.CHECK_HEADERS('linux/sockios.h linux/ethtool.h')
      if (conf.CONFIG_SET('HAVE_LINUX_SOCKIOS_H') and \
                      conf.CONFIG_SET('HAVE_LINUX_ETHTOOL_H')):
 -        conf.DEFINE('HAVE_ETHTOOL', 1)
 +        if conf.CHECK_FUNCS('ethtool_cmd_speed', headers='linux/sockios.h linux/ethtool.h'):
 +            conf.DEFINE('HAVE_ETHTOOL', 1)
+diff --git a/source3/lib/util.c b/source3/lib/util.c
+index 3308654..f4c460e 100644
 --- a/source3/lib/util.c
 +++ b/source3/lib/util.c
-@@ -51,6 +51,10 @@
+@@ -53,6 +53,10 @@
  /* Max allowable allococation - 256mb - 0x10000000 */
  #define MAX_ALLOC_SIZE (1024*1024*256)
- 
+
 +#ifndef YPERR_KEY
 +#define YPERR_KEY 5
 +#endif
 +
  static enum protocol_types Protocol = PROTOCOL_COREPLUS;
- 
- enum protocol_types get_Protocol(void)
+
+ void set_Protocol(enum protocol_types  p)
+diff --git a/source3/wscript b/source3/wscript
+index 06f329e..cb91af3 100644
 --- a/source3/wscript
 +++ b/source3/wscript
-@@ -156,7 +156,7 @@
- 
+@@ -150,7 +150,7 @@ long ret = splice(0,0,1,0,400,SPLICE_F_MOVE);
+
      # Check for inotify support (Skip if we are SunOS)
      #NOTE: illumos provides sys/inotify.h but is not an exact match for linux
 -    host_os = sys.platform
@@ -164,18 +165,18 @@
      if host_os.rfind('sunos') == -1:
          conf.CHECK_HEADERS('sys/inotify.h')
          if conf.env.HAVE_SYS_INOTIFY_H:
-@@ -455,8 +455,8 @@
- 
+@@ -448,8 +448,8 @@ vsyslog
+
      # FIXME: these should be tests for features, but the old build system just
      # checks for OSes.
 -    host_os = sys.platform
 -    Logs.info("building on %s" % host_os)
 +    host_os = os.getenv('HOST', sys.platform)
 +    Logs.info("building for %s" % host_os)
- 
+
      # Python doesn't have case switches... :/
      # FIXME: original was *linux* | gnu* | k*bsd*-gnu | kopensolaris*-gnu | *qnx*)
-@@ -1027,7 +1027,7 @@
+@@ -994,7 +994,7 @@ syscall(SYS_setgroups32, 0, NULL);
                                  ''',
                                  'USE_SETREUID',
                                  addmain=False,
@@ -184,47 +185,73 @@
                                  msg="Checking whether setreuid is available")
      if not seteuid:
          seteuid = conf.CHECK_CODE('''
-@@ -1088,7 +1088,7 @@
+@@ -1055,7 +1055,7 @@ syscall(SYS_setgroups32, 0, NULL);
  ''',
                  'HAVE_FCNTL_LOCK',
                  addmain=False,
 -                execute=True,
 +                execute=False,
                  msg='Checking whether fcntl locking is available')
- 
+
      conf.CHECK_CODE('''
+diff --git a/tests/summary.c b/tests/summary.c
+index ea48975..fc70ed9 100644
 --- a/tests/summary.c
 +++ b/tests/summary.c
-@@ -9,7 +9,7 @@
+@@ -9,7 +9,7 @@ int main(void)
  #endif
- 
+
  #if !(defined(HAVE_IFACE_GETIFADDRS) || defined(HAVE_IFACE_IFCONF) || defined(HAVE_IFACE_IFREQ) || defined(HAVE_IFACE_AIX))
 -#warning "WARNING: No automated network interface determination"
 +#error "ERROR: No automated network interface determination"
  #endif
- 
+
  #if !(defined(USE_SETEUID) || defined(USE_SETREUID) || defined(USE_SETRESUID) || defined(USE_SETUIDX) || defined(HAVE_LINUX_THREAD_CREDENTIALS))
+diff --git a/third_party/popt/poptconfig.c b/third_party/popt/poptconfig.c
+index f0a92e0..230acd5 100644
 --- a/third_party/popt/poptconfig.c
 +++ b/third_party/popt/poptconfig.c
-@@ -24,7 +24,7 @@
- #if defined(HAVE_GLOB_H)
+@@ -13,7 +13,7 @@
+ #if defined(HAVE_FNMATCH_H)
+ #include <fnmatch.h>
+
+-#if defined(__LCLINT__)
++#if defined(HAVE_GLOB) && defined(__LCLINT__)
+ /*@-declundef -exportheader -incondefs -protoparammatch -redecl -type @*/
+ extern int fnmatch (const char *__pattern, const char *__name, int __flags)
+ 	/*@*/;
+@@ -21,10 +21,10 @@ extern int fnmatch (const char *__pattern, const char *__name, int __flags)
+ #endif	/* __LCLINT__ */
+ #endif
+
+-#if defined(HAVE_GLOB_H)
++#if defined(HAVE_GLOB)
  #include <glob.h>
- 
+
 -#if defined(__LCLINT__)
 +#if defined(HAVE_GLOB) && defined(__LCLINT__)
  /*@-declundef -exportheader -incondefs -protoparammatch -redecl -type @*/
  extern int glob (const char *__pattern, int __flags,
  		/*@null@*/ int (*__errfunc) (const char *, int),
-@@ -104,7 +104,7 @@
+@@ -83,7 +83,7 @@ static int poptGlob_error(/*@unused@*/ UNUSED(const char * epath),
+ {
+     return 1;
+ }
+-#endif	/* HAVE_GLOB_H */
++#endif	/* HAVE_GLOB */
+
+ /**
+  * Return path(s) from a glob pattern.
+@@ -104,7 +104,7 @@ static int poptGlob(/*@unused@*/ UNUSED(poptContext con), const char * pattern,
      if (pat[0] == '@' && pat[1] != '(')
  	pat++;
- 
+
 -#if defined(HAVE_GLOB_H)
 +#if defined(HAVE_GLOB)
      if (glob_pattern_p(pat, 0)) {
  	glob_t _g, *pglob = &_g;
- 
-@@ -125,7 +125,7 @@
+
+@@ -125,7 +125,7 @@ static int poptGlob(/*@unused@*/ UNUSED(poptContext con), const char * pattern,
  	} else
  	    rc = POPT_ERROR_ERRNO;
      } else
@@ -233,21 +260,52 @@
      {
  	if (acp)
  	    *acp = 1;
+@@ -244,7 +244,7 @@ static int configAppMatch(poptContext con, const char * s)
+     if (con->appName == NULL)	/* XXX can't happen. */
+ 	return rc;
+
+-#if defined(HAVE_GLOB_H) && defined(HAVE_FNMATCH_H)
++#if defined(HAVE_GLOB) && defined(HAVE_FNMATCH_H)
+     if (glob_pattern_p(s, 1)) {
+ /*@-bitwisesigned@*/
+ 	static int flags = FNM_PATHNAME | FNM_PERIOD;
+@@ -514,7 +514,7 @@ int poptReadDefaultConfig(poptContext con, /*@unused@*/ UNUSED(int useEnv))
+     rc = poptReadConfigFile(con, _popt_etc);
+     if (rc) goto exit;
+
+-#if defined(HAVE_GLOB_H)
++#if defined(HAVE_GLOB)
+     if (!stat("/etc/popt.d", &sb) && S_ISDIR(sb.st_mode)) {
+ 	const char ** av = NULL;
+ 	int ac = 0;
+diff --git a/third_party/popt/poptint.c b/third_party/popt/poptint.c
+index 1af46ff..8fac227 100644
 --- a/third_party/popt/poptint.c
 +++ b/third_party/popt/poptint.c
-@@ -86,7 +86,7 @@
+@@ -86,7 +86,7 @@ strdup_locale_from_utf8 (/*@null@*/ char * istr)
      if (istr == NULL)
  	return NULL;
- 
+
 -#ifdef HAVE_LANGINFO_H
 +#ifdef HAVE_NL_LANGINFO
      codeset = nl_langinfo ((nl_item)CODESET);
  #endif
- 
+
+diff --git a/third_party/popt/poptint.h b/third_party/popt/poptint.h
+index 80cbaca..e34522e 100644
 --- a/third_party/popt/poptint.h
 +++ b/third_party/popt/poptint.h
-@@ -174,7 +174,7 @@
- 
+@@ -154,7 +154,7 @@ struct poptContext_s {
+ #else
+ #ifdef HAVE_ICONV
+ #include <iconv.h>
+-#if defined(__LCLINT__)
++#if defined(HAVE_NL_LANGINFO) && defined(__LCLINT__)
+ /*@-declundef -incondefs @*/
+ extern /*@only@*/ iconv_t iconv_open(const char *__tocode, const char *__fromcode)
+ 	/*@*/;
+@@ -174,7 +174,7 @@ extern int iconv_close(/*@only@*/ iconv_t __cd)
+
  #ifdef HAVE_LANGINFO_H
  #include <langinfo.h>
 -#if defined(__LCLINT__)
@@ -255,31 +313,36 @@
  /*@-declundef -incondefs @*/
  extern char *nl_langinfo (nl_item __item)
  	/*@*/;
+diff --git a/wscript b/wscript
+index a14fd20..c0acb15 100644
 --- a/wscript
 +++ b/wscript
-@@ -175,7 +175,7 @@
-     conf.SAMBA_CHECK_PYTHON()
-     conf.SAMBA_CHECK_PYTHON_HEADERS()
- 
+@@ -218,7 +218,7 @@ def configure(conf):
+
+     conf.SAMBA_CHECK_RUST()
+
 -    if sys.platform == 'darwin' and not conf.env['HAVE_ENVIRON_DECL']:
 +    if os.getenv('HOST', sys.platform).find('darwin') > -1 and not conf.env['HAVE_ENVIRON_DECL']:
          # Mac OSX needs to have this and it's also needed that the python is compiled with this
          # otherwise you face errors about common symbols
          if not conf.CHECK_SHLIB_W_PYTHON("Checking if -fno-common is needed"):
-@@ -183,7 +183,7 @@
+@@ -226,7 +226,7 @@ def configure(conf):
          if not conf.CHECK_SHLIB_W_PYTHON("Checking if -undefined dynamic_lookup is not need"):
              conf.env.append_value('cshlib_LINKFLAGS', ['-undefined', 'dynamic_lookup'])
- 
+
 -    if sys.platform == 'darwin':
 +    if os.getenv('HOST', sys.platform).find('darwin') > -1:
          conf.ADD_LDFLAGS('-framework CoreFoundation')
- 
+
      conf.RECURSE('dynconfig')
+diff --git a/wscript_configure_embedded_heimdal b/wscript_configure_embedded_heimdal
+index 325b1b1..e2c3336 100644
 --- a/wscript_configure_embedded_heimdal
 +++ b/wscript_configure_embedded_heimdal
-@@ -8 +8,10 @@
- conf.RECURSE('source4/heimdal_build')
-+
+@@ -7,6 +7,15 @@ if not conf.env['BISON']:
+ conf.define('USING_EMBEDDED_HEIMDAL', 1)
+ conf.RECURSE('third_party/heimdal_build')
+
 +def check_system_heimdal_binary(name):
 +    if not conf.find_program(name, var=name.upper()):
 +        raise Exception("not conf.find_program(%s, var=%s)" % (name, name.upper()))
@@ -288,3 +351,7 @@
 +
 +check_system_heimdal_binary("compile_et")
 +check_system_heimdal_binary("asn1_compile")
++
+ #
+ # See https://github.com/heimdal/heimdal/pull/1234
+ # and https://github.com/krb5/krb5/pull/1329

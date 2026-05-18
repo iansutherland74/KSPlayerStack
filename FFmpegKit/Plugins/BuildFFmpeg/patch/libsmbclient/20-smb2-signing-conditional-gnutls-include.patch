@@ -1,0 +1,14 @@
+diff --git a/libcli/smb/smb2_signing.h b/libcli/smb/smb2_signing.h
+index 5a0a3c03559..e6d221e7dfd 100644
+--- a/libcli/smb/smb2_signing.h
++++ b/libcli/smb/smb2_signing.h
+@@ -21,7 +21,9 @@
+ #ifndef _LIBCLI_SMB_SMB2_SIGNING_H_
+ #define _LIBCLI_SMB_SMB2_SIGNING_H_
+
++#ifdef SMB2_SIGNING_KEY_GNUTLS_TYPES
+ #include <gnutls/gnutls.h>
++#endif
+
+ #include "lib/util/data_blob.h"
+

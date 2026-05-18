@@ -1,0 +1,13 @@
+diff --git a/buildtools/wafsamba/wafsamba.py b/buildtools/wafsamba/wafsamba.py
+index fbcd0acaa86..9f75b68f8dc 100644
+--- a/buildtools/wafsamba/wafsamba.py
++++ b/buildtools/wafsamba/wafsamba.py
+@@ -246,6 +246,8 @@ def SAMBA_LIBRARY(bld, libname, source,
+                                         builtin_cflags=builtin_cflags,
+                                         builtin_cflags_end=builtin_cflags_end,
+                                         group=group,
++                                        autoproto=autoproto,
++                                        autoproto_extra_source=autoproto_extra_source,
+                                         depends_on=depends_on,
+                                         local_include=local_include,
+                                         global_include=global_include,

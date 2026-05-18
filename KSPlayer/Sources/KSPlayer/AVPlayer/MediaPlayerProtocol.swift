@@ -64,6 +64,35 @@ public struct Chapter {
     public let title: String
 }
 
+public struct MediaPlaybackTimeRange: Equatable {
+    public let start: TimeInterval
+    public let end: TimeInterval
+
+    public var duration: TimeInterval {
+        end - start
+    }
+
+    public init?(start: TimeInterval, duration: TimeInterval) {
+        guard start.isFinite, duration.isFinite, duration > 0 else {
+            return nil
+        }
+        self.start = max(start, 0)
+        end = self.start + duration
+    }
+
+    public init?(start: TimeInterval, end: TimeInterval) {
+        guard start.isFinite, end.isFinite, end > start else {
+            return nil
+        }
+        self.start = max(start, 0)
+        self.end = max(end, self.start)
+    }
+
+    public func clamped(_ time: TimeInterval) -> TimeInterval {
+        min(max(time, start), end)
+    }
+}
+
 public protocol MediaPlayerProtocol: MediaPlayback {
     var delegate: MediaPlayerDelegate? { get set }
     var view: UIView? { get }
@@ -73,6 +102,7 @@ public protocol MediaPlayerProtocol: MediaPlayback {
     var loadState: MediaLoadState { get }
     var isPlaying: Bool { get }
     var seekable: Bool { get }
+    var seekableTimeRange: MediaPlaybackTimeRange? { get }
     //    var numberOfBytesTransferred: Int64 { get }
     var isMuted: Bool { get set }
     var allowsExternalPlayback: Bool { get set }
@@ -101,6 +131,13 @@ public protocol MediaPlayerProtocol: MediaPlayback {
 public extension MediaPlayerProtocol {
     var nominalFrameRate: Float {
         tracks(mediaType: .video).first { $0.isEnabled }?.nominalFrameRate ?? 0
+    }
+
+    var seekableTimeRange: MediaPlaybackTimeRange? {
+        guard seekable else {
+            return nil
+        }
+        return MediaPlaybackTimeRange(start: 0, duration: duration)
     }
 }
 
@@ -161,6 +198,104 @@ public struct DOVIDecoderConfigurationRecord {
     public let dv_bl_signal_compatibility_id: UInt8
 }
 
+extension DOVIDecoderConfigurationRecord: CustomStringConvertible {
+    public var hdrFallbackDynamicRange: DynamicRange? {
+        switch dv_profile {
+        case 5:
+            return .dolbyVision
+        case 8 where dv_bl_signal_compatibility_id == 4:
+            return .hlg
+        case 7:
+            return .hdr10
+        case 8 where dv_bl_signal_compatibility_id == 1:
+            return .hdr10
+        default:
+            return nil
+        }
+    }
+
+    public var profileDescription: String {
+        switch dv_profile {
+        case 0:
+            return "AVC dual-layer early mobile/legacy"
+        case 1:
+            return "AVC single-layer mobile/legacy"
+        case 2:
+            return "AVC dual-layer SDR deprecated"
+        case 3:
+            return "AVC single-layer SDR legacy streaming"
+        case 4:
+            return "AVC dual-layer SDR legacy"
+        case 5:
+            return "HEVC single-layer modern streaming"
+        case 6:
+            return "HEVC dual-layer SDR legacy hybrid"
+        case 7:
+            return "HEVC dual-layer UHD Blu-ray"
+        case 8 where dv_bl_signal_compatibility_id == 1:
+            return "HEVC single-layer HDR10-compatible streaming/broadcast"
+        case 8 where dv_bl_signal_compatibility_id == 2:
+            return "HEVC single-layer SDR-compatible broadcast"
+        case 8 where dv_bl_signal_compatibility_id == 4:
+            return "HEVC single-layer HLG-compatible broadcast"
+        case 8:
+            return "HEVC single-layer compatibility \(dv_bl_signal_compatibility_id)"
+        case 9:
+            return "AVC single-layer mobile low-bandwidth"
+        case 10:
+            return "HEVC dual-layer studio/mezzanine"
+        case 11:
+            return "HEVC single-layer studio/mezzanine"
+        case 12:
+            return "AVC dual-layer legacy mezzanine/studio"
+        case 13:
+            return "AVC single-layer legacy mezzanine/studio"
+        default:
+            return "unclassified"
+        }
+    }
+
+    public var enhancementLayerDescription: String? {
+        guard el_present_flag != 0 else {
+            return nil
+        }
+        switch dv_profile {
+        case 7:
+            return "enhancement layer present; MEL/FEL is not distinguished by this configuration record"
+        case 10, 12:
+            return "enhancement layer present; full dual-layer composition is not implemented"
+        default:
+            return "enhancement layer present"
+        }
+    }
+
+    public var fallbackDescription: String {
+        if let hdrFallbackDynamicRange {
+            return hdrFallbackDynamicRange.description
+        }
+        switch dv_profile {
+        case 2, 3, 4, 6, 8 where dv_bl_signal_compatibility_id == 2:
+            return "source SDR/base metadata"
+        case 7 where el_present_flag != 0:
+            return "HDR10 base layer; no full enhancement-layer composition"
+        case 10, 11, 12, 13:
+            return "source/base metadata for studio profile"
+        default:
+            return "source metadata"
+        }
+    }
+
+    public var description: String {
+        var description = "Dolby Vision profile \(dv_profile) (\(profileDescription)), level \(dv_level), rpu \(rpu_present_flag), " +
+            "el \(el_present_flag), bl \(bl_present_flag), compatibility \(dv_bl_signal_compatibility_id)"
+        if let enhancementLayerDescription {
+            description += ", \(enhancementLayerDescription)"
+        }
+        description += ", fallback \(fallbackDescription)"
+        return description
+    }
+}
+
 public enum FFmpegFieldOrder: UInt8 {
     case unknown = 0
     case progressive
@@ -200,8 +335,8 @@ public extension MediaPlayerTrack {
     }
 
     var dynamicRange: DynamicRange? {
-        if dovi != nil {
-            return .dolbyVision
+        if let dovi {
+            return dovi.hdrFallbackDynamicRange ?? formatDescription?.dynamicRange
         } else {
             return formatDescription?.dynamicRange
         }

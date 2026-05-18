@@ -29,11 +29,7 @@ public class PlayerToolBar: UIStackView {
     public var timeType = TimeType.minOrHour {
         didSet {
             if timeType != oldValue {
-                let currentTimeText = currentTime.toString(for: timeType)
-                let totalTimeText = totalTime.toString(for: timeType)
-                currentTimeLabel.text = currentTimeText
-                totalTimeLabel.text = totalTimeText
-                timeLabel.text = "\(currentTimeText) / \(totalTimeText)"
+                updateTimeLabels()
             }
         }
     }
@@ -45,14 +41,8 @@ public class PlayerToolBar: UIStackView {
                 return
             }
             if currentTime != oldValue {
-                let text = currentTime.toString(for: timeType)
-                currentTimeLabel.text = text
-                timeLabel.text = "\(text) / \(totalTime.toString(for: timeType))"
-                if isLiveStream {
-                    timeSlider.value = Float(todayInterval)
-                } else {
-                    timeSlider.value = Float(currentTime)
-                }
+                updateTimeLabels()
+                updateSliderValue()
             }
         }
     }
@@ -76,19 +66,33 @@ public class PlayerToolBar: UIStackView {
                 return
             }
             if totalTime != oldValue {
-                let text = totalTime.toString(for: timeType)
-                totalTimeLabel.text = text
-                timeLabel.text = "\(currentTime.toString(for: timeType)) / \(text)"
-                timeSlider.maximumValue = Float(totalTime)
-            }
-            if isLiveStream {
-                timeSlider.maximumValue = Float(60 * 60 * 24)
+                updateTimeLabels()
+                updateSliderBounds()
             }
         }
     }
 
     public var isLiveStream: Bool {
         totalTime == 0
+    }
+
+    public var seekableTimeRange: MediaPlaybackTimeRange? {
+        didSet {
+            updateTimeLabels()
+            updateSliderBounds()
+            updateSliderValue()
+        }
+    }
+
+    var sliderDuration: TimeInterval {
+        if isLiveStream, let seekableTimeRange {
+            return seekableTimeRange.duration
+        }
+        return totalTime
+    }
+
+    var isLiveDVRStream: Bool {
+        isLiveStream && seekableTimeRange != nil
     }
 
     public var isSeekable: Bool = true {
@@ -262,12 +266,56 @@ public class PlayerToolBar: UIStackView {
     }
 
     public func reset() {
+        seekableTimeRange = nil
         currentTime = 0
         totalTime = 0
         playButton.isSelected = false
         timeSlider.value = 0.0
         timeSlider.isPlayable = false
         playbackRateButton.setTitle(NSLocalizedString("speed", comment: ""), for: .normal)
+    }
+
+    func mediaTime(forSliderValue value: TimeInterval) -> TimeInterval {
+        if isLiveDVRStream, let seekableTimeRange {
+            return seekableTimeRange.clamped(seekableTimeRange.start + value)
+        }
+        return value
+    }
+
+    func displayTime(for mediaTime: TimeInterval) -> TimeInterval {
+        if isLiveDVRStream, let seekableTimeRange {
+            return max(0, seekableTimeRange.clamped(mediaTime) - seekableTimeRange.start)
+        }
+        return mediaTime
+    }
+
+    private func updateTimeLabels() {
+        let currentTimeText = displayTime(for: currentTime).toString(for: timeType)
+        let totalTimeText = sliderDuration.toString(for: timeType)
+        currentTimeLabel.text = currentTimeText
+        totalTimeLabel.text = totalTimeText
+        timeLabel.text = "\(currentTimeText) / \(totalTimeText)"
+    }
+
+    private func updateSliderBounds() {
+        timeSlider.minimumValue = 0
+        if isLiveDVRStream {
+            timeSlider.maximumValue = Float(sliderDuration)
+        } else if isLiveStream {
+            timeSlider.maximumValue = Float(60 * 60 * 24)
+        } else {
+            timeSlider.maximumValue = Float(totalTime)
+        }
+    }
+
+    private func updateSliderValue() {
+        if isLiveDVRStream {
+            timeSlider.value = Float(displayTime(for: currentTime))
+        } else if isLiveStream {
+            timeSlider.value = Float(todayInterval)
+        } else {
+            timeSlider.value = Float(currentTime)
+        }
     }
 }
 

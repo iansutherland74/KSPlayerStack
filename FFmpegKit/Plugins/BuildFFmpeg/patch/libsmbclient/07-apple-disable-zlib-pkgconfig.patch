@@ -1,6 +1,8 @@
+diff --git a/wscript b/wscript
+index a14fd20..5fa8769 100644
 --- a/wscript
 +++ b/wscript
-@@ -191,7 +191,7 @@
+@@ -236,7 +236,7 @@ def configure(conf):
  
      conf.CHECK_CFG(package='zlib', minversion='1.2.3',
                     args='--cflags --libs',
@@ -8,4 +10,4 @@
 +                   mandatory=False)
      conf.CHECK_FUNCS_IN('inflateInit2', 'z')
  
-     if conf.CHECK_FOR_THIRD_PARTY():
+     if Options.options.enable_keyring is not False:

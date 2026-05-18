@@ -1,0 +1,15 @@
+diff --git a/librpc/wscript_build b/librpc/wscript_build
+index 0c3f8bce761..c04d20346a3 100644
+--- a/librpc/wscript_build
++++ b/librpc/wscript_build
+@@ -323,8 +323,8 @@ bld.SAMBA_SUBSYSTEM('NDR_WSP_DATA',
+ 	)
+
+ bld.SAMBA_SUBSYSTEM('WSP_UTIL',
+-	source='wsp/wsp_util.c wsp/wsp_props_gen.c',
+-	public_deps='ndr gen_wsp_props'
++	source='wsp/wsp_util.c',
++	public_deps='ndr NDR_WSP'
+ 	)
+
+ bld.SAMBA_SUBSYSTEM('NDR_WITNESS',

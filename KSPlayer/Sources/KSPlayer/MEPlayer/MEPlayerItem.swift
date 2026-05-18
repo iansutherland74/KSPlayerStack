@@ -11,6 +11,25 @@ import Libavcodec
 import Libavfilter
 import Libavformat
 
+enum FFmpegSeekabilityPolicy {
+    static func isPlaylistFormat(_ formatName: String) -> Bool {
+        formatName.lowercased().split(separator: ",").contains { name in
+            let name = String(name)
+            return name == "hls" || name == "dash" || name == "applehttp"
+        }
+    }
+
+    static func seekableTimeRange(duration: TimeInterval, ioSeekable: Bool?, formatName: String) -> MediaPlaybackTimeRange? {
+        guard duration > 0 else {
+            return nil
+        }
+        if ioSeekable == false, !isPlaylistFormat(formatName) {
+            return nil
+        }
+        return MediaPlaybackTimeRange(start: 0, duration: duration)
+    }
+}
+
 public final class MEPlayerItem: @unchecked Sendable {
     private let url: URL
     private let options: KSOptions
@@ -634,14 +653,16 @@ extension MEPlayerItem {
 
 extension MEPlayerItem: MediaPlayback {
     var seekable: Bool {
-        guard let formatCtx else {
-            return false
+        seekableTimeRange != nil
+    }
+
+    var seekableTimeRange: MediaPlaybackTimeRange? {
+        guard let formatCtx, duration > 0 else {
+            return nil
         }
-        var seekable = true
-        if let ioContext = formatCtx.pointee.pb {
-            seekable = ioContext.pointee.seekable > 0
-        }
-        return seekable
+        let formatName = String(cString: formatCtx.pointee.iformat.pointee.name).lowercased()
+        let ioSeekable = formatCtx.pointee.pb.map { $0.pointee.seekable > 0 }
+        return FFmpegSeekabilityPolicy.seekableTimeRange(duration: duration, ioSeekable: ioSeekable, formatName: formatName)
     }
 
     public func prepareToPlay() {

@@ -1,0 +1,16 @@
+diff --git a/libcli/dns/wscript_build b/libcli/dns/wscript_build
+index 14fadf38b78..9d8ff5c4025 100644
+--- a/libcli/dns/wscript_build
++++ b/libcli/dns/wscript_build
+@@ -13,7 +13,8 @@ bld.SAMBA_BINARY('dns_test',
+                   for_selftest=True)
+
+ bld.SAMBA_SUBSYSTEM('dns_lookup',
+-                    source='dns_lookup.c',
+-                    public_deps='clidns')
++                    source='dns_lookup.c',
++                    public_deps='clidns',
++                    provide_builtin_linking=True)
+
+ bld.SAMBA_BINARY('dns_lookuptest',
+                   source='dns_lookuptest.c',

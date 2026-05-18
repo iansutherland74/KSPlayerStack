@@ -92,6 +92,9 @@ public class FFmpegAssetTrack: MediaPlayerTrack {
                 let naturalSize = formatDescription.naturalSize
                 description += ", \(Int(naturalSize.width))x\(Int(naturalSize.height))"
                 description += String(format: ", %.2f fps", nominalFrameRate)
+                if let dovi {
+                    description += ", \(dovi.description)"
+                }
             }
         }
         if bitRate > 0 {
@@ -270,9 +273,9 @@ public class FFmpegAssetTrack: MediaPlayerTrack {
             }
             dic[kCVPixelBufferPixelFormatTypeKey] = format.osType(fullRange: fullRange)
             dic[kCVImageBufferPixelAspectRatioKey] = sar.aspectRatio
-            dic[kCVImageBufferColorPrimariesKey] = codecpar.color_primaries.colorPrimaries as String?
-            dic[kCVImageBufferTransferFunctionKey] = codecpar.color_trc.transferFunction as String?
-            dic[kCVImageBufferYCbCrMatrixKey] = codecpar.color_space.ycbcrMatrix as String?
+            dic[kCVImageBufferColorPrimariesKey] = colorPrimaries as String?
+            dic[kCVImageBufferTransferFunctionKey] = transferFunction as String?
+            dic[kCVImageBufferYCbCrMatrixKey] = yCbCrMatrix as String?
             // swiftlint:disable line_length
             _ = CMVideoFormatDescriptionCreate(allocator: kCFAllocatorDefault, codecType: codecType.rawValue, width: codecpar.width, height: codecpar.height, extensions: dic, formatDescriptionOut: &formatDescriptionOut)
             // swiftlint:enable line_length
@@ -393,5 +396,30 @@ extension FFmpegAssetTrack {
     var pixelFormatType: OSType? {
         let format = AVPixelFormat(codecpar.format)
         return format.osType(fullRange: formatDescription?.fullRangeVideo ?? false)
+    }
+
+    private var dolbyVisionHDRFallback: DynamicRange? {
+        dovi?.hdrFallbackDynamicRange
+    }
+
+    private var colorPrimaries: CFString? {
+        if dolbyVisionHDRFallback != nil, codecpar.color_primaries == AVCOL_PRI_UNSPECIFIED {
+            return kCVImageBufferColorPrimaries_ITU_R_2020
+        }
+        return codecpar.color_primaries.colorPrimaries
+    }
+
+    private var transferFunction: CFString? {
+        if let dolbyVisionHDRFallback, codecpar.color_trc == AVCOL_TRC_UNSPECIFIED {
+            return dolbyVisionHDRFallback.transferFunction
+        }
+        return codecpar.color_trc.transferFunction
+    }
+
+    private var yCbCrMatrix: CFString? {
+        if dolbyVisionHDRFallback != nil, codecpar.color_space == AVCOL_SPC_UNSPECIFIED {
+            return kCVImageBufferYCbCrMatrix_ITU_R_2020
+        }
+        return codecpar.color_space.ycbcrMatrix
     }
 }

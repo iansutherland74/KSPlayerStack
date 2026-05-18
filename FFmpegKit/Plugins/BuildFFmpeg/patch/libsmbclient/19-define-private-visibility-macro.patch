@@ -1,0 +1,29 @@
+diff --git a/buildtools/wafsamba/wafsamba.py b/buildtools/wafsamba/wafsamba.py
+index fbcd0acaa86..f53897c2e89 100644
+--- a/buildtools/wafsamba/wafsamba.py
++++ b/buildtools/wafsamba/wafsamba.py
+@@ -213,13 +213,13 @@ def SAMBA_LIBRARY(bld, libname, source,
+
+     if BUILTIN_LIBRARY(bld, libname):
+         builtin_target = libname + '.builtin.objlist'
+-        builtin_cflags_end = '-D_PUBLIC_=_PRIVATE_'
++        builtin_cflags_end = '-D_PRIVATE_= -D_PUBLIC_=_PRIVATE_'
+         empty_target = libname
+         obj_target = None
+     else:
+         if provide_builtin_linking:
+             builtin_target = libname + '.builtin.objlist'
+-            builtin_cflags_end = '-D_PUBLIC_=_PRIVATE_'
++            builtin_cflags_end = '-D_PRIVATE_= -D_PUBLIC_=_PRIVATE_'
+         else:
+             builtin_target = None
+         empty_target = None
+@@ -894,7 +896,7 @@ def SAMBA_SUBSYSTEM(bld, modname, source,
+                                              includes=includes,
+                                              header_path=header_path,
+                                              builtin_cflags=builtin_cflags,
+-                                             builtin_cflags_end='-D_PUBLIC_=_PRIVATE_',
++                                             builtin_cflags_end='-D_PRIVATE_= -D_PUBLIC_=_PRIVATE_',
+                                              group=group,
+                                              depends_on=depends_on,
+                                              local_include=local_include,

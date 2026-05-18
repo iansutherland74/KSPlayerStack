@@ -121,7 +121,9 @@ extension DynamicRange {
             return kCVImageBufferTransferFunction_ITU_R_709_2
         case .hdr10:
             return kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ
-        case .hlg, .dolbyVision:
+        case .dolbyVision:
+            return kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ
+        case .hlg:
             return kCVImageBufferTransferFunction_ITU_R_2100_HLG
         }
     }

@@ -20,6 +20,12 @@ let package = Package(
             name: "KSPlayer",
             dependencies: [
                 .product(name: "FFmpegKit", package: "FFmpegKit"),
+                .product(name: "Libavcodec", package: "FFmpegKit"),
+                .product(name: "Libavfilter", package: "FFmpegKit"),
+                .product(name: "Libavformat", package: "FFmpegKit"),
+                .product(name: "Libavutil", package: "FFmpegKit"),
+                .product(name: "Libswresample", package: "FFmpegKit"),
+                .product(name: "Libswscale", package: "FFmpegKit"),
                 "DisplayCriteria",
             ],
             resources: [.process("Metal/Shaders.metal")],

@@ -41,6 +41,45 @@ class BuildBoringSSL: BaseBuild {
 class BuildLibreSSL: BaseBuild {
     init() {
         super.init(library: .libtls)
+        generateReleaseFilesIfNeeded()
+    }
+
+    private func generateReleaseFilesIfNeeded() {
+        let generatedFiles = [
+            "VERSION",
+            "crypto/VERSION",
+            "crypto/crypto.sym",
+            "ssl/VERSION",
+            "ssl/ssl.sym",
+            "tls/VERSION",
+            "tls/tls.sym",
+        ]
+        if generatedFiles.allSatisfy({ FileManager.default.fileExists(atPath: (directoryURL + $0).path) }) {
+            return
+        }
+        try! prepareOpenBSDCheckout()
+        try! Utility.launch(executableURL: directoryURL + "update.sh", arguments: [], currentDirectoryURL: directoryURL)
+    }
+
+    private func prepareOpenBSDCheckout() throws {
+        let openbsdBranch = try String(contentsOf: directoryURL + "OPENBSD_BRANCH")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let openbsdURL = directoryURL + "openbsd"
+        let openbsdRepository = (ProcessInfo.processInfo.environment["LIBRESSL_GIT"] ?? "https://github.com/libressl") + "/openbsd"
+        if !FileManager.default.fileExists(atPath: openbsdURL.path) {
+            try Utility.launch(path: "/usr/bin/git", arguments: ["clone", "--depth", "8", "--branch", openbsdBranch, openbsdRepository, openbsdURL.path], currentDirectoryURL: directoryURL)
+        }
+        try Utility.launch(path: "/usr/bin/git", arguments: ["fetch", "origin", openbsdBranch, "--depth", "8"], currentDirectoryURL: openbsdURL)
+        try Utility.launch(path: "/usr/bin/git", arguments: ["checkout", "-B", openbsdBranch, "FETCH_HEAD"], currentDirectoryURL: openbsdURL)
+        let openbsdTag = "libressl-\(library.version)"
+        try Utility.launch(path: "/usr/bin/git", arguments: ["fetch", "origin", "refs/tags/\(openbsdTag):refs/tags/\(openbsdTag)", "--depth", "1"], currentDirectoryURL: openbsdURL)
+    }
+
+    override func arguments(platform _: PlatformType, arch _: ArchType) -> [String] {
+        [
+            "-DLIBRESSL_APPS=OFF",
+            "-DLIBRESSL_TESTS=OFF",
+        ]
     }
 
     override func cFlags(platform: PlatformType, arch: ArchType) -> [String] {

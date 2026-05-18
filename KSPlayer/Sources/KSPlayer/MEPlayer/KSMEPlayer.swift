@@ -115,7 +115,7 @@ public class KSMEPlayer: NSObject, @unchecked Sendable {
     }
 
     public required init(url: URL, options: KSOptions) {
-        KSOptions.setAudioSession()
+        KSOptions.setAudioSession(options: options)
         audioOutput = KSOptions.audioPlayerType.init()
         playerItem = MEPlayerItem(url: url, options: options)
         if options.videoDisable {
@@ -316,6 +316,7 @@ extension KSMEPlayer: @preconcurrency MediaPlayerProtocol {
 
     public func replace(url: URL, options: KSOptions) {
         KSLog("replaceUrl \(self)")
+        KSOptions.setAudioSession(options: options)
         shutdown()
         playerItem.delegate = nil
         playerItem = MEPlayerItem(url: url, options: options)
@@ -347,6 +348,8 @@ extension KSMEPlayer: @preconcurrency MediaPlayerProtocol {
     public var fileSize: Double { playerItem.fileSize }
 
     public var seekable: Bool { playerItem.seekable }
+
+    public var seekableTimeRange: MediaPlaybackTimeRange? { playerItem.seekableTimeRange }
 
     public var dynamicInfo: DynamicInfo? {
         playerItem.dynamicInfo

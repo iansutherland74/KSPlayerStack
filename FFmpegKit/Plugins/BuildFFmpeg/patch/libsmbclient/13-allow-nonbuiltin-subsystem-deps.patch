@@ -1,0 +1,14 @@
+diff --git a/buildtools/wafsamba/samba_deps.py b/buildtools/wafsamba/samba_deps.py
+index f302b59a796..c55a7ca29b5 100644
+--- a/buildtools/wafsamba/samba_deps.py
++++ b/buildtools/wafsamba/samba_deps.py
+@@ -407,6 +407,9 @@ def replace_builtin_subsystem_deps(bld, tgt_list):
+                 # both target and dependency don't require builtin linking
+                 continue
+             sdt = getattr(dt, 'samba_builtin_subsystem', None)
++            if sdt is None and t_require_builtin_deps:
++                debug("deps: target %s: keeping non-builtin dependency %s" % (t.sname, dep))
++                continue
+             if not t_require_builtin_deps:
+                 if sdt is None:
+                     debug("deps: target %s: dependency %s requires builtin deps only" % (t.sname, dep))

@@ -78,6 +78,11 @@ open class KSOptions {
     // audio
     public var audioFilters = [String]()
     public var syncDecodeAudio = false
+    #if !os(macOS)
+    /// Overrides the AVAudioSession route sharing policy used for playback.
+    /// Set this to `.longFormAudio` when an app wants audio-only AirPlay routes.
+    public var audioRouteSharingPolicy = KSOptions.audioRouteSharingPolicy
+    #endif
     // sutile
     public var autoSelectEmbedSubtitle = true
     public var isSeekImageSubtitle = false
@@ -516,6 +521,10 @@ public extension KSOptions {
     nonisolated(unsafe) static var canStartPictureInPictureAutomaticallyFromInline = true
     nonisolated(unsafe) static var preferredFrame = true
     nonisolated(unsafe) static var useSystemHTTPProxy = true
+    #if !os(macOS)
+    /// Optional process-wide default route sharing policy. Nil keeps KSPlayer's platform defaults.
+    nonisolated(unsafe) static var audioRouteSharingPolicy: AVAudioSession.RouteSharingPolicy?
+    #endif
     /// 日志级别
     nonisolated(unsafe) static var logLevel = LogLevel.warning
     nonisolated(unsafe) static var logger: LogHandler = OSLog(lable: "KSPlayer")
@@ -526,7 +535,7 @@ public extension KSOptions {
         return Int(ncpu)
     }
 
-    static func setAudioSession() {
+    static func setAudioSession(options: KSOptions? = nil) {
         #if os(macOS)
 //        try? AVAudioSession.sharedInstance().setRouteSharingPolicy(.longFormAudio)
         #else
@@ -535,10 +544,12 @@ public extension KSOptions {
             category = .playback
         }
         #if os(tvOS)
-        try? AVAudioSession.sharedInstance().setCategory(category, mode: .moviePlayback, policy: .longFormAudio)
+        let defaultPolicy = AVAudioSession.RouteSharingPolicy.longFormAudio
         #else
-        try? AVAudioSession.sharedInstance().setCategory(category, mode: .moviePlayback, policy: .longFormVideo)
+        let defaultPolicy = AVAudioSession.RouteSharingPolicy.longFormVideo
         #endif
+        let policy = options?.audioRouteSharingPolicy ?? audioRouteSharingPolicy ?? defaultPolicy
+        try? AVAudioSession.sharedInstance().setCategory(category, mode: .moviePlayback, policy: policy)
         try? AVAudioSession.sharedInstance().setActive(true)
         #endif
     }

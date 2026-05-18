@@ -143,7 +143,8 @@ class DecompressionSession {
             VTSessionSetProperty(decompressionSession, key: kVTDecompressionPropertyKey_PropagatePerFrameHDRDisplayMetadata,
                                  value: kCFBooleanTrue)
         }
-        if let destinationDynamicRange = options.availableDynamicRange(nil) {
+        let contentDynamicRange = assetTrack.dovi?.hdrFallbackDynamicRange
+        if let destinationDynamicRange = options.availableDynamicRange(contentDynamicRange) {
             let pixelTransferProperties = [kVTPixelTransferPropertyKey_DestinationColorPrimaries: destinationDynamicRange.colorPrimaries,
                                            kVTPixelTransferPropertyKey_DestinationTransferFunction: destinationDynamicRange.transferFunction,
                                            kVTPixelTransferPropertyKey_DestinationYCbCrMatrix: destinationDynamicRange.yCbCrMatrix]

@@ -409,7 +409,7 @@ open class VideoPlayerView: PlayerView {
     open func panGestureBegan(location _: CGPoint, direction: KSPanDirection) {
         if direction == .horizontal {
             // 给tmpPanValue初值
-            if totalTime > 0 {
+            if toolBar.sliderDuration > 0 {
                 tmpPanValue = toolBar.timeSlider.value
             }
         }
@@ -421,11 +421,12 @@ open class VideoPlayerView: PlayerView {
                 return
             }
             isSliderSliding = true
-            if totalTime > 0 {
+            let sliderDuration = toolBar.sliderDuration
+            if sliderDuration > 0 {
                 // 每次滑动需要叠加时间，通过一定的比例，使滑动一直处于统一水平
-                tmpPanValue += panValue(velocity: point, direction: direction, currentTime: Float(toolBar.currentTime), totalTime: Float(totalTime))
-                tmpPanValue = max(min(tmpPanValue, Float(totalTime)), 0)
-                showSeekToView(second: Double(tmpPanValue), isAdd: point.x > 0)
+                tmpPanValue += panValue(velocity: point, direction: direction, currentTime: Float(toolBar.currentTime), totalTime: Float(sliderDuration))
+                tmpPanValue = max(min(tmpPanValue, Float(sliderDuration)), 0)
+                showSeekToView(second: toolBar.mediaTime(forSliderValue: Double(tmpPanValue)), isAdd: point.x > 0)
             }
         }
     }
@@ -664,7 +665,7 @@ public extension VideoPlayerView {
         isMaskShow = true
         seekToView.isHidden = false
         toolBar.currentTime = second
-        seekToView.set(text: second.toString(for: toolBar.timeType), isAdd: isAdd)
+        seekToView.set(text: toolBar.displayTime(for: second).toString(for: toolBar.timeType), isAdd: isAdd)
     }
 
     func hideSeekToView() {

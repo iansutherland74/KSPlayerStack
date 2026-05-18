@@ -10,6 +10,20 @@ public typealias UIImage = NSImage
 import Combine
 import CoreGraphics
 
+enum AVPlayerSeekableRangeResolver {
+    static func range(from ranges: [CMTimeRange]) -> MediaPlaybackTimeRange? {
+        let secondsRanges = ranges.compactMap { range -> MediaPlaybackTimeRange? in
+            MediaPlaybackTimeRange(start: range.start.seconds, duration: range.duration.seconds)
+        }
+        guard let first = secondsRanges.first else {
+            return nil
+        }
+        let start = secondsRanges.reduce(first.start) { min($0, $1.start) }
+        let end = secondsRanges.reduce(first.end) { max($0, $1.end) }
+        return MediaPlaybackTimeRange(start: start, end: end)
+    }
+}
+
 public final class KSAVPlayerView: UIView {
     public let player = AVQueuePlayer()
     override public init(frame: CGRect) {
@@ -213,7 +227,7 @@ public class KSAVPlayer {
     #endif
 
     public required init(url: URL, options: KSOptions) {
-        KSOptions.setAudioSession()
+        KSOptions.setAudioSession(options: options)
         let playbackURL = KSDiskPrecache.playbackURL(for: url, options: options)
         fileAccess = KSSecurityScopedURLAccess(url: playbackURL)
         urlAsset = AVURLAsset(url: playbackURL, options: options.avOptions)
@@ -265,7 +279,8 @@ extension KSAVPlayer {
             }
             // 默认选择第一个声道
             item.tracks.filter { $0.assetTrack?.mediaType.rawValue == AVMediaType.audio.rawValue }.dropFirst().forEach { $0.isEnabled = false }
-            duration = item.duration.seconds
+            let itemDuration = item.duration.seconds
+            duration = itemDuration.isFinite ? max(itemDuration, 0) : 0
             let estimatedDataRates = item.tracks.compactMap { $0.assetTrack?.estimatedDataRate }
             fileSize = Double(estimatedDataRates.reduce(0, +)) * duration / 8
             isReadyToPlay = true
@@ -452,6 +467,7 @@ extension KSAVPlayer: @preconcurrency MediaPlayerProtocol {
 
     public func replace(url: URL, options: KSOptions) {
         KSLog("replaceUrl \(self)")
+        KSOptions.setAudioSession(options: options)
         shutdown()
         let playbackURL = KSDiskPrecache.playbackURL(for: url, options: options)
         fileAccess = KSSecurityScopedURLAccess(url: playbackURL)
@@ -477,7 +493,14 @@ extension KSAVPlayer: @preconcurrency MediaPlayerProtocol {
     }
 
     public var seekable: Bool {
-        !(player.currentItem?.seekableTimeRanges.isEmpty ?? true)
+        seekableTimeRange != nil
+    }
+
+    public var seekableTimeRange: MediaPlaybackTimeRange? {
+        guard let ranges = player.currentItem?.seekableTimeRanges, !ranges.isEmpty else {
+            return nil
+        }
+        return AVPlayerSeekableRangeResolver.range(from: ranges.map(\.timeRangeValue))
     }
 
     public var isMuted: Bool {

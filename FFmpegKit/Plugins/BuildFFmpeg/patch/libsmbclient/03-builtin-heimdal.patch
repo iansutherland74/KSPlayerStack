@@ -1,19 +1,25 @@
+diff --git a/lib/ldb/wscript b/lib/ldb/wscript
+index 2a93426..b79c354 100644
 --- a/lib/ldb/wscript
 +++ b/lib/ldb/wscript
-@@ -519,10 +519,6 @@
-                          install=False)
+@@ -379,11 +379,7 @@ def build(bld):
+                      install=False)
  
-         bld.SAMBA_BINARY('ldb_key_value_sub_txn_tdb_test',
--                         bld.SUBDIR('ldb_key_value',
--                             '''ldb_kv_search.c
--                                ldb_kv_index.c
--                                ldb_kv_cache.c''') +
-                          'tests/ldb_key_value_sub_txn_test.c',
-                          cflags='-DTEST_BE=\"tdb\"',
-                          deps='cmocka ldb ldb_tdb_err_map',
---- a/source4/heimdal_build/wscript_build
-+++ b/source4/heimdal_build/wscript_build
-@@ -5,6 +5,7 @@
+     bld.SAMBA_BINARY('ldb_key_value_sub_txn_tdb_test',
+-                     bld.SUBDIR('ldb_key_value',
+-                         '''ldb_kv_search.c
+-                            ldb_kv_index.c
+-                            ldb_kv_cache.c''') +
+-                     'tests/ldb_key_value_sub_txn_test.c',
++                    'tests/ldb_key_value_sub_txn_test.c',
+                      cflags='-DTEST_BE=\"tdb\"',
+                      deps='cmocka ldb ldb_tdb_err_map',
+                      install=False)
+diff --git a/third_party/heimdal_build/wscript_build b/third_party/heimdal_build/wscript_build
+index ebbf943..bd1c261 100644
+--- a/third_party/heimdal_build/wscript_build
++++ b/third_party/heimdal_build/wscript_build
+@@ -4,6 +4,7 @@ import os
  from samba_utils import SET_TARGET_TYPE
  from samba_autoconf import CURRENT_CFLAGS
  from samba_utils import LOAD_ENVIRONMENT, TO_LIST
@@ -21,25 +27,19 @@
  
  def heimdal_path(p, absolute=False):
      hpath = os.path.join("../heimdal", p)
-@@ -215,7 +216,10 @@
- def HEIMDAL_LIBRARY(libname, source, deps, vnum, version_script, includes='', cflags=[]):
-     '''define a Heimdal library'''
- 
--    obj_target = libname + '.objlist'
+@@ -206,6 +207,15 @@ def HEIMDAL_LIBRARY(libname, source, deps, version_script=None, includes='', cfl
+         orig_vscript_map = heimdal_path(version_script, absolute=False)
+     else:
+         orig_vscript_map = None
 +    if BUILTIN_LIBRARY(bld, libname):
-+        obj_target = libname
-+    else:
-+        obj_target = libname + '.objlist'
- 
-     # first create a target for building the object files for this library
-     # by separating in this way, we avoid recompiling the C files
-@@ -227,6 +231,9 @@
-                         cflags         = cflags,
-                         group          = 'main')
- 
-+    if BUILTIN_LIBRARY(bld, libname):
++        bld.SAMBA_SUBSYSTEM(libname, source,
++                            deps=deps,
++                            includes=includes,
++                            cflags=cflags,
++                            cflags_end=cflags_end,
++                            allow_warnings=allow_warnings)
 +        return
 +
-     if not SET_TARGET_TYPE(bld, libname, "LIBRARY"):
-         return
- 
+     bld.SAMBA_LIBRARY(libname, source,
+                       deps=deps,
+                       includes=includes,

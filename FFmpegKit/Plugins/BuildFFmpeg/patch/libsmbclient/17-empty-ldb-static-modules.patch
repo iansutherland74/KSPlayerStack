@@ -1,0 +1,19 @@
+diff --git a/lib/ldb/common/ldb_modules.c b/lib/ldb/common/ldb_modules.c
+index 04f27e6..7444517 100644
+--- a/lib/ldb/common/ldb_modules.c
++++ b/lib/ldb/common/ldb_modules.c
+@@ -35,6 +35,14 @@
+ #include "dlinklist.h"
+ #include "system/dir.h"
+
++#ifndef STATIC_ldb_MODULES_PROTO
++#define STATIC_ldb_MODULES_PROTO
++#endif
++
++#ifndef STATIC_ldb_MODULES
++#define STATIC_ldb_MODULES NULL
++#endif
++
+ static char *ldb_modules_strdup_no_spaces(TALLOC_CTX *mem_ctx, const char *string)
+ {
+ 	size_t i, len;
