@@ -47,3 +47,8 @@ protocol KSSliderDelegate: AnyObject {
      */
     func slider(value: Double, event: ControlEvents)
 }
+
+@MainActor
+protocol KSProgressPreviewInteractionDelegate: AnyObject {
+    func slider(_ slider: KSSlider, previewValue value: Double, event: ControlEvents)
+}

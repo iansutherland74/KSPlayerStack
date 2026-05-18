@@ -29,8 +29,8 @@ public class ThumbnailController: @unchecked Sendable {
     }
 
     public func generateThumbnail(for url: URL, thumbWidth: Int32 = 240) async throws -> [FFThumbnail] {
-        try await Task {
-            try getPeeks(for: url, thumbWidth: thumbWidth)
+        try await Task.detached(priority: .utility) {
+            try self.getPeeks(for: url, thumbWidth: thumbWidth)
         }.value
     }
 

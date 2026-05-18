@@ -10,7 +10,9 @@ import UIKit
 public class KSSlider: UXSlider {
     private var tapGesture: UITapGestureRecognizer!
     private var panGesture: UIPanGestureRecognizer!
+    private var hoverGesture: UIGestureRecognizer?
     weak var delegate: KSSliderDelegate?
+    weak var previewDelegate: KSProgressPreviewInteractionDelegate?
     public var trackHeigt = CGFloat(2)
     public var isPlayable = false
     override public init(frame: CGRect) {
@@ -19,6 +21,13 @@ public class KSSlider: UXSlider {
         panGesture = UIPanGestureRecognizer(target: self, action: #selector(actionPanGesture(sender:)))
         addGestureRecognizer(tapGesture)
         addGestureRecognizer(panGesture)
+        #if !os(tvOS)
+        if #available(iOS 13.0, *) {
+            let hoverGesture = UIHoverGestureRecognizer(target: self, action: #selector(actionHoverGesture(sender:)))
+            addGestureRecognizer(hoverGesture)
+            self.hoverGesture = hoverGesture
+        }
+        #endif
         addTarget(self, action: #selector(progressSliderTouchBegan(_:)), for: .touchDown)
         addTarget(self, action: #selector(progressSliderValueChanged(_:)), for: .valueChanged)
         addTarget(self, action: #selector(progressSliderTouchEnded(_:)), for: [.touchUpInside, .touchCancel, .touchUpOutside, .primaryActionTriggered])
@@ -48,11 +57,13 @@ public class KSSlider: UXSlider {
         tapGesture.isEnabled = false
         panGesture.isEnabled = false
         value = value
+        previewDelegate?.slider(self, previewValue: Double(sender.value), event: .touchDown)
         delegate?.slider(value: Double(sender.value), event: .touchDown)
     }
 
     @objc private func progressSliderValueChanged(_ sender: KSSlider) {
         guard isPlayable else { return }
+        previewDelegate?.slider(self, previewValue: Double(sender.value), event: .valueChanged)
         delegate?.slider(value: Double(sender.value), event: .valueChanged)
     }
 
@@ -60,6 +71,7 @@ public class KSSlider: UXSlider {
         guard isPlayable else { return }
         tapGesture.isEnabled = true
         panGesture.isEnabled = true
+        previewDelegate?.slider(self, previewValue: Double(sender.value), event: .touchUpInside)
         delegate?.slider(value: Double(sender.value), event: .touchUpInside)
     }
 
@@ -68,9 +80,11 @@ public class KSSlider: UXSlider {
         //            return
         //        }
         let touchPoint = sender.location(in: self)
-        let value = (maximumValue - minimumValue) * Float(touchPoint.x / frame.size.width)
+        let value = previewValue(at: touchPoint)
         self.value = value
+        previewDelegate?.slider(self, previewValue: Double(value), event: .touchDown)
         delegate?.slider(value: Double(value), event: .valueChanged)
+        previewDelegate?.slider(self, previewValue: Double(value), event: .touchUpInside)
         delegate?.slider(value: Double(value), event: .touchUpInside)
     }
 
@@ -79,16 +93,43 @@ public class KSSlider: UXSlider {
         //            return
         //        }
         let touchPoint = sender.location(in: self)
-        let value = (maximumValue - minimumValue) * Float(touchPoint.x / frame.size.width)
+        let value = previewValue(at: touchPoint)
         self.value = value
         if sender.state == .began {
+            previewDelegate?.slider(self, previewValue: Double(value), event: .touchDown)
             delegate?.slider(value: Double(value), event: .touchDown)
         } else if sender.state == .ended {
+            previewDelegate?.slider(self, previewValue: Double(value), event: .touchUpInside)
             delegate?.slider(value: Double(value), event: .touchUpInside)
         } else {
+            previewDelegate?.slider(self, previewValue: Double(value), event: .valueChanged)
             delegate?.slider(value: Double(value), event: .valueChanged)
         }
     }
+
+    private func previewValue(at point: CGPoint) -> Float {
+        guard bounds.width > 0 else { return minimumValue }
+        let fraction = min(max(point.x / bounds.width, 0), 1)
+        return minimumValue + (maximumValue - minimumValue) * Float(fraction)
+    }
+
+    #if !os(tvOS)
+    @available(iOS 13.0, *)
+    @objc private func actionHoverGesture(sender: UIHoverGestureRecognizer) {
+        guard isPlayable else { return }
+        let value = Double(previewValue(at: sender.location(in: self)))
+        switch sender.state {
+        case .began:
+            previewDelegate?.slider(self, previewValue: value, event: .mouseEntered)
+        case .changed:
+            previewDelegate?.slider(self, previewValue: value, event: .valueChanged)
+        case .ended, .cancelled, .failed:
+            previewDelegate?.slider(self, previewValue: value, event: .mouseExited)
+        default:
+            break
+        }
+    }
+    #endif
 }
 
 #if os(tvOS)

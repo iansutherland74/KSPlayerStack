@@ -489,6 +489,7 @@ public class KSButton: NSButton {
 
 public class KSSlider: NSSlider {
     weak var delegate: KSSliderDelegate?
+    weak var previewDelegate: KSProgressPreviewInteractionDelegate?
     public var trackHeigt = CGFloat(2)
     public var isPlayable = false
     public var isUserInteractionEnabled: Bool = true
@@ -510,8 +511,53 @@ public class KSSlider: NSSlider {
 
     @objc private func progressSliderTouchEnded(_ sender: KSSlider) {
         if isUserInteractionEnabled {
+            previewDelegate?.slider(self, previewValue: Double(sender.floatValue), event: .touchUpInside)
             delegate?.slider(value: Double(sender.floatValue), event: .touchUpInside)
         }
+    }
+
+    override public func updateTrackingAreas() {
+        for trackingArea in trackingAreas {
+            removeTrackingArea(trackingArea)
+        }
+        let trackingArea = NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .mouseMoved, .activeInKeyWindow], owner: self, userInfo: nil)
+        addTrackingArea(trackingArea)
+    }
+
+    override public func mouseDown(with event: NSEvent) {
+        guard isUserInteractionEnabled else { return }
+        let value = previewValue(for: event)
+        previewDelegate?.slider(self, previewValue: value, event: .touchDown)
+        super.mouseDown(with: event)
+    }
+
+    override public func mouseDragged(with event: NSEvent) {
+        guard isUserInteractionEnabled else { return }
+        let value = previewValue(for: event)
+        previewDelegate?.slider(self, previewValue: value, event: .valueChanged)
+        super.mouseDragged(with: event)
+    }
+
+    override public func mouseEntered(with event: NSEvent) {
+        guard isUserInteractionEnabled, isPlayable else { return }
+        previewDelegate?.slider(self, previewValue: previewValue(for: event), event: .mouseEntered)
+    }
+
+    override public func mouseMoved(with event: NSEvent) {
+        guard isUserInteractionEnabled, isPlayable else { return }
+        previewDelegate?.slider(self, previewValue: previewValue(for: event), event: .valueChanged)
+    }
+
+    override public func mouseExited(with event: NSEvent) {
+        guard isUserInteractionEnabled, isPlayable else { return }
+        previewDelegate?.slider(self, previewValue: previewValue(for: event), event: .mouseExited)
+    }
+
+    private func previewValue(for event: NSEvent) -> Double {
+        guard bounds.width > 0 else { return minValue }
+        let location = convert(event.locationInWindow, from: nil)
+        let fraction = min(max(location.x / bounds.width, 0), 1)
+        return minValue + (maxValue - minValue) * Double(fraction)
     }
 
     open func setThumbImage(_: UIImage?, for _: State) {}

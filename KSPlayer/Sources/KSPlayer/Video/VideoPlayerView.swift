@@ -40,6 +40,12 @@ open class VideoPlayerView: PlayerView {
     var scrollDirection = KSPanDirection.horizontal
     var tmpPanValue: Float = 0
     private var isSliderSliding = false
+    private let progressPreviewView = ProgressPreviewView()
+    private var progressPreviewCenterXConstraint: NSLayoutConstraint?
+    private var progressPreviewThumbnailTask: Task<Void, Never>?
+    private var progressPreviewThumbnailURL: URL?
+    private var progressPreviewThumbnails = [FFThumbnail]()
+    private var progressPreviewRequestedTime: TimeInterval?
 
     public let bottomMaskView = LayerContainerView()
     public let topMaskView = LayerContainerView()
@@ -202,6 +208,7 @@ open class VideoPlayerView: PlayerView {
         // Bottom views
         bottomMaskView.addSubview(toolBar)
         toolBar.timeSlider.delegate = self
+        toolBar.timeSlider.previewDelegate = self
         controllerView.addSubview(seekToView)
         controllerView.addSubview(replayButton)
         replayButton.cornerRadius = 32
@@ -280,6 +287,7 @@ open class VideoPlayerView: PlayerView {
         switch state {
         case .readyToPlay:
             toolBar.timeSlider.isPlayable = true
+            prepareProgressPreviewThumbnails(for: layer)
             toolBar.videoSwitchButton.isHidden = layer.player.tracks(mediaType: .video).count < 2
             toolBar.audioSwitchButton.isHidden = layer.player.tracks(mediaType: .audio).count < 2
             if #available(iOS 14.0, tvOS 15.0, *) {
@@ -327,6 +335,8 @@ open class VideoPlayerView: PlayerView {
     override open func resetPlayer() {
         super.resetPlayer()
         delayItem = nil
+        resetProgressPreviewThumbnails()
+        hideProgressPreview()
         toolBar.reset()
         isMaskShow = false
         hideLoader()
@@ -368,6 +378,7 @@ open class VideoPlayerView: PlayerView {
     }
 
     open func set(resource: KSPlayerResource, definitionIndex: Int = 0, isSetUrl: Bool = true) {
+        resetProgressPreviewThumbnails()
         currentDefinition = definitionIndex >= resource.definitions.count ? resource.definitions.count - 1 : definitionIndex
         if isSetUrl {
             let asset = resource.definitions[currentDefinition]
@@ -655,6 +666,108 @@ public extension VideoPlayerView {
     }
 }
 
+// MARK: - progress preview
+
+extension VideoPlayerView: KSProgressPreviewInteractionDelegate {
+    func slider(_: KSSlider, previewValue value: Double, event: ControlEvents) {
+        switch event {
+        case .touchDown, .mouseEntered, .valueChanged:
+            showProgressPreview(time: value)
+        case .touchUpInside, .touchCancel, .mouseExited:
+            hideProgressPreview()
+        case .primaryActionTriggered:
+            break
+        }
+    }
+}
+
+private extension VideoPlayerView {
+    func showProgressPreview(time: TimeInterval) {
+        guard playerLayer?.options.isProgressPreviewEnabled == true, totalTime > 0 else {
+            return
+        }
+        let time = min(max(time, 0), totalTime)
+        progressPreviewRequestedTime = time
+        progressPreviewView.set(timeText: time.toString(for: toolBar.timeType), image: progressPreviewThumbnail(for: time))
+        updateProgressPreviewPosition(time: time)
+        progressPreviewView.isHidden = false
+        isMaskShow = true
+    }
+
+    func hideProgressPreview() {
+        progressPreviewRequestedTime = nil
+        progressPreviewView.isHidden = true
+    }
+
+    func updateProgressPreviewPosition(time: TimeInterval) {
+        bottomMaskView.layoutIfNeeded()
+        let sliderWidth = toolBar.timeSlider.bounds.width
+        let centerX = toolBar.timeSlider.frame.minX + ProgressPreviewResolver.previewCenterX(
+            time: time,
+            totalTime: totalTime,
+            sliderWidth: sliderWidth,
+            previewWidth: ProgressPreviewView.preferredWidth
+        )
+        progressPreviewCenterXConstraint?.constant = centerX
+    }
+
+    func progressPreviewThumbnail(for time: TimeInterval) -> UIImage? {
+        let times = progressPreviewThumbnails.map(\.time)
+        guard let index = ProgressPreviewResolver.nearestThumbnailIndex(times: times, target: time) else {
+            return nil
+        }
+        return progressPreviewThumbnails[index].image
+    }
+
+    func prepareProgressPreviewThumbnails(for layer: KSPlayerLayer) {
+        guard layer.options.isProgressPreviewEnabled, canGenerateProgressPreviewThumbnails(for: layer.url, mode: layer.options.progressPreviewThumbnailMode) else {
+            return
+        }
+        guard progressPreviewThumbnailURL != layer.url else {
+            return
+        }
+
+        progressPreviewThumbnailTask?.cancel()
+        progressPreviewThumbnails.removeAll()
+        progressPreviewThumbnailURL = layer.url
+        let url = layer.url
+        let controller = ThumbnailController(thumbnailCount: 60)
+        progressPreviewThumbnailTask = Task { [weak self] in
+            do {
+                let thumbnails = try await controller.generateThumbnail(for: url)
+                guard !Task.isCancelled else { return }
+                await MainActor.run { [weak self] in
+                    guard let self, self.progressPreviewThumbnailURL == url else { return }
+                    self.progressPreviewThumbnails = thumbnails.sorted { $0.time < $1.time }
+                    if let time = self.progressPreviewRequestedTime, !self.progressPreviewView.isHidden {
+                        self.progressPreviewView.set(timeText: time.toString(for: self.toolBar.timeType), image: self.progressPreviewThumbnail(for: time))
+                    }
+                }
+            } catch {
+                KSLog(level: .debug, "progress preview thumbnails unavailable: \(error)")
+            }
+        }
+    }
+
+    func resetProgressPreviewThumbnails() {
+        progressPreviewThumbnailTask?.cancel()
+        progressPreviewThumbnailTask = nil
+        progressPreviewThumbnailURL = nil
+        progressPreviewThumbnails.removeAll()
+    }
+
+    func canGenerateProgressPreviewThumbnails(for url: URL, mode: ProgressPreviewThumbnailMode) -> Bool {
+        switch mode {
+        case .disabled:
+            return false
+        case .localOnly:
+            return url.isFileURL
+        case .always:
+            return true
+        }
+    }
+}
+
 // MARK: - private functions
 
 extension VideoPlayerView {
@@ -753,12 +866,14 @@ extension VideoPlayerView {
             #endif
         }
         bottomMaskView.addSubview(toolBar.timeSlider)
+        bottomMaskView.addSubview(progressPreviewView)
         toolBar.audioSwitchButton.isHidden = true
         toolBar.videoSwitchButton.isHidden = true
         toolBar.pipButton.isHidden = true
         contentOverlayView.translatesAutoresizingMaskIntoConstraints = false
         controllerView.translatesAutoresizingMaskIntoConstraints = false
         toolBar.timeSlider.translatesAutoresizingMaskIntoConstraints = false
+        progressPreviewView.translatesAutoresizingMaskIntoConstraints = false
         topMaskView.translatesAutoresizingMaskIntoConstraints = false
         bottomMaskView.translatesAutoresizingMaskIntoConstraints = false
         navigationBar.translatesAutoresizingMaskIntoConstraints = false
@@ -767,6 +882,8 @@ extension VideoPlayerView {
         seekToView.translatesAutoresizingMaskIntoConstraints = false
         replayButton.translatesAutoresizingMaskIntoConstraints = false
         lockButton.translatesAutoresizingMaskIntoConstraints = false
+        let progressPreviewCenterXConstraint = progressPreviewView.centerXAnchor.constraint(equalTo: bottomMaskView.leadingAnchor)
+        self.progressPreviewCenterXConstraint = progressPreviewCenterXConstraint
         NSLayoutConstraint.activate([
             contentOverlayView.topAnchor.constraint(equalTo: topAnchor),
             contentOverlayView.leadingAnchor.constraint(equalTo: leadingAnchor),
@@ -798,6 +915,10 @@ extension VideoPlayerView {
             replayButton.centerXAnchor.constraint(equalTo: centerXAnchor),
             lockButton.leadingAnchor.constraint(equalTo: safeLeadingAnchor, constant: 22),
             lockButton.centerYAnchor.constraint(equalTo: centerYAnchor),
+            progressPreviewCenterXConstraint,
+            progressPreviewView.bottomAnchor.constraint(equalTo: toolBar.timeSlider.topAnchor, constant: -8),
+            progressPreviewView.widthAnchor.constraint(equalToConstant: ProgressPreviewView.preferredWidth),
+            progressPreviewView.heightAnchor.constraint(equalToConstant: ProgressPreviewView.preferredHeight),
         ])
 
         configureToolBarConstraints()

@@ -90,6 +90,10 @@ open class KSOptions {
     public var videoAdaptable = true
     public var videoFilters = [String]()
     public var videoUpscaling = VideoUpscalingMode.none
+    /// Shows a floating time bubble while hovering or scrubbing the progress bar.
+    public var isProgressPreviewEnabled = KSOptions.isProgressPreviewEnabled
+    /// Controls whether progress previews may warm thumbnail images in the background.
+    public var progressPreviewThumbnailMode = KSOptions.progressPreviewThumbnailMode
     public var syncDecodeVideo = false
     public var hardwareDecode = KSOptions.hardwareDecode
     public var asynchronousDecompression = KSOptions.asynchronousDecompression
@@ -468,6 +472,15 @@ public enum VideoUpscalingMode: Equatable, Sendable {
     case appleSuperResolution(scaleFactor: Float = 2)
 }
 
+public enum ProgressPreviewThumbnailMode: Equatable, Sendable {
+    /// Never generate progress-bar preview thumbnails.
+    case disabled
+    /// Generate thumbnails only for local file URLs.
+    case localOnly
+    /// Allow thumbnail generation for any playable URL.
+    case always
+}
+
 public extension KSOptions {
     nonisolated(unsafe) static var firstPlayerType: MediaPlayerProtocol.Type = KSAVPlayer.self
     nonisolated(unsafe) static var secondPlayerType: MediaPlayerProtocol.Type? = KSMEPlayer.self
@@ -489,6 +502,8 @@ public extension KSOptions {
     nonisolated(unsafe) static var isDiskPrecacheEnabled = false
     nonisolated(unsafe) static var diskPrecacheMaxFileSize: Int64 = 1_073_741_824
     nonisolated(unsafe) static var diskPrecacheMaxCacheSize: Int64 = 5_368_709_120
+    nonisolated(unsafe) static var isProgressPreviewEnabled = true
+    nonisolated(unsafe) static var progressPreviewThumbnailMode = ProgressPreviewThumbnailMode.localOnly
     // 默认不用自研的硬解，因为有些视频的AVPacket的pts顺序是不对的，只有解码后的AVFrame里面的pts是对的。
     nonisolated(unsafe) static var asynchronousDecompression = false
     nonisolated(unsafe) static var isPipPopViewController = false
