@@ -7,7 +7,40 @@
 
 import AVFoundation
 import FFmpegKit
+import Libavcodec
 import Libavformat
+
+public enum FFmpegAudioDecodeSupport: Equatable, CustomStringConvertible {
+    case supported
+    case unsupported(String)
+
+    public var isSupported: Bool {
+        if case .supported = self {
+            true
+        } else {
+            false
+        }
+    }
+
+    public var description: String {
+        switch self {
+        case .supported:
+            return "supported"
+        case let .unsupported(reason):
+            return reason
+        }
+    }
+}
+
+public struct FFmpegAudioCodecMetadata: Equatable {
+    public let displayName: String
+    public let profileName: String?
+    public let isDolbyAtmos: Bool
+    public let isDolbyAC4: Bool
+    public let isDolbyTrueHD: Bool
+    public let isDolbyEAC3: Bool
+    public let decodeSupport: FFmpegAudioDecodeSupport
+}
 
 public class FFmpegAssetTrack: MediaPlayerTrack {
     public private(set) var trackID: Int32 = 0
@@ -28,6 +61,8 @@ public class FFmpegAssetTrack: MediaPlayerTrack {
     let bitsPerRawSample: Int32
     // audio
     public let audioDescriptor: AudioDescriptor?
+    public private(set) var audioCodecMetadata: FFmpegAudioCodecMetadata?
+    public private(set) var audioDecodeSupport: FFmpegAudioDecodeSupport = .supported
     // subtitle
     public let isImageSubtitle: Bool
     public var delay: TimeInterval = 0
@@ -41,7 +76,7 @@ public class FFmpegAssetTrack: MediaPlayerTrack {
     let isConvertNALSize: Bool
     var seekByBytes = false
     public var description: String {
-        var description = codecName
+        var description = audioCodecMetadata?.displayName ?? codecName
         if let formatName {
             description += ", \(formatName)"
         }
@@ -64,6 +99,9 @@ public class FFmpegAssetTrack: MediaPlayerTrack {
         }
         if let language {
             description += "(\(language))"
+        }
+        if case let .unsupported(reason) = audioDecodeSupport {
+            description += ", unsupported (\(reason))"
         }
         return description
     }
@@ -113,6 +151,7 @@ public class FFmpegAssetTrack: MediaPlayerTrack {
         } else {
             name = languageCode ?? codecName
         }
+        updateAudioCodecMetadata(title: name)
         // AV_DISPOSITION_DEFAULT
         if mediaType == .subtitle {
             isEnabled = !isImageSubtitle || stream.pointee.disposition & AV_DISPOSITION_FORCED == AV_DISPOSITION_FORCED
@@ -130,10 +169,11 @@ public class FFmpegAssetTrack: MediaPlayerTrack {
         // codec_tag byte order is LSB first CMFormatDescription.MediaSubType(rawValue: codecpar.codec_tag.bigEndian)
         let codecType = codecpar.codec_id.mediaSubType
         var codecName = ""
+        let profileName = avcodec_profile_name(codecpar.codec_id, codecpar.profile).flatMap { String(cString: $0) }
         if let descriptor = avcodec_descriptor_get(codecpar.codec_id) {
             codecName += String(cString: descriptor.pointee.name)
-            if let profile = descriptor.pointee.profiles {
-                codecName += " (\(String(cString: profile.pointee.name)))"
+            if let profileName {
+                codecName += " (\(profileName))"
             }
         } else {
             codecName = ""
@@ -256,6 +296,26 @@ public class FFmpegAssetTrack: MediaPlayerTrack {
         bitsPerRawSample = codecpar.bits_per_raw_sample
         isImageSubtitle = [AV_CODEC_ID_DVD_SUBTITLE, AV_CODEC_ID_DVB_SUBTITLE, AV_CODEC_ID_DVB_TELETEXT, AV_CODEC_ID_HDMV_PGS_SUBTITLE].contains(codecpar.codec_id)
         trackID = 0
+        if mediaType == .audio {
+            updateAudioCodecMetadata(profileName: profileName, title: nil)
+        }
+    }
+
+    private func updateAudioCodecMetadata(profileName: String? = nil, title: String?) {
+        guard mediaType == .audio else {
+            return
+        }
+        let profileName = profileName ?? audioCodecMetadata?.profileName
+        audioDecodeSupport = Self.audioDecodeSupport(codecID: codecpar.codec_id)
+        audioCodecMetadata = Self.audioCodecMetadata(
+            codecID: codecpar.codec_id,
+            profile: codecpar.profile,
+            codecName: codecName,
+            profileName: profileName,
+            channelLayout: codecpar.ch_layout,
+            title: title,
+            decodeSupport: audioDecodeSupport
+        )
     }
 
     func createContext(options: KSOptions) throws -> UnsafeMutablePointer<AVCodecContext> {
@@ -273,6 +333,59 @@ public class FFmpegAssetTrack: MediaPlayerTrack {
             }
             stream?.pointee.discard = discard
         }
+    }
+}
+
+extension FFmpegAssetTrack {
+    static func audioDecodeSupport(codecID: AVCodecID) -> FFmpegAudioDecodeSupport {
+        if avcodec_find_decoder(codecID) != nil {
+            return .supported
+        }
+        if codecID == AV_CODEC_ID_AC4 {
+            return .unsupported("AC-4 demuxing is available, but FFmpeg does not provide an AC-4 decoder and KSPlayer has no encoded AC-4 passthrough path")
+        }
+        let name = avcodec_descriptor_get(codecID).flatMap { String(cString: $0.pointee.name) } ?? "audio"
+        return .unsupported("no FFmpeg decoder is available for \(name)")
+    }
+
+    static func audioCodecMetadata(
+        codecID: AVCodecID,
+        profile: Int32,
+        codecName: String,
+        profileName: String?,
+        channelLayout: AVChannelLayout,
+        title: String?,
+        decodeSupport: FFmpegAudioDecodeSupport
+    ) -> FFmpegAudioCodecMetadata? {
+        let isDolbyEAC3 = codecID == AV_CODEC_ID_EAC3
+        let isDolbyTrueHD = codecID == AV_CODEC_ID_TRUEHD || codecID == AV_CODEC_ID_MLP
+        let isDolbyAC4 = codecID == AV_CODEC_ID_AC4
+        let titleSignalsAtmos = title?.range(of: "atmos", options: [.caseInsensitive, .diacriticInsensitive]) != nil
+        let profileSignalsAtmos = profile == AV_PROFILE_EAC3_DDP_ATMOS || profileName?.range(of: "atmos", options: [.caseInsensitive, .diacriticInsensitive]) != nil
+        let isDolbyAtmos = (isDolbyEAC3 && profileSignalsAtmos) || ((isDolbyTrueHD || isDolbyAC4) && titleSignalsAtmos) || (isDolbyTrueHD && channelLayout.isDolbyAtmosBedLayout)
+        guard isDolbyEAC3 || isDolbyTrueHD || isDolbyAC4 || isDolbyAtmos else {
+            return nil
+        }
+
+        let displayName: String
+        if isDolbyAC4 {
+            displayName = isDolbyAtmos ? "Dolby AC-4 Atmos" : "Dolby AC-4"
+        } else if isDolbyTrueHD {
+            displayName = isDolbyAtmos ? "Dolby TrueHD Atmos" : "Dolby TrueHD"
+        } else if isDolbyAtmos {
+            displayName = "Dolby Digital Plus Atmos"
+        } else {
+            displayName = "Dolby Digital Plus"
+        }
+        return FFmpegAudioCodecMetadata(
+            displayName: displayName,
+            profileName: profileName,
+            isDolbyAtmos: isDolbyAtmos,
+            isDolbyAC4: isDolbyAC4,
+            isDolbyTrueHD: isDolbyTrueHD,
+            isDolbyEAC3: isDolbyEAC3,
+            decodeSupport: decodeSupport
+        )
     }
 }
 

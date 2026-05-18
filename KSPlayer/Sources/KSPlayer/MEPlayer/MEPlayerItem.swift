@@ -420,16 +420,24 @@ extension MEPlayerItem {
         }
 
         let audios = assetTracks.filter { $0.mediaType == .audio }
+        let decodableAudios = audios.filter(\.audioDecodeSupport.isSupported)
         let wantedStreamNb: Int32
-        if !audios.isEmpty, let index = options.wantedAudio(tracks: audios) {
-            wantedStreamNb = audios[index].trackID
+        if !decodableAudios.isEmpty, let index = options.wantedAudio(tracks: decodableAudios) {
+            wantedStreamNb = decodableAudios[index].trackID
         } else {
             wantedStreamNb = -1
         }
         let index = av_find_best_stream(formatCtx, AVMEDIA_TYPE_AUDIO, wantedStreamNb, videoIndex, nil, 0)
-        if let first = audios.first(where: {
+        let selectedAudio = decodableAudios.first {
             index > 0 ? $0.trackID == index : true
-        }), first.codecpar.codec_id != AV_CODEC_ID_NONE {
+        }
+        if selectedAudio == nil, let unsupportedAudio = audios.first {
+            KSLog("[audio] unsupported audio track skipped: \(unsupportedAudio.description)")
+            if videoTrack == nil {
+                error = NSError(description: unsupportedAudio.description)
+            }
+        }
+        if let first = selectedAudio, first.codecpar.codec_id != AV_CODEC_ID_NONE {
             first.isEnabled = true
             options.process(assetTrack: first)
             // 音频要比较所有的音轨，因为truehd的fps是1200，跟其他的音轨差距太大了

@@ -301,6 +301,14 @@ public extension FourCharCode {
     }
 }
 
+extension String {
+    var fourCharCode: FourCharCode {
+        utf8.prefix(4).reduce(FourCharCode(0)) { result, byte in
+            (result << 8) | FourCharCode(byte)
+        }
+    }
+}
+
 extension CMTime {
     init(seconds: TimeInterval) {
         self.init(seconds: seconds, preferredTimescale: Int32(USEC_PER_SEC))

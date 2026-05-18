@@ -213,7 +213,11 @@ let layoutMapTuple =
      (tag: kAudioChannelLayoutTag_Logic_7_1_A, mask: swift_AV_CH_LAYOUT_7POINT1),
      (tag: kAudioChannelLayoutTag_Logic_7_1_SDDS_A, mask: swift_AV_CH_LAYOUT_7POINT1_WIDE),
      (tag: kAudioChannelLayoutTag_AAC_Octagonal, mask: swift_AV_CH_LAYOUT_OCTAGONAL),
-     //     (tag: kAudioChannelLayoutTag_Logic_Atmos_5_1_2, mask: swift_AV_CH_LAYOUT_7POINT1_WIDE_BACK),
+     (tag: kAudioChannelLayoutTag_Atmos_5_1_2, mask: swift_AV_CH_LAYOUT_5POINT1POINT2),
+     (tag: kAudioChannelLayoutTag_Atmos_5_1_4, mask: swift_AV_CH_LAYOUT_5POINT1POINT4_BACK),
+     (tag: kAudioChannelLayoutTag_Atmos_7_1_2, mask: swift_AV_CH_LAYOUT_7POINT1POINT2),
+     (tag: kAudioChannelLayoutTag_Atmos_7_1_4, mask: swift_AV_CH_LAYOUT_7POINT1POINT4_BACK),
+     (tag: kAudioChannelLayoutTag_Atmos_9_1_6, mask: swift_AV_CH_LAYOUT_9POINT1POINT6),
     ]
 
 // Some channel abbreviations used below:

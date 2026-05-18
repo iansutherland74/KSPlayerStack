@@ -352,6 +352,10 @@ extension AVCodecID {
             return .amr
         case AV_CODEC_ID_EAC3:
             return .enhancedAC3
+        case AV_CODEC_ID_AC4:
+            return CMFormatDescription.MediaSubType(rawValue: "ac-4".fourCharCode)
+        case AV_CODEC_ID_TRUEHD, AV_CODEC_ID_MLP:
+            return CMFormatDescription.MediaSubType(rawValue: "mlpa".fourCharCode)
         case AV_CODEC_ID_GSM_MS:
             return .microsoftGSM
         case AV_CODEC_ID_ILBC:
@@ -407,6 +411,16 @@ extension AVChannelLayout: Equatable {
 
 extension AVChannelLayout: CustomStringConvertible {
     nonisolated(unsafe) static let defaultValue = AVChannelLayout(order: AV_CHANNEL_ORDER_NATIVE, nb_channels: 2, u: AVChannelLayout.__Unnamed_union_u(mask: swift_AV_CH_LAYOUT_STEREO), opaque: nil)
+    var isDolbyAtmosBedLayout: Bool {
+        [
+            swift_AV_CH_LAYOUT_5POINT1POINT2,
+            swift_AV_CH_LAYOUT_5POINT1POINT4_BACK,
+            swift_AV_CH_LAYOUT_7POINT1POINT2,
+            swift_AV_CH_LAYOUT_7POINT1POINT4_BACK,
+            swift_AV_CH_LAYOUT_9POINT1POINT6,
+        ].contains(u.mask)
+    }
+
     var layoutTag: AudioChannelLayoutTag? {
         KSLog("[audio] FFmepg AVChannelLayout: \(self) order: \(order) mask: \(u.mask)")
         let tag = layoutMapTuple.first { _, mask in
