@@ -156,7 +156,10 @@ class SyncPlayerItemTrack<Frame: MEFrame>: PlayerItemTrackProtocol, CustomString
                        let videoFrame = frame as? VideoVTBFrame,
                        let pixelBuffer = videoFrame.corePixelBuffer?.cvPixelBuffer
                     {
-                        self.options.videoFrameOutput?.enqueue(pixelBuffer)
+                        self.options.videoFrameOutput?.enqueue(
+                            pixelBuffer,
+                            presentationTime: videoFrame.timebase.cmtime(for: videoFrame.timestamp)
+                        )
                     }
                     self.outputRenderQueue.push(frame)
                     self.outputRenderQueue.fps = packet.assetTrack.nominalFrameRate

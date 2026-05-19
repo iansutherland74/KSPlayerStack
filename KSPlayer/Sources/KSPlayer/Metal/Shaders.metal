@@ -47,7 +47,8 @@ float video2DTo3DPseudoDepth(float2 uv) {
 
 float video2DTo3DCurvedDepth(float depth, float curvature) {
     float centered = clamp(depth, 0.0, 1.0) - 0.5;
-    float magnitude = pow(clamp(abs(centered) * 2.0, 0.0, 1.0), max(curvature, 0.05)) * 0.5;
+    float safeCurvature = clamp(curvature, 0.6, 1.5);
+    float magnitude = pow(clamp(abs(centered) * 2.0, 0.0, 1.0), safeCurvature) * 0.5;
     return 0.5 + sign(centered) * magnitude;
 }
 
@@ -74,7 +75,9 @@ float2 applyVideo2DTo3D(float2 uv,
         return uv;
     }
     float depth = video2DTo3DDepth(uv, conversion, shape, depthTexture, textureSampler);
-    float parallax = (depth - 0.5) * clamp(conversion.y, 0.0, 1.0) * clamp(shape.x, 0.0, 2.0) * 0.07 * conversion.w;
+    float strength = clamp(conversion.y, 0.0, 0.4);
+    float distance = clamp(shape.x, 0.35, 1.2);
+    float parallax = clamp((depth - 0.5) * strength * distance * 0.04, -0.018, 0.018) * conversion.w;
     return clamp(uv + float2(parallax, 0.0), float2(0.001, 0.001), float2(0.999, 0.999));
 }
 

@@ -5,6 +5,9 @@
       location = "group:SwiftUI/Player.xcodeproj">
    </FileRef>
    <FileRef
+      location = "group:VisionProDepthAnythingV3App/VisionProDepthAnythingV3App.xcodeproj">
+   </FileRef>
+   <FileRef
       location = "group:demo-iOS/demo-iOS.xcodeproj">
    </FileRef>
    <FileRef

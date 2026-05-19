@@ -4,9 +4,16 @@
 //
 
 import Foundation
+@preconcurrency import CoreMedia
 @preconcurrency import CoreVideo
 
 public typealias KSVideoOutputHandler = @Sendable (CVPixelBuffer) -> Void
+
+public enum KSVideoFrameOutputMetadata {
+    public static var presentationTimeSecondsKey: CFString {
+        "KSPlayer.presentationTimeSeconds" as CFString
+    }
+}
 
 public final class KSVideoFrameOutput: @unchecked Sendable {
     public enum DropPolicy: Equatable, Sendable {
@@ -94,7 +101,18 @@ public final class KSVideoFrameOutput: @unchecked Sendable {
         return count
     }
 
-    func enqueue(_ pixelBuffer: CVPixelBuffer) {
+    func enqueue(_ pixelBuffer: CVPixelBuffer, presentationTime: CMTime? = nil) {
+        if let presentationTime {
+            let seconds = CMTimeGetSeconds(presentationTime)
+            if seconds.isFinite {
+                CVBufferSetAttachment(
+                    pixelBuffer,
+                    KSVideoFrameOutputMetadata.presentationTimeSecondsKey,
+                    NSNumber(value: seconds),
+                    .shouldNotPropagate
+                )
+            }
+        }
         let retainedFrame = RetainedPixelBuffer(pixelBuffer)
         var shouldScheduleDrain = false
 
