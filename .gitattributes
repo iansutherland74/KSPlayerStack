@@ -1,1 +1,24 @@
 FFmpegKit/Sources/Libavcodec.xcframework/macos-arm64_x86_64/Libavcodec.framework/Libavcodec filter=lfs diff=lfs merge=lfs -text
+
+# Private model/runtime artifacts staged after the repository becomes private.
+KSPlayer/PrivateArtifacts/**/*.safetensors filter=lfs diff=lfs merge=lfs -text
+KSPlayer/PrivateArtifacts/**/*.ckpt filter=lfs diff=lfs merge=lfs -text
+KSPlayer/PrivateArtifacts/**/*.pt filter=lfs diff=lfs merge=lfs -text
+KSPlayer/PrivateArtifacts/**/*.pth filter=lfs diff=lfs merge=lfs -text
+KSPlayer/PrivateArtifacts/**/*.bin filter=lfs diff=lfs merge=lfs -text
+KSPlayer/PrivateArtifacts/**/*.onnx filter=lfs diff=lfs merge=lfs -text
+KSPlayer/PrivateArtifacts/**/*.mlmodel filter=lfs diff=lfs merge=lfs -text
+KSPlayer/PrivateArtifacts/**/*.mlmodelc/** filter=lfs diff=lfs merge=lfs -text
+KSPlayer/PrivateArtifacts/**/*.mlpackage/** filter=lfs diff=lfs merge=lfs -text
+KSPlayer/PrivateArtifacts/**/*.xcframework/** filter=lfs diff=lfs merge=lfs -text
+KSPlayer/PrivateArtifacts/**/*.framework/** filter=lfs diff=lfs merge=lfs -text
+KSPlayer/PrivateArtifacts/**/*.dylib filter=lfs diff=lfs merge=lfs -text
+KSPlayer/PrivateArtifacts/**/*.a filter=lfs diff=lfs merge=lfs -text
+KSPlayer/PrivateArtifacts/**/*.so filter=lfs diff=lfs merge=lfs -text
+KSPlayer/PrivateArtifacts/**/*.dll filter=lfs diff=lfs merge=lfs -text
+KSPlayer/PrivateArtifacts/**/*.mp4 filter=lfs diff=lfs merge=lfs -text
+KSPlayer/PrivateArtifacts/**/*.mov filter=lfs diff=lfs merge=lfs -text
+KSPlayer/PrivateArtifacts/**/*.hevc filter=lfs diff=lfs merge=lfs -text
+KSPlayer/PrivateArtifacts/**/*.mkv filter=lfs diff=lfs merge=lfs -text
+KSPlayer/PrivateArtifacts/**/*.pcap filter=lfs diff=lfs merge=lfs -text
+KSPlayer/PrivateArtifacts/**/*.trace filter=lfs diff=lfs merge=lfs -text
