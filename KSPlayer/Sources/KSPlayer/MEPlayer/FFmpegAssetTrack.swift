@@ -42,6 +42,28 @@ public struct FFmpegAudioCodecMetadata: Equatable {
     public let decodeSupport: FFmpegAudioDecodeSupport
 }
 
+public enum FFmpegVideoDecodeSupport: Equatable, CustomStringConvertible {
+    case supported
+    case unsupported(String)
+
+    public var isSupported: Bool {
+        if case .supported = self {
+            true
+        } else {
+            false
+        }
+    }
+
+    public var description: String {
+        switch self {
+        case .supported:
+            return "supported"
+        case let .unsupported(reason):
+            return reason
+        }
+    }
+}
+
 public class FFmpegAssetTrack: MediaPlayerTrack, SubtitleKindProviding {
     public private(set) var trackID: Int32 = 0
     public let codecName: String
@@ -63,12 +85,23 @@ public class FFmpegAssetTrack: MediaPlayerTrack, SubtitleKindProviding {
     public let audioDescriptor: AudioDescriptor?
     public private(set) var audioCodecMetadata: FFmpegAudioCodecMetadata?
     public private(set) var audioDecodeSupport: FFmpegAudioDecodeSupport = .supported
+    public var isSelectableForFFmpegPlayback: Bool {
+        switch mediaType {
+        case .audio:
+            return audioDecodeSupport.isSupported
+        case .video:
+            return videoDecodeSupport.isSupported
+        default:
+            return true
+        }
+    }
     // subtitle
     public let isImageSubtitle: Bool
     public var delay: TimeInterval = 0
     var subtitle: SyncPlayerItemTrack<SubtitleFrame>?
     var embeddedFontDirectoryURL: URL?
     // video
+    public private(set) var videoDecodeSupport: FFmpegVideoDecodeSupport = .supported
     public private(set) var rotation: Int16 = 0
     public var dovi: DOVIDecoderConfigurationRecord?
     public private(set) var hasHDR10PlusMetadata = false
@@ -113,6 +146,9 @@ public class FFmpegAssetTrack: MediaPlayerTrack, SubtitleKindProviding {
             description += "(\(language))"
         }
         if case let .unsupported(reason) = audioDecodeSupport {
+            description += ", unsupported (\(reason))"
+        }
+        if case let .unsupported(reason) = videoDecodeSupport {
             description += ", unsupported (\(reason))"
         }
         return description
@@ -218,6 +254,7 @@ public class FFmpegAssetTrack: MediaPlayerTrack, SubtitleKindProviding {
         } else if codecpar.codec_type == AVMEDIA_TYPE_VIDEO {
             audioDescriptor = nil
             mediaType = .video
+            videoDecodeSupport = Self.videoDecodeSupport(codecID: codecpar.codec_id)
             var doviRecord: DOVIDecoderConfigurationRecord?
             if codecpar.nb_coded_side_data > 0, let sideDatas = codecpar.coded_side_data {
                 for i in 0 ..< codecpar.nb_coded_side_data {
@@ -417,6 +454,10 @@ extension FFmpegAssetTrack {
         tracks.filter { $0.mediaType == .audio && $0.audioDecodeSupport.isSupported }
     }
 
+    static func decodableVideoTracks(_ tracks: [FFmpegAssetTrack]) -> [FFmpegAssetTrack] {
+        tracks.filter { $0.mediaType == .video && $0.videoDecodeSupport.isSupported }
+    }
+
     static func audioDecodeSupport(codecID: AVCodecID) -> FFmpegAudioDecodeSupport {
         if avcodec_find_decoder(codecID) != nil {
             return .supported
@@ -425,6 +466,14 @@ extension FFmpegAssetTrack {
             return .unsupported("AC-4 demuxing is available, but FFmpeg does not provide an AC-4 decoder and KSPlayer has no encoded AC-4 passthrough path")
         }
         let name = avcodec_descriptor_get(codecID).flatMap { String(cString: $0.pointee.name) } ?? "audio"
+        return .unsupported("no FFmpeg decoder is available for \(name)")
+    }
+
+    static func videoDecodeSupport(codecID: AVCodecID) -> FFmpegVideoDecodeSupport {
+        if avcodec_find_decoder(codecID) != nil {
+            return .supported
+        }
+        let name = avcodec_descriptor_get(codecID).flatMap { String(cString: $0.pointee.name) } ?? "video"
         return .unsupported("no FFmpeg decoder is available for \(name)")
     }
 

@@ -7,6 +7,7 @@ import Libavformat
 public enum VideoExportError: Error, Equatable, LocalizedError {
     case unsupportedSource(URL)
     case unsupportedLiveOrPlaylist(URL)
+    case unsupportedSeparateAudio(URL)
     case unsafeDestination(URL)
     case destinationExists(URL)
     case sourceAndDestinationMatch(URL)
@@ -20,6 +21,8 @@ public enum VideoExportError: Error, Equatable, LocalizedError {
             return "Video export supports local files and direct HTTP(S) media files, not \(url.absoluteString)."
         case let .unsupportedLiveOrPlaylist(url):
             return "Video export does not download live, playlist, or segmented media URLs: \(url.absoluteString)."
+        case let .unsupportedSeparateAudio(url):
+            return "Video export does not merge separate audio sources. Export the combined asset yourself or use a single muxed source instead of \(url.absoluteString)."
         case let .unsafeDestination(url):
             return "Video export destination must be a writable file URL: \(url.path)."
         case let .destinationExists(url):
@@ -43,6 +46,7 @@ public enum VideoExportPhase: Equatable, Sendable {
     case finished
 }
 
+/// Progress emitted while a complete media file is downloaded and remuxed.
 public struct VideoExportProgress: Equatable, Sendable {
     public let phase: VideoExportPhase
     public let fractionCompleted: Double?
@@ -57,6 +61,10 @@ public struct VideoExportProgress: Equatable, Sendable {
     }
 }
 
+/// Container presets for lossless stream-copy exports.
+///
+/// These presets do not transcode media. Unsupported stream/container combinations are rejected by
+/// FFmpeg instead of silently changing codecs, color, HDR, or subtitle representation.
 public enum VideoConversionPreset: Equatable, Sendable {
     case remuxMP4
     case remuxMOV
@@ -98,6 +106,11 @@ public struct VideoExportJob: Equatable, Sendable {
     public let preset: VideoConversionPreset
     public let overwriteExisting: Bool
 
+    /// Creates a complete-file export job.
+    ///
+    /// `destinationURL` must be a file URL. Existing files are left untouched unless
+    /// `overwriteExisting` is true; output is first written to a sibling temporary file and then moved
+    /// into place.
     public init(sourceURL: URL, destinationURL: URL, preset: VideoConversionPreset = .remuxMP4, overwriteExisting: Bool = false) {
         self.sourceURL = sourceURL
         self.destinationURL = destinationURL
@@ -119,54 +132,73 @@ public final class VideoExportService: @unchecked Sendable {
 
     public init() {}
 
+    /// Exports a complete finite media file by downloading direct HTTP(S) media when needed and then
+    /// stream-copying supported tracks into the selected container.
+    ///
+    /// The export path rejects playlist/live/segmented sources, Blu-ray inputs, and unsupported URL
+    /// schemes. Custom `KSOptions.process(url:)` IO is allowed for non-live custom schemes. Remux
+    /// presets preserve source streams and metadata where the destination container accepts them; they
+    /// do not perform codec conversion.
     @discardableResult
     public func export(_ job: VideoExportJob, options: KSOptions = KSOptions(), progress: ProgressHandler? = nil) async throws -> URL {
         progress?(VideoExportProgress(phase: .validating, fractionCompleted: 0))
         try VideoExportPathPolicy.validate(job)
 
-        let sourceURL = try await preparedLocalSource(for: job.sourceURL, options: options, progress: progress)
+        let source = try await preparedSource(for: job.sourceURL, options: options, progress: progress)
         let exportOptions = VideoExportRemuxOptions(formatContextOptions: options.formatContextOptions)
+        let task = Task.detached(priority: .utility) {
+            try Self.remux(source: source, destinationURL: job.destinationURL, preset: job.preset, overwriteExisting: job.overwriteExisting, options: exportOptions, progress: progress)
+        }
 
         do {
-            try await Task.detached(priority: .utility) {
-                try Self.remux(sourceURL: sourceURL, destinationURL: job.destinationURL, preset: job.preset, overwriteExisting: job.overwriteExisting, options: exportOptions, progress: progress)
-            }.value
-        } catch {
-            if sourceURL != job.sourceURL {
-                try? FileManager.default.removeItem(at: sourceURL)
+            try await withTaskCancellationHandler {
+                try await task.value
+            } onCancel: {
+                task.cancel()
             }
+        } catch {
+            source.cleanup()
             throw error
         }
 
-        if sourceURL != job.sourceURL {
-            try? FileManager.default.removeItem(at: sourceURL)
-        }
+        source.cleanup()
         progress?(VideoExportProgress(phase: .finished, fractionCompleted: 1))
         return job.destinationURL
     }
 
-    private func preparedLocalSource(for url: URL, options: KSOptions, progress: ProgressHandler?) async throws -> URL {
-        if url.isFileURL {
-            return url
+    private func preparedSource(for url: URL, options: KSOptions, progress: ProgressHandler?) async throws -> VideoExportSource {
+        if VideoExportSourcePolicy.isLiveOrSegmentedURL(url) {
+            throw VideoExportError.unsupportedLiveOrPlaylist(url)
         }
-        guard Self.isDirectHTTPMediaURL(url) else {
-            if Self.isHTTPPlaylistURL(url) {
-                throw VideoExportError.unsupportedLiveOrPlaylist(url)
-            }
+        if KSBluRayURLResolver.isBluRayCandidate(url) {
             throw VideoExportError.unsupportedSource(url)
         }
-        if let cachedURL = KSDiskPrecache.cachedURL(for: url, options: options) {
-            return cachedURL
+        if url.isFileURL {
+            options.prepareFormatContextOptions(for: url)
+            return VideoExportSource(url: url, customIO: options.process(url: url))
+        }
+        if VideoExportSourcePolicy.isDirectHTTPMediaURL(url) {
+            if let cachedURL = KSDiskPrecache.cachedURL(for: url, options: options) {
+                return VideoExportSource(url: cachedURL)
+            }
+
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent("KSPlayerVideoExports", isDirectory: true)
+            let localURL = directory
+                .appendingPathComponent(UUID().uuidString)
+                .appendingPathExtension(url.pathExtension.isEmpty ? "media" : url.pathExtension)
+            var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData)
+            Self.applyHeaders(from: options, to: &request)
+
+            let downloadedURL = try await VideoExportDownloader(progress: progress).download(request: request, destination: localURL)
+            return VideoExportSource(url: downloadedURL, temporaryURL: downloadedURL)
         }
 
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("KSPlayerVideoExports", isDirectory: true)
-        let localURL = directory
-            .appendingPathComponent(UUID().uuidString)
-            .appendingPathExtension(url.pathExtension.isEmpty ? "media" : url.pathExtension)
-        var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData)
-        Self.applyHeaders(from: options, to: &request)
+        options.prepareFormatContextOptions(for: url)
+        if let customIO = options.process(url: url) {
+            return VideoExportSource(url: url, customIO: customIO)
+        }
 
-        return try await VideoExportDownloader(progress: progress).download(request: request, destination: localURL)
+        throw VideoExportError.unsupportedSource(url)
     }
 
     private static func applyHeaders(from options: KSOptions, to request: inout URLRequest) {
@@ -183,22 +215,7 @@ public final class VideoExportService: @unchecked Sendable {
         }
     }
 
-    private static func isDirectHTTPMediaURL(_ url: URL) -> Bool {
-        guard let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https" else {
-            return false
-        }
-        return !isHTTPPlaylistURL(url)
-    }
-
-    private static func isHTTPPlaylistURL(_ url: URL) -> Bool {
-        guard let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https" else {
-            return false
-        }
-        let playlistExtensions: Set<String> = ["m3u", "m3u8", "mpd", "ism", "isml"]
-        return playlistExtensions.contains(url.pathExtension.lowercased())
-    }
-
-    private static func remux(sourceURL: URL, destinationURL: URL, preset: VideoConversionPreset, overwriteExisting: Bool, options: VideoExportRemuxOptions, progress: ProgressHandler?) throws {
+    private static func remux(source: VideoExportSource, destinationURL: URL, preset: VideoConversionPreset, overwriteExisting: Bool, options: VideoExportRemuxOptions, progress: ProgressHandler?) throws {
         let fileManager = FileManager.default
         let destinationDirectory = destinationURL.deletingLastPathComponent()
         let temporaryDestinationURL = destinationDirectory
@@ -214,7 +231,7 @@ public final class VideoExportService: @unchecked Sendable {
             throw VideoExportError.unsafeDestination(destinationURL)
         }
 
-        let sourceAccess = KSSecurityScopedURLAccess(url: sourceURL)
+        let sourceAccess = KSSecurityScopedURLAccess(urls: source.securityScopedURLs)
         let destinationAccess = KSSecurityScopedURLAccess(url: destinationDirectory)
         defer {
             sourceAccess.stop()
@@ -224,16 +241,30 @@ public final class VideoExportService: @unchecked Sendable {
 
         var inputContext = avformat_alloc_context()
         defer {
+            if let inputContext, inputContext.pointee.flags & AVFMT_FLAG_CUSTOM_IO != 0,
+               let pb = inputContext.pointee.pb,
+               let opaque = pb.pointee.opaque
+            {
+                let customIO = Unmanaged<AbstractAVIOContext>.fromOpaque(opaque).takeRetainedValue()
+                customIO.close()
+                pb.pointee.opaque = nil
+            }
             avformat_close_input(&inputContext)
         }
         guard inputContext != nil else {
             throw NSError(errorCode: .formatCreate)
         }
+        inputContext?.pointee.interrupt_callback.callback = { _ in
+            Task.isCancelled ? 1 : 0
+        }
+        if let customIO = source.customIO {
+            inputContext?.pointee.pb = customIO.getContext()
+            inputContext?.pointee.flags |= AVFMT_FLAG_CUSTOM_IO
+        }
 
         setHttpProxy()
         var inputOptions = options.formatContextOptions.avOptions
-        let source = sourceURL.ffmpegArgumentValue
-        var result = avformat_open_input(&inputContext, source, nil, &inputOptions)
+        var result = avformat_open_input(&inputContext, source.ffmpegURLString, nil, &inputOptions)
         av_dict_free(&inputOptions)
         guard result == 0, let inputContext else {
             throw NSError(errorCode: .formatOpenInput, avErrorCode: result)
@@ -245,7 +276,7 @@ public final class VideoExportService: @unchecked Sendable {
         }
         let inputDuration = TimeInterval(max(inputContext.pointee.duration, 0)) / TimeInterval(AV_TIME_BASE)
         guard inputDuration > 0 else {
-            throw VideoExportError.unsupportedLiveOrPlaylist(sourceURL)
+            throw VideoExportError.unsupportedLiveOrPlaylist(source.url)
         }
 
         var outputContext: UnsafeMutablePointer<AVFormatContext>?
@@ -265,6 +296,7 @@ public final class VideoExportService: @unchecked Sendable {
         guard !streamMapping.isEmpty else {
             throw VideoExportError.noExportableStreams
         }
+        av_dict_copy(&outputContext.pointee.metadata, inputContext.pointee.metadata, 0)
 
         if outputContext.pointee.oformat.pointee.flags & AVFMT_NOFILE == 0 {
             result = avio_open(&outputContext.pointee.pb, destination, AVIO_FLAG_WRITE)
@@ -305,8 +337,8 @@ public final class VideoExportService: @unchecked Sendable {
             let packetTimestamp = packet.pts == swift_AV_NOPTS_VALUE ? packet.dts : packet.pts
             if packetTimestamp != swift_AV_NOPTS_VALUE {
                 let packetTime = av_rescale_q(packetTimestamp, inputStream.pointee.time_base, AVRational(num: 1, den: AV_TIME_BASE))
-                let fraction = min(max(Double(packetTime) / Double(AV_TIME_BASE) / inputDuration, 0), 1)
-                progress?(VideoExportProgress(phase: .converting, fractionCompleted: fraction))
+                let seconds = Double(packetTime) / Double(AV_TIME_BASE)
+                progress?(VideoExportProgress(phase: .converting, fractionCompleted: VideoExportProgressPolicy.clampedFraction(completed: seconds, duration: inputDuration)))
             }
 
             av_packet_rescale_ts(&packet, inputStream.pointee.time_base, outputStream.pointee.time_base)
@@ -368,6 +400,9 @@ public final class VideoExportService: @unchecked Sendable {
                 outputStream.pointee.codecpar.pointee.codec_tag = 0
             }
             outputStream.pointee.time_base = inputStream.pointee.time_base
+            outputStream.pointee.avg_frame_rate = inputStream.pointee.avg_frame_rate
+            outputStream.pointee.sample_aspect_ratio = inputStream.pointee.sample_aspect_ratio
+            av_dict_copy(&outputStream.pointee.metadata, inputStream.pointee.metadata, 0)
             streamMapping[inputIndex] = Int(outputStream.pointee.index)
         }
         return streamMapping
@@ -375,8 +410,16 @@ public final class VideoExportService: @unchecked Sendable {
 }
 
 public extension KSPlayerLayer {
+    /// Exports the currently loaded video source as a complete file using FFmpeg stream copy.
+    ///
+    /// This is a whole-source export, not a current-playback-window recorder. Use `recordClip` for a
+    /// finite seekable time range. Separate `audioURL` playback is rejected because this remux path
+    /// does not merge independent audio and video assets.
     @discardableResult
     func exportVideo(destination: URL? = nil, preset: VideoConversionPreset = .remuxMP4, overwriteExisting: Bool = false, progress: VideoExportService.ProgressHandler? = nil) async throws -> URL {
+        if let audioURL {
+            throw VideoExportError.unsupportedSeparateAudio(audioURL)
+        }
         let destination = destination ?? VideoExportJob.defaultDestination(sourceURL: url, preset: preset)
         let job = VideoExportJob(sourceURL: url, destinationURL: destination, preset: preset, overwriteExisting: overwriteExisting)
         return try await VideoExportService().export(job, options: options, progress: progress)
@@ -385,6 +428,60 @@ public extension KSPlayerLayer {
 
 private struct VideoExportRemuxOptions: @unchecked Sendable {
     let formatContextOptions: [String: Any]
+}
+
+private struct VideoExportSource: @unchecked Sendable {
+    let url: URL
+    let ffmpegURLString: String
+    let securityScopedURLs: [URL]
+    let customIO: AbstractAVIOContext?
+    let temporaryURL: URL?
+
+    init(url: URL, customIO: AbstractAVIOContext? = nil, temporaryURL: URL? = nil) {
+        self.url = url
+        ffmpegURLString = url.isFileURL ? url.path : url.absoluteString
+        securityScopedURLs = url.isFileURL ? [url] : []
+        self.customIO = customIO
+        self.temporaryURL = temporaryURL
+    }
+
+    func cleanup() {
+        if let temporaryURL {
+            try? FileManager.default.removeItem(at: temporaryURL)
+        }
+    }
+}
+
+enum VideoExportSourcePolicy {
+    private static let directHTTPSchemes: Set<String> = ["http", "https"]
+    private static let liveOrPlaylistExtensions: Set<String> = ["m3u", "m3u8", "mpd", "ism", "isml"]
+    private static let liveSchemes: Set<String> = ["rtmp", "rtmps", "rtp", "rtsp", "udp"]
+
+    static func isDirectHTTPMediaURL(_ url: URL) -> Bool {
+        guard let scheme = url.scheme?.lowercased(), directHTTPSchemes.contains(scheme) else {
+            return false
+        }
+        return !isLiveOrSegmentedURL(url)
+    }
+
+    static func isLiveOrSegmentedURL(_ url: URL) -> Bool {
+        if let scheme = url.scheme?.lowercased(), liveSchemes.contains(scheme) {
+            return true
+        }
+        guard let scheme = url.scheme?.lowercased(), directHTTPSchemes.contains(scheme) else {
+            return false
+        }
+        return liveOrPlaylistExtensions.contains(url.pathExtension.lowercased())
+    }
+}
+
+enum VideoExportProgressPolicy {
+    static func clampedFraction(completed: TimeInterval, duration: TimeInterval) -> Double? {
+        guard completed.isFinite, duration.isFinite, duration > 0 else {
+            return nil
+        }
+        return min(max(completed / duration, 0), 1)
+    }
 }
 
 enum VideoExportPathPolicy {
@@ -472,19 +569,27 @@ private final class VideoExportDownloader: NSObject, URLSessionDownloadDelegate,
         progress?(VideoExportProgress(phase: .downloading, fractionCompleted: fraction, completedBytes: totalBytesWritten, totalBytes: totalBytes))
     }
 
-    func urlSession(_: URLSession, downloadTask _: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
+    func urlSession(_: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
         do {
             guard let destination else {
                 throw VideoExportError.downloadFailed("Download finished without a destination URL.")
             }
+            try Self.validateDownloadResponse(downloadTask.response)
             let fileManager = FileManager.default
             try fileManager.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
             if fileManager.fileExists(atPath: destination.path) {
                 try fileManager.removeItem(at: destination)
             }
             try fileManager.moveItem(at: location, to: destination)
+            guard Self.downloadedFileSize(at: destination) ?? 0 > 0 else {
+                try? fileManager.removeItem(at: destination)
+                throw VideoExportError.downloadFailed("Download finished without media data.")
+            }
             resume(.success(destination))
         } catch {
+            if let destination {
+                try? FileManager.default.removeItem(at: destination)
+            }
             resume(.failure(error))
         }
     }
@@ -517,6 +622,25 @@ private final class VideoExportDownloader: NSObject, URLSessionDownloadDelegate,
         case let .failure(error):
             continuation?.resume(throwing: error)
         }
+    }
+
+    private static func validateDownloadResponse(_ response: URLResponse?) throws {
+        guard let response = response as? HTTPURLResponse else {
+            return
+        }
+        guard (200 ..< 300).contains(response.statusCode) else {
+            throw VideoExportError.downloadFailed("Download failed with HTTP status \(response.statusCode).")
+        }
+    }
+
+    private static func downloadedFileSize(at url: URL) -> Int64? {
+        guard let values = try? url.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey]),
+              values.isRegularFile == true,
+              let size = values.fileSize
+        else {
+            return nil
+        }
+        return Int64(size)
     }
 }
 

@@ -6,6 +6,9 @@
 import CoreMedia
 import CoreVideo
 import Foundation
+#if canImport(ObjectiveC)
+import ObjectiveC
+#endif
 import VideoToolbox
 
 @MainActor
@@ -19,9 +22,7 @@ final class VideoUpscaler {
     func reset() {
         state = .inactive
         #if !targetEnvironment(simulator) && (os(iOS) || os(tvOS) || os(visionOS) || os(macOS))
-        if #available(iOS 26.0, tvOS 26.0, visionOS 26.0, macOS 26.0, *) {
-            (appleSuperResolutionScaler as? AppleVideoSuperResolutionScaler)?.reset()
-        }
+        (appleSuperResolutionScaler as? AppleVideoSuperResolutionScaler)?.reset()
         appleSuperResolutionScaler = nil
         #endif
     }
@@ -75,7 +76,7 @@ public extension VideoUpscalingMode {
     static var isAppleSuperResolutionRuntimeAvailable: Bool {
         #if !targetEnvironment(simulator) && (os(iOS) || os(tvOS) || os(visionOS) || os(macOS))
         if #available(iOS 26.0, tvOS 26.0, visionOS 26.0, macOS 26.0, *) {
-            return VTLowLatencySuperResolutionScalerConfiguration.isSupported
+            return AppleVideoSuperResolutionScaler.isRuntimeAvailable
         }
         #endif
         return false
@@ -83,7 +84,6 @@ public extension VideoUpscalingMode {
 }
 
 #if !targetEnvironment(simulator) && (os(iOS) || os(tvOS) || os(visionOS) || os(macOS))
-@available(iOS 26.0, tvOS 26.0, visionOS 26.0, macOS 26.0, *)
 private final class AppleVideoSuperResolutionScaler {
     private struct SessionKey: Equatable {
         let width: Int
@@ -97,17 +97,23 @@ private final class AppleVideoSuperResolutionScaler {
     }
 
     private let log: (String) -> Void
-    private var processor: VTFrameProcessor?
-    private var configuration: VTLowLatencySuperResolutionScalerConfiguration?
+    private var processor: AnyObject?
+    private var configuration: AnyObject?
     private var sessionKey: SessionKey?
     private(set) var unavailableReason: String?
+
+    static var isRuntimeAvailable: Bool {
+        VideoToolboxSuperResolutionRuntime.isSupported
+    }
 
     init(log: @escaping (String) -> Void) {
         self.log = log
     }
 
     func reset() {
-        processor?.endSession()
+        if let processor {
+            VideoToolboxSuperResolutionRuntime.endSession(processor)
+        }
         processor = nil
         configuration = nil
         sessionKey = nil
@@ -116,7 +122,7 @@ private final class AppleVideoSuperResolutionScaler {
 
     func upscale(pixelBuffer: CVPixelBuffer, time: CMTime, requestedScaleFactor: Float) -> (pixelBuffer: CVPixelBuffer, scaleFactor: Float)? {
         unavailableReason = nil
-        guard VTLowLatencySuperResolutionScalerConfiguration.isSupported else {
+        guard Self.isRuntimeAvailable else {
             return unavailable("VideoToolbox low-latency super-resolution is not supported on this device")
         }
         let width = CVPixelBufferGetWidth(pixelBuffer)
@@ -129,22 +135,27 @@ private final class AppleVideoSuperResolutionScaler {
         guard ensureSession(key: key) else {
             return nil
         }
-        guard let configuration, configuration.supportedPixelFormats.contains(pixelFormat) else {
+        guard let configuration, VideoToolboxSuperResolutionRuntime.supportedPixelFormats(configuration).contains(pixelFormat) else {
             return unavailable("VideoToolbox low-latency super-resolution does not support pixel format \(pixelFormat)")
         }
         guard let destinationBuffer = makeDestinationBuffer(configuration: configuration, key: key) else {
             return nil
         }
-        guard let sourceFrame = VTFrameProcessorFrame(buffer: pixelBuffer, presentationTimeStamp: time),
-              let destinationFrame = VTFrameProcessorFrame(buffer: destinationBuffer, presentationTimeStamp: time)
+        guard let sourceFrame = VideoToolboxSuperResolutionRuntime.makeFrame(pixelBuffer: pixelBuffer, time: time),
+              let destinationFrame = VideoToolboxSuperResolutionRuntime.makeFrame(pixelBuffer: destinationBuffer, time: time)
         else {
             return unavailable("VideoToolbox low-latency super-resolution requires IOSurface-backed pixel buffers")
         }
 
-        let parameters = VTLowLatencySuperResolutionScalerParameters(sourceFrame: sourceFrame, destinationFrame: destinationFrame)
+        guard let parameters = VideoToolboxSuperResolutionRuntime.makeParameters(sourceFrame: sourceFrame, destinationFrame: destinationFrame) else {
+            return unavailable("VideoToolbox low-latency super-resolution parameters are unavailable on this runtime")
+        }
         let semaphore = DispatchSemaphore(value: 0)
         let result = ProcessingResult()
-        processor?.process(parameters: parameters) { _, error in
+        guard let processor else {
+            return unavailable("VideoToolbox low-latency super-resolution session is unavailable")
+        }
+        VideoToolboxSuperResolutionRuntime.process(processor, parameters: parameters) { error in
             result.error = error
             semaphore.signal()
         }
@@ -164,7 +175,7 @@ private final class AppleVideoSuperResolutionScaler {
     }
 
     private static func supportedScaleFactor(width: Int, height: Int, requestedScaleFactor: Float) -> Float? {
-        let scaleFactors = VTLowLatencySuperResolutionScalerConfiguration.supportedScaleFactors(frameWidth: width, frameHeight: height)
+        let scaleFactors = VideoToolboxSuperResolutionRuntime.supportedScaleFactors(frameWidth: width, frameHeight: height)
         return scaleFactors
             .filter { $0 > 1 && $0 <= requestedScaleFactor }
             .max()
@@ -175,25 +186,28 @@ private final class AppleVideoSuperResolutionScaler {
             return true
         }
         reset()
-        let configuration = VTLowLatencySuperResolutionScalerConfiguration(frameWidth: key.width, frameHeight: key.height, scaleFactor: key.scaleFactor)
-        let processor = VTFrameProcessor()
-        do {
-            try processor.startSession(configuration: configuration)
-            self.processor = processor
-            self.configuration = configuration
-            sessionKey = key
-            return true
-        } catch {
+        guard let configuration = VideoToolboxSuperResolutionRuntime.makeConfiguration(frameWidth: key.width, frameHeight: key.height, scaleFactor: key.scaleFactor),
+              let processor = VideoToolboxSuperResolutionRuntime.makeProcessor()
+        else {
+            unavailableReason = "VideoToolbox low-latency super-resolution is unavailable on this runtime"
+            log("[video] \(unavailableReason!)")
+            return false
+        }
+        if let error = VideoToolboxSuperResolutionRuntime.startSession(processor, configuration: configuration) {
             unavailableReason = "VideoToolbox low-latency super-resolution session failed: \(error.localizedDescription)"
             log("[video] \(unavailableReason!)")
             return false
         }
+        self.processor = processor
+        self.configuration = configuration
+        sessionKey = key
+        return true
     }
 
-    private func makeDestinationBuffer(configuration: VTLowLatencySuperResolutionScalerConfiguration, key: SessionKey) -> CVPixelBuffer? {
+    private func makeDestinationBuffer(configuration: AnyObject, key: SessionKey) -> CVPixelBuffer? {
         let width = Int((Float(key.width) * key.scaleFactor).rounded(.toNearestOrAwayFromZero))
         let height = Int((Float(key.height) * key.scaleFactor).rounded(.toNearestOrAwayFromZero))
-        var attributes = configuration.destinationPixelBufferAttributes
+        var attributes = VideoToolboxSuperResolutionRuntime.destinationPixelBufferAttributes(configuration)
         attributes[kCVPixelBufferWidthKey as String] = width
         attributes[kCVPixelBufferHeightKey as String] = height
         attributes[kCVPixelBufferPixelFormatTypeKey as String] = key.pixelFormat
@@ -214,6 +228,162 @@ private final class AppleVideoSuperResolutionScaler {
         unavailableReason = reason
         log("[video] \(reason)")
         return nil
+    }
+}
+
+private enum VideoToolboxSuperResolutionRuntime {
+    private static let configurationClassName = "VTLowLatencySuperResolutionScalerConfiguration"
+    private static let parametersClassName = "VTLowLatencySuperResolutionScalerParameters"
+    private static let frameClassName = "VTFrameProcessorFrame"
+    private static let processorClassName = "VTFrameProcessor"
+
+    static var isSupported: Bool {
+        guard let configurationClass else {
+            return false
+        }
+        return boolClassProperty(configurationClass, selectorName: "isSupported")
+    }
+
+    static func supportedScaleFactors(frameWidth: Int, frameHeight: Int) -> [Float] {
+        guard let configurationClass,
+              let method = class_getClassMethod(configurationClass, NSSelectorFromString("supportedScaleFactorsForFrameWidth:frameHeight:"))
+        else {
+            return []
+        }
+        typealias Function = @convention(c) (AnyClass, Selector, Int, Int) -> NSArray?
+        let function = unsafeBitCast(method_getImplementation(method), to: Function.self)
+        return (function(configurationClass, NSSelectorFromString("supportedScaleFactorsForFrameWidth:frameHeight:"), frameWidth, frameHeight) as? [NSNumber])?.map(\.floatValue) ?? []
+    }
+
+    static func makeConfiguration(frameWidth: Int, frameHeight: Int, scaleFactor: Float) -> AnyObject? {
+        guard let configurationClass,
+              let instance = allocate(configurationClass),
+              let method = class_getInstanceMethod(configurationClass, NSSelectorFromString("initWithFrameWidth:frameHeight:scaleFactor:"))
+        else {
+            return nil
+        }
+        typealias Function = @convention(c) (AnyObject, Selector, Int, Int, Float) -> AnyObject?
+        let function = unsafeBitCast(method_getImplementation(method), to: Function.self)
+        return function(instance, NSSelectorFromString("initWithFrameWidth:frameHeight:scaleFactor:"), frameWidth, frameHeight, scaleFactor)
+    }
+
+    static func makeProcessor() -> AnyObject? {
+        guard let processorClass,
+              let instance = allocate(processorClass),
+              let method = class_getInstanceMethod(processorClass, NSSelectorFromString("init"))
+        else {
+            return nil
+        }
+        typealias Function = @convention(c) (AnyObject, Selector) -> AnyObject?
+        let function = unsafeBitCast(method_getImplementation(method), to: Function.self)
+        return function(instance, NSSelectorFromString("init"))
+    }
+
+    static func makeFrame(pixelBuffer: CVPixelBuffer, time: CMTime) -> AnyObject? {
+        guard let frameClass,
+              let instance = allocate(frameClass),
+              let method = class_getInstanceMethod(frameClass, NSSelectorFromString("initWithBuffer:presentationTimeStamp:"))
+        else {
+            return nil
+        }
+        typealias Function = @convention(c) (AnyObject, Selector, CVPixelBuffer, CMTime) -> AnyObject?
+        let function = unsafeBitCast(method_getImplementation(method), to: Function.self)
+        return function(instance, NSSelectorFromString("initWithBuffer:presentationTimeStamp:"), pixelBuffer, time)
+    }
+
+    static func makeParameters(sourceFrame: AnyObject, destinationFrame: AnyObject) -> AnyObject? {
+        guard let parametersClass,
+              let instance = allocate(parametersClass),
+              let method = class_getInstanceMethod(parametersClass, NSSelectorFromString("initWithSourceFrame:destinationFrame:"))
+        else {
+            return nil
+        }
+        typealias Function = @convention(c) (AnyObject, Selector, AnyObject, AnyObject) -> AnyObject?
+        let function = unsafeBitCast(method_getImplementation(method), to: Function.self)
+        return function(instance, NSSelectorFromString("initWithSourceFrame:destinationFrame:"), sourceFrame, destinationFrame)
+    }
+
+    static func startSession(_ processor: AnyObject, configuration: AnyObject) -> NSError? {
+        guard let method = class_getInstanceMethod(processorClass, NSSelectorFromString("startSessionWithConfiguration:error:")) else {
+            return NSError(domain: "KSPlayer.VideoUpscaler", code: -1, userInfo: [NSLocalizedDescriptionKey: "VideoToolbox frame processor is unavailable"])
+        }
+        typealias Function = @convention(c) (AnyObject, Selector, AnyObject, UnsafeMutablePointer<NSError?>?) -> Bool
+        let function = unsafeBitCast(method_getImplementation(method), to: Function.self)
+        var error: NSError?
+        return function(processor, NSSelectorFromString("startSessionWithConfiguration:error:"), configuration, &error) ? nil : error
+    }
+
+    static func process(_ processor: AnyObject, parameters: AnyObject, completionHandler: @escaping (NSError?) -> Void) {
+        guard let method = class_getInstanceMethod(processorClass, NSSelectorFromString("processWithParameters:completionHandler:")) else {
+            completionHandler(NSError(domain: "KSPlayer.VideoUpscaler", code: -1, userInfo: [NSLocalizedDescriptionKey: "VideoToolbox frame processor is unavailable"]))
+            return
+        }
+        typealias Completion = @convention(block) (AnyObject, NSError?) -> Void
+        typealias Function = @convention(c) (AnyObject, Selector, AnyObject, @escaping Completion) -> Void
+        let function = unsafeBitCast(method_getImplementation(method), to: Function.self)
+        function(processor, NSSelectorFromString("processWithParameters:completionHandler:"), parameters) { _, error in
+            completionHandler(error)
+        }
+    }
+
+    static func endSession(_ processor: AnyObject) {
+        guard let method = class_getInstanceMethod(processorClass, NSSelectorFromString("endSession")) else {
+            return
+        }
+        typealias Function = @convention(c) (AnyObject, Selector) -> Void
+        let function = unsafeBitCast(method_getImplementation(method), to: Function.self)
+        function(processor, NSSelectorFromString("endSession"))
+    }
+
+    static func supportedPixelFormats(_ configuration: AnyObject) -> [OSType] {
+        (objectProperty(configuration, selectorName: "frameSupportedPixelFormats") as? [NSNumber])?.map(\.uint32Value) ?? []
+    }
+
+    static func destinationPixelBufferAttributes(_ configuration: AnyObject) -> [String: Any] {
+        objectProperty(configuration, selectorName: "destinationPixelBufferAttributes") as? [String: Any] ?? [:]
+    }
+
+    private static var configurationClass: AnyClass? {
+        NSClassFromString(configurationClassName)
+    }
+
+    private static var parametersClass: AnyClass? {
+        NSClassFromString(parametersClassName)
+    }
+
+    private static var frameClass: AnyClass? {
+        NSClassFromString(frameClassName)
+    }
+
+    private static var processorClass: AnyClass? {
+        NSClassFromString(processorClassName)
+    }
+
+    private static func allocate(_ objectClass: AnyClass) -> AnyObject? {
+        guard let method = class_getClassMethod(objectClass, NSSelectorFromString("alloc")) else {
+            return nil
+        }
+        typealias Function = @convention(c) (AnyClass, Selector) -> AnyObject?
+        let function = unsafeBitCast(method_getImplementation(method), to: Function.self)
+        return function(objectClass, NSSelectorFromString("alloc"))
+    }
+
+    private static func boolClassProperty(_ objectClass: AnyClass, selectorName: String) -> Bool {
+        guard let method = class_getClassMethod(objectClass, NSSelectorFromString(selectorName)) else {
+            return false
+        }
+        typealias Function = @convention(c) (AnyClass, Selector) -> Bool
+        let function = unsafeBitCast(method_getImplementation(method), to: Function.self)
+        return function(objectClass, NSSelectorFromString(selectorName))
+    }
+
+    private static func objectProperty(_ object: AnyObject, selectorName: String) -> AnyObject? {
+        guard let method = class_getInstanceMethod(object_getClass(object), NSSelectorFromString(selectorName)) else {
+            return nil
+        }
+        typealias Function = @convention(c) (AnyObject, Selector) -> AnyObject?
+        let function = unsafeBitCast(method_getImplementation(method), to: Function.self)
+        return function(object, NSSelectorFromString(selectorName))
     }
 }
 #endif

@@ -24,6 +24,18 @@ enum AVPlayerSeekableRangeResolver {
     }
 }
 
+enum SeparateAudioVideoCompositionPolicy {
+    static func audioInsertionDuration(videoDuration: CMTime, audioDuration: CMTime) throws -> CMTime {
+        guard videoDuration.isNumeric, videoDuration.seconds > 0 else {
+            throw NSError(description: "Separate audio/video URL playback requires a finite video duration when using AVFoundation composition.")
+        }
+        guard audioDuration.isNumeric, audioDuration.seconds > 0 else {
+            throw NSError(description: "Separate audio/video URL playback requires a finite audio duration when using AVFoundation composition.")
+        }
+        return audioDuration < videoDuration ? audioDuration : videoDuration
+    }
+}
+
 public final class KSAVPlayerView: UIView {
     public let player = AVQueuePlayer()
     override public init(frame: CGRect) {
@@ -233,7 +245,7 @@ public class KSAVPlayer {
         self.init(url: url, audioURL: nil, options: options)
     }
 
-    public init(url: URL, audioURL: URL?, options: KSOptions) {
+    public required init(url: URL, audioURL: URL?, options: KSOptions) {
         KSOptions.setAudioSession(options: options)
         let playbackURL = KSDiskPrecache.playbackURL(for: url, options: options)
         let playbackAudioURL = audioURL.map { KSDiskPrecache.playbackURL(for: $0, options: options) }
@@ -423,15 +435,12 @@ extension KSAVPlayer {
         guard let sourceAudioTrack = audioTracks.first else {
             throw NSError(description: "No playable audio track was found in the separate audio URL.")
         }
-        guard videoDuration.isNumeric, videoDuration.seconds > 0 else {
-            throw NSError(description: "Separate audio/video URL playback requires a finite video duration when using AVFoundation composition.")
-        }
+        let audioTimeRangeDuration = try SeparateAudioVideoCompositionPolicy.audioInsertionDuration(videoDuration: videoDuration, audioDuration: audioDuration)
         if let videoTrack = composition.addMutableTrack(withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid) {
             try videoTrack.insertTimeRange(CMTimeRange(start: .zero, duration: videoDuration), of: sourceVideoTrack, at: .zero)
             videoTrack.preferredTransform = try await sourceVideoTrack.load(.preferredTransform)
         }
         if let audioTrack = composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid) {
-            let audioTimeRangeDuration = audioDuration.isNumeric && audioDuration < videoDuration ? audioDuration : videoDuration
             try audioTrack.insertTimeRange(CMTimeRange(start: .zero, duration: audioTimeRangeDuration), of: sourceAudioTrack, at: .zero)
         }
         return AVPlayerItem(asset: composition)
@@ -440,7 +449,10 @@ extension KSAVPlayer {
 
 extension KSAVPlayer: @preconcurrency MediaPlayerProtocol {
     public var subtitleDataSouce: SubtitleDataSouce? {
-        options.pictureInPictureSubtitlePolicy == .disabled ? nil : self
+        PictureInPictureSubtitlePolicyResolver.renderMode(
+            policy: options.pictureInPictureSubtitlePolicy,
+            usesNativeLegibleSelection: true
+        ) == .disabled ? nil : self
     }
     public var isPlaying: Bool { player.rate > 0 ? true : playbackState == .playing }
     public var view: UIView? { playerView }
@@ -478,7 +490,10 @@ extension KSAVPlayer: @preconcurrency MediaPlayerProtocol {
     }
 
     public func seek(time: TimeInterval, completion: @escaping ((Bool) -> Void)) {
-        let time = max(time, 0)
+        guard let time = MediaSeekTimeResolver.resolvedSeekTime(time, seekableTimeRange: seekableTimeRange) else {
+            completion(false)
+            return
+        }
         shouldSeekTo = time
         playbackState = .seeking
         runOnMainThread { [weak self] in
@@ -600,7 +615,10 @@ extension KSAVPlayer: @preconcurrency MediaPlayerProtocol {
         guard mediaType == .subtitle else {
             return itemTracks
         }
-        guard options.pictureInPictureSubtitlePolicy != .disabled else {
+        guard PictureInPictureSubtitlePolicyResolver.renderMode(
+            policy: options.pictureInPictureSubtitlePolicy,
+            usesNativeLegibleSelection: true
+        ) != .disabled else {
             return []
         }
         return legibleMediaSelectionTracks(for: item) + itemTracks
@@ -718,14 +736,15 @@ class AVMediaPlayerTrack: @preconcurrency MediaPlayerTrack, SubtitleKindProvidin
         #endif
         // swiftlint:disable force_cast
         if let first = track.assetTrack?.formatDescriptions.first {
-            formatDescription = (first as! CMFormatDescription)
+            formatDescription = first as! CMFormatDescription
         } else {
             formatDescription = nil
         }
         bitDepth = formatDescription?.bitDepth ?? 0
         // swiftlint:enable force_cast
         subtitleKind = Self.subtitleKind(mediaType: assetMediaType, formatDescription: formatDescription)
-        description = (formatDescription?.mediaSubType ?? .boxed).rawValue.string
+        let mediaSubType = formatDescription?.mediaSubType ?? .boxed
+        description = mediaSubType.audioCodecDisplayName ?? mediaSubType.rawValue.string
     }
 
     init(mediaSelectionOption: AVMediaSelectionOption, group: AVMediaSelectionGroup, playerItem: AVPlayerItem) {

@@ -215,7 +215,9 @@ public struct KSVideoPlayerView: View {
             .onDrop(of: ["public.file-url"], isTargeted: nil) { providers -> Bool in
                 providers.first?.loadDataRepresentation(forTypeIdentifier: "public.file-url") { data, _ in
                     if let data, let path = NSString(data: data, encoding: 4), let url = URL(string: path as String) {
-                        openURL(url)
+                        Task { @MainActor in
+                            openURL(url)
+                        }
                     }
                 }
                 return true
@@ -302,14 +304,12 @@ public struct KSVideoPlayerView: View {
     }
 
     public func openURL(_ url: URL) {
-        runOnMainThread {
-            if url.isSubtitle {
-                let info = URLSubtitleInfo(url: url)
-                playerCoordinator.subtitleModel.selectedSubtitleInfo = info
-            } else if url.isAudio || url.isMovie {
-                self.url = url
-                title = url.lastPathComponent
-            }
+        if url.isSubtitle {
+            let info = URLSubtitleInfo(url: url)
+            playerCoordinator.subtitleModel.selectedSubtitleInfo = info
+        } else if url.isAudio || url.isMovie {
+            self.url = url
+            title = url.lastPathComponent
         }
     }
 }

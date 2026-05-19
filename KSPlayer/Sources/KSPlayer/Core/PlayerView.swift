@@ -148,12 +148,16 @@ open class PlayerView: UIView, KSPlayerLayerDelegate, KSSliderDelegate {
     }
 
     open func set(url: URL, options: KSOptions) {
+        set(url: url, audioURL: nil, options: options)
+    }
+
+    open func set(url: URL, audioURL: URL?, options: KSOptions) {
         srtControl.apply(options: options)
         srtControl.url = url
         toolBar.currentTime = 0
         toolBar.seekableTimeRange = nil
         totalTime = 0
-        playerLayer = KSPlayerLayer(url: url, options: options)
+        playerLayer = KSPlayerLayer(url: url, audioURL: audioURL, options: options)
     }
 
     // MARK: - KSSliderDelegate

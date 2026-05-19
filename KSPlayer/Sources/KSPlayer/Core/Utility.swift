@@ -63,6 +63,62 @@ class GIFCreator {
     }
 }
 
+private final class GIFGenerationState: @unchecked Sendable {
+    private let gifCreator: GIFCreator
+    private let imagesCount: Int
+    private let progress: @Sendable (Double) -> Void
+    private let completion: @Sendable (Error?) -> Void
+    private let lock = NSLock()
+    private var completedImages = 0
+    private var isFinished = false
+
+    init(gifCreator: GIFCreator, imagesCount: Int, progress: @escaping @Sendable (Double) -> Void, completion: @escaping @Sendable (Error?) -> Void) {
+        self.gifCreator = gifCreator
+        self.imagesCount = imagesCount
+        self.progress = progress
+        self.completion = completion
+    }
+
+    func add(image: CGImage) {
+        let progressValue: Double
+        let shouldComplete: Bool
+        let finalizeError: Error?
+        lock.lock()
+        guard !isFinished else {
+            lock.unlock()
+            return
+        }
+        completedImages += 1
+        gifCreator.add(image: image)
+        progressValue = Double(completedImages) / Double(imagesCount)
+        if completedImages == imagesCount {
+            isFinished = true
+            shouldComplete = true
+            finalizeError = gifCreator.finalize() ? nil : NSError(domain: AVFoundationErrorDomain, code: -1, userInfo: [NSLocalizedDescriptionKey: "Generate Gif Failed!"])
+        } else {
+            shouldComplete = false
+            finalizeError = nil
+        }
+        lock.unlock()
+
+        progress(progressValue)
+        if shouldComplete {
+            completion(finalizeError)
+        }
+    }
+
+    func fail(error: Error) {
+        lock.lock()
+        guard !isFinished else {
+            lock.unlock()
+            return
+        }
+        isFinished = true
+        lock.unlock()
+        completion(error)
+    }
+}
+
 public extension String {
     static func systemClockTime(second: Bool = false) -> String {
         let date = Date()
@@ -155,29 +211,20 @@ public extension UIColor {
 }
 
 extension AVAsset {
-    public func generateGIF(beginTime: TimeInterval, endTime: TimeInterval, interval: Double = 0.2, savePath: URL, progress: @escaping (Double) -> Void, completion: @escaping (Error?) -> Void) {
+    public func generateGIF(beginTime: TimeInterval, endTime: TimeInterval, interval: Double = 0.2, savePath: URL, progress: @escaping @Sendable (Double) -> Void, completion: @escaping @Sendable (Error?) -> Void) {
         let count = Int(ceil((endTime - beginTime) / interval))
         let timesM = (0 ..< count).map { NSValue(time: CMTime(seconds: beginTime + Double($0) * interval)) }
         let imageGenerator = createImageGenerator()
         let gifCreator = GIFCreator(savePath: savePath, imagesCount: count)
-        var i = 0
+        let generationState = GIFGenerationState(gifCreator: gifCreator, imagesCount: count, progress: progress, completion: completion)
         imageGenerator.generateCGImagesAsynchronously(forTimes: timesM) { _, imageRef, _, result, error in
             switch result {
             case .succeeded:
                 guard let imageRef else { return }
-                i += 1
-                gifCreator.add(image: imageRef)
-                progress(Double(i) / Double(count))
-                guard i == count else { return }
-                if gifCreator.finalize() {
-                    completion(nil)
-                } else {
-                    let error = NSError(domain: AVFoundationErrorDomain, code: -1, userInfo: [NSLocalizedDescriptionKey: "Generate Gif Failed!"])
-                    completion(error)
-                }
+                generationState.add(image: imageRef)
             case .failed:
                 if let error {
-                    completion(error)
+                    generationState.fail(error: error)
                 }
             case .cancelled:
                 break
@@ -380,10 +427,30 @@ public extension URL {
         return Self.ffmpegOnlyInputSchemes.contains(scheme)
     }
 
+    var isMatroskaContainer: Bool {
+        Self.matroskaContainerExtensions.contains(pathExtension.lowercased())
+    }
+
     private static let ffmpegOnlyInputSchemes: Set<String> = [
+        "ftp",
         "nfs",
+        "rtmp",
+        "rtmps",
+        "rtp",
+        "rtsp",
         "smb",
+        "sftp",
         "srt",
+        "udp",
+        "upnp",
+    ]
+
+    private static let matroskaContainerExtensions: Set<String> = [
+        "mkv",
+        "mk3d",
+        "mka",
+        "mks",
+        "webm",
     ]
 
     var isMovie: Bool {
@@ -454,7 +521,7 @@ public extension URL {
         }
     }
 
-    func download(userAgent: String? = nil, completion: @escaping ((String, URL) -> Void)) {
+    func download(userAgent: String? = nil, completion: @escaping @Sendable (String, URL) -> Void) {
         var request = URLRequest(url: self)
         if let userAgent {
             request.addValue(userAgent, forHTTPHeaderField: "User-Agent")

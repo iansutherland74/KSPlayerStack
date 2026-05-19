@@ -95,6 +95,14 @@ public class PlayerToolBar: UIStackView {
         isLiveStream && seekableTimeRange != nil
     }
 
+    func isAtLiveEdge(tolerance: TimeInterval = 1.0) -> Bool {
+        guard isLiveDVRStream, let seekableTimeRange else {
+            return false
+        }
+        let tolerance = max(tolerance, 0)
+        return seekableTimeRange.end - seekableTimeRange.clamped(currentTime) <= tolerance
+    }
+
     public var isSeekable: Bool = true {
         didSet {
             timeSlider.isUserInteractionEnabled = isSeekable

@@ -13,13 +13,32 @@ class AudioTest: XCTestCase {
 
     private func assert(tag: AudioChannelLayoutTag, mask: UInt64) {
         let channelLayout = AVAudioChannelLayout(layout: tag.channelLayout)
-        XCTAssertEqual(channelLayout.channelLayout().u.mask == mask, true)
+        XCTAssertEqual(channelLayout.channelLayout().u.mask, mask, "Unexpected mask for layout tag \(tag)")
     }
 
     private func assert(bitmap: AudioChannelBitmap, mask: UInt64) {
         let channelLayout = AVAudioChannelLayout(layout: bitmap.channelLayout)
-        XCTAssertEqual(channelLayout.channelLayout().u.mask == mask, true)
+        XCTAssertEqual(channelLayout.channelLayout().u.mask, mask, "Unexpected mask for bitmap \(bitmap)")
     }
+
+    #if !os(macOS)
+    func testAudioRouteSharingPolicyUsesPlatformDefaultWhenUnset() {
+        XCTAssertEqual(AudioRouteSharingPolicyResolver.resolvedPolicy(optionPolicy: nil, defaultPolicy: nil), AudioRouteSharingPolicyResolver.platformDefaultPolicy)
+        #if os(tvOS)
+        XCTAssertEqual(AudioRouteSharingPolicyResolver.platformDefaultPolicy, .longFormAudio)
+        #else
+        XCTAssertEqual(AudioRouteSharingPolicyResolver.platformDefaultPolicy, .longFormVideo)
+        #endif
+    }
+
+    func testAudioRouteSharingPolicyPrefersOptionOverProcessDefault() {
+        XCTAssertEqual(AudioRouteSharingPolicyResolver.resolvedPolicy(optionPolicy: .longFormAudio, defaultPolicy: .longFormVideo), .longFormAudio)
+    }
+
+    func testAudioRouteSharingPolicyUsesProcessDefaultWhenOptionUnset() {
+        XCTAssertEqual(AudioRouteSharingPolicyResolver.resolvedPolicy(optionPolicy: nil, defaultPolicy: .longFormAudio), .longFormAudio)
+    }
+    #endif
 
     func testDolbyAtmosEAC3ProfileMetadata() {
         let codecpar = makeAudioCodecParameters(codecID: AV_CODEC_ID_EAC3, profile: AV_PROFILE_EAC3_DDP_ATMOS)
@@ -46,6 +65,7 @@ class AudioTest: XCTestCase {
         XCTAssertEqual(track.audioCodecMetadata?.displayName, "Dolby AC-4")
         XCTAssertEqual(track.audioCodecMetadata?.isDolbyAC4, true)
         XCTAssertEqual(track.audioDecodeSupport.isSupported, false)
+        XCTAssertEqual(track.isSelectableForFFmpegPlayback, false)
         XCTAssertTrue(track.description.contains("AC-4 demuxing is available"))
     }
 
@@ -80,6 +100,16 @@ class AudioTest: XCTestCase {
         XCTAssertEqual(decodableTracks.count, 1)
         XCTAssertTrue(decodableTracks[0] === eac3Track)
         XCTAssertFalse(decodableTracks.contains { $0 === ac4Track })
+        XCTAssertEqual(ac4Track.isSelectableForFFmpegPlayback, false)
+        XCTAssertEqual(eac3Track.isSelectableForFFmpegPlayback, true)
+    }
+
+    func testDolbyAC4CoreMediaSubtypeDisplayName() {
+        let mediaSubType = AV_CODEC_ID_AC4.mediaSubType
+
+        XCTAssertEqual(mediaSubType, .dolbyAC4)
+        XCTAssertEqual(mediaSubType.rawValue.string, "ac-4")
+        XCTAssertEqual(mediaSubType.audioCodecDisplayName, "Dolby AC-4")
     }
 
     func testAV1CodecMapsToCoreMediaSampleEntry() {
@@ -87,6 +117,34 @@ class AudioTest: XCTestCase {
 
         XCTAssertEqual(mediaSubType.rawValue.string, "av01")
         XCTAssertEqual(mediaSubType.rawValue.avc, "av1C")
+    }
+
+    func testUnsupportedVideoCodecReportsUnsupportedDecode() {
+        guard let track = FFmpegAssetTrack(codecpar: makeVideoCodecParameters(codecID: AV_CODEC_ID_NONE)) else {
+            XCTFail("Expected video track metadata")
+            return
+        }
+
+        XCTAssertEqual(track.videoDecodeSupport.isSupported, false)
+        XCTAssertEqual(track.isSelectableForFFmpegPlayback, false)
+        XCTAssertTrue(track.description.contains("no FFmpeg decoder is available"))
+    }
+
+    func testUnsupportedVideoIsNotSelectedAsDecodableFFmpegVideo() {
+        guard let unsupportedTrack = FFmpegAssetTrack(codecpar: makeVideoCodecParameters(codecID: AV_CODEC_ID_NONE)),
+              let h264Track = FFmpegAssetTrack(codecpar: makeVideoCodecParameters(codecID: AV_CODEC_ID_H264))
+        else {
+            XCTFail("Expected video track metadata")
+            return
+        }
+
+        let decodableTracks = FFmpegAssetTrack.decodableVideoTracks([unsupportedTrack, h264Track])
+
+        XCTAssertEqual(decodableTracks.count, 1)
+        XCTAssertTrue(decodableTracks[0] === h264Track)
+        XCTAssertFalse(decodableTracks.contains { $0 === unsupportedTrack })
+        XCTAssertEqual(unsupportedTrack.isSelectableForFFmpegPlayback, false)
+        XCTAssertEqual(h264Track.isSelectableForFFmpegPlayback, true)
     }
 
     func testAtmosChannelLayoutsMapToCoreAudioTags() {
@@ -120,6 +178,16 @@ class AudioTest: XCTestCase {
         codecpar.sample_rate = 48000
         codecpar.bit_rate = 640_000
         av_channel_layout_default(&codecpar.ch_layout, channels)
+        return codecpar
+    }
+
+    private func makeVideoCodecParameters(codecID: AVCodecID) -> AVCodecParameters {
+        var codecpar = AVCodecParameters()
+        codecpar.codec_type = AVMEDIA_TYPE_VIDEO
+        codecpar.codec_id = codecID
+        codecpar.format = AV_PIX_FMT_YUV420P.rawValue
+        codecpar.width = 1920
+        codecpar.height = 1080
         return codecpar
     }
 }

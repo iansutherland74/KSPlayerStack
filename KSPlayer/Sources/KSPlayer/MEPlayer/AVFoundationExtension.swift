@@ -69,7 +69,6 @@ extension AudioChannelLayoutTag {
         let data = UnsafeMutableRawPointer.allocate(byteCount: Int(size), alignment: MemoryLayout<Int8>.alignment)
         AudioFormatGetProperty(kAudioFormatProperty_ChannelLayoutForTag, UInt32(MemoryLayout<AudioChannelLayoutTag>.size), &tag, &size, data)
         let newLayout = data.bindMemory(to: AudioChannelLayout.self, capacity: 1)
-        newLayout.pointee.mChannelLayoutTag = kAudioChannelLayoutTag_UseChannelDescriptions
         return newLayout
     }
 }

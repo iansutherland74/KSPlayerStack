@@ -174,8 +174,8 @@ enum MECodecState {
     case finished
 }
 
-public struct Timebase {
-    nonisolated(unsafe) static let defaultValue = Timebase(num: 1, den: 1)
+public struct Timebase: Sendable {
+    static let defaultValue = Timebase(num: 1, den: 1)
     public let num: Int32
     public let den: Int32
     func getPosition(from seconds: TimeInterval) -> Int64 { Int64(seconds * TimeInterval(den) / TimeInterval(num)) }

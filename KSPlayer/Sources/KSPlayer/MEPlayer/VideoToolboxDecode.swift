@@ -11,7 +11,17 @@ import Libavformat
 #if canImport(VideoToolbox)
 import VideoToolbox
 
-class VideoToolboxDecode: DecodeProtocol {
+private struct SendableDecodeCompletion: @unchecked Sendable {
+    let handler: (Result<MEFrame, Error>) -> Void
+
+    func callAsFunction(_ result: Result<MEFrame, Error>) {
+        handler(result)
+    }
+}
+
+final class VideoToolboxDecode: DecodeProtocol, @unchecked Sendable {
+    private static let lowLatencyAsyncFrameLimit = 3
+
     private var session: DecompressionSession {
         didSet {
             VTDecompressionSessionInvalidate(oldValue.decompressionSession)
@@ -19,6 +29,8 @@ class VideoToolboxDecode: DecodeProtocol {
     }
 
     private let options: KSOptions
+    private let lowLatencyAsyncSemaphore: DispatchSemaphore?
+    private let stateLock = NSLock()
     private var startTime = Int64(0)
     private var lastPosition = Int64(0)
     private var needReconfig = false
@@ -26,14 +38,20 @@ class VideoToolboxDecode: DecodeProtocol {
     init(options: KSOptions, session: DecompressionSession) {
         self.options = options
         self.session = session
+        lowLatencyAsyncSemaphore = options.lowLatencyLiveProfile == nil
+            ? nil
+            : DispatchSemaphore(value: Self.lowLatencyAsyncFrameLimit)
     }
 
     func decodeFrame(from packet: Packet, completionHandler: @escaping (Result<MEFrame, Error>) -> Void) {
-        if needReconfig {
+        if consumeNeedsReconfig() {
             // 解决从后台切换到前台，解码失败的问题
-            session = DecompressionSession(assetTrack: session.assetTrack, options: options)!
+            guard let newSession = DecompressionSession(assetTrack: session.assetTrack, options: options) else {
+                completionHandler(.failure(NSError(errorCode: .codecVideoReceiveFrame, avErrorCode: kVTInvalidSessionErr)))
+                return
+            }
+            session = newSession
             doFlushCodec()
-            needReconfig = false
         }
         guard let corePacket = packet.corePacket?.pointee, let data = corePacket.data else {
             return
@@ -43,55 +61,66 @@ class VideoToolboxDecode: DecodeProtocol {
                 packet: packet,
                 isConvertNALSize: session.assetTrack.isConvertNALSize,
                 data: data,
-                size: Int(corePacket.size)
+                size: Int(corePacket.size),
+                codecType: session.formatDescription.mediaSubType.rawValue
             )
             let flags: VTDecodeFrameFlags = packet.isSafeForAsynchronousVideoToolboxDecode ? [._EnableAsynchronousDecompression] : []
+            let backpressureSlot = reserveLowLatencyAsyncSlotIfNeeded(for: packet, flags: flags)
+            if flags.contains(._EnableAsynchronousDecompression), lowLatencyAsyncSemaphore != nil, backpressureSlot == nil {
+                return
+            }
             var flagOut = VTDecodeInfoFlags.frameDropped
             let timestamp = packet.timestamp
             let packetFlags = corePacket.flags
             let duration = corePacket.duration
             let size = corePacket.size
+            let isKeyFrame = packet.isKeyFrame
+            let position = packet.position
+            let nominalFrameRate = session.assetTrack.nominalFrameRate
+            let isDovi = session.assetTrack.dovi != nil
+            let fieldOrder = session.assetTrack.fieldOrder
+            let timebase = session.assetTrack.timebase
+            let completion = SendableDecodeCompletion(handler: completionHandler)
             let status = VTDecompressionSessionDecodeFrame(session.decompressionSession, sampleBuffer: sampleBuffer, flags: flags, infoFlagsOut: &flagOut) { [weak self] status, infoFlags, imageBuffer, _, _ in
+                backpressureSlot?.release()
                 guard let self, !infoFlags.contains(.frameDropped) else {
                     return
                 }
                 guard status == noErr else {
                     if status == kVTInvalidSessionErr || status == kVTVideoDecoderMalfunctionErr || status == kVTVideoDecoderBadDataErr {
-                        if packet.isKeyFrame {
-                            completionHandler(.failure(NSError(errorCode: .codecVideoReceiveFrame, avErrorCode: status)))
+                        if isKeyFrame {
+                            completion(.failure(NSError(errorCode: .codecVideoReceiveFrame, avErrorCode: status)))
                         } else {
                             // 解决从后台切换到前台，解码失败的问题
-                            self.needReconfig = true
+                            self.markNeedsReconfig()
                         }
                     }
                     return
                 }
-                let frame = VideoVTBFrame(fps: session.assetTrack.nominalFrameRate, isDovi: session.assetTrack.dovi != nil)
-                frame.interlacingType = VideoDeinterlacePolicy.detectedInterlacingType(fieldOrder: session.assetTrack.fieldOrder)
+                let frame = VideoVTBFrame(fps: nominalFrameRate, isDovi: isDovi)
+                frame.interlacingType = VideoDeinterlacePolicy.detectedInterlacingType(fieldOrder: fieldOrder)
                 frame.corePixelBuffer = imageBuffer
-                frame.timebase = session.assetTrack.timebase
-                if packet.isKeyFrame, packetFlags & AV_PKT_FLAG_DISCARD != 0, self.lastPosition > 0 {
-                    self.startTime = self.lastPosition - timestamp
-                }
-                self.lastPosition = max(self.lastPosition, timestamp)
-                frame.position = packet.position
-                frame.timestamp = self.startTime + timestamp
+                frame.timebase = timebase
+                frame.position = position
+                frame.timestamp = self.updateTiming(timestamp: timestamp, isKeyFrame: isKeyFrame, packetFlags: packetFlags, duration: duration)
                 frame.duration = duration
                 frame.size = size
-                self.lastPosition += frame.duration
-                completionHandler(.success(frame))
+                completion(.success(frame))
             }
             if status == noErr {
                 if !flags.contains(._EnableAsynchronousDecompression) {
                     VTDecompressionSessionWaitForAsynchronousFrames(session.decompressionSession)
                 }
             } else if status == kVTInvalidSessionErr || status == kVTVideoDecoderMalfunctionErr || status == kVTVideoDecoderBadDataErr {
+                backpressureSlot?.release()
                 if packet.isKeyFrame {
                     throw NSError(errorCode: .codecVideoReceiveFrame, avErrorCode: status)
                 } else {
                     // 解决从后台切换到前台，解码失败的问题
-                    needReconfig = true
+                    markNeedsReconfig()
                 }
+            } else {
+                backpressureSlot?.release()
             }
         } catch {
             completionHandler(.failure(error))
@@ -99,8 +128,7 @@ class VideoToolboxDecode: DecodeProtocol {
     }
 
     func doFlushCodec() {
-        lastPosition = 0
-        startTime = 0
+        resetTiming()
     }
 
     func shutdown() {
@@ -108,8 +136,79 @@ class VideoToolboxDecode: DecodeProtocol {
     }
 
     func decode() {
+        resetTiming()
+    }
+
+    private func consumeNeedsReconfig() -> Bool {
+        stateLock.lock()
+        let value = needReconfig
+        needReconfig = false
+        stateLock.unlock()
+        return value
+    }
+
+    private func markNeedsReconfig() {
+        stateLock.lock()
+        needReconfig = true
+        stateLock.unlock()
+    }
+
+    private func reserveLowLatencyAsyncSlotIfNeeded(for packet: Packet, flags: VTDecodeFrameFlags) -> AsyncDecodeBackpressureSlot? {
+        guard flags.contains(._EnableAsynchronousDecompression), let lowLatencyAsyncSemaphore else {
+            return nil
+        }
+        if packet.isKeyFrame {
+            lowLatencyAsyncSemaphore.wait()
+            return AsyncDecodeBackpressureSlot(semaphore: lowLatencyAsyncSemaphore)
+        }
+        if lowLatencyAsyncSemaphore.wait(timeout: .now()) == .timedOut {
+            return nil
+        }
+        return AsyncDecodeBackpressureSlot(semaphore: lowLatencyAsyncSemaphore)
+    }
+
+    private func resetTiming() {
+        stateLock.lock()
         lastPosition = 0
         startTime = 0
+        stateLock.unlock()
+    }
+
+    private func updateTiming(timestamp: Int64, isKeyFrame: Bool, packetFlags: Int32, duration: Int64) -> Int64 {
+        stateLock.lock()
+        if isKeyFrame, packetFlags & AV_PKT_FLAG_DISCARD != 0, lastPosition > 0 {
+            startTime = lastPosition - timestamp
+        }
+        lastPosition = max(lastPosition, timestamp)
+        let adjustedTimestamp = startTime + timestamp
+        lastPosition += duration
+        stateLock.unlock()
+        return adjustedTimestamp
+    }
+}
+
+private final class AsyncDecodeBackpressureSlot: @unchecked Sendable {
+    private let semaphore: DispatchSemaphore
+    private let lock = NSLock()
+    private var isReleased = false
+
+    init(semaphore: DispatchSemaphore) {
+        self.semaphore = semaphore
+    }
+
+    func release() {
+        lock.lock()
+        guard !isReleased else {
+            lock.unlock()
+            return
+        }
+        isReleased = true
+        lock.unlock()
+        semaphore.signal()
+    }
+
+    deinit {
+        release()
     }
 }
 
@@ -124,8 +223,10 @@ class DecompressionSession {
             return nil
         }
         let codecType = formatDescription.mediaSubType.rawValue
-        guard VideoToolboxHardwareDecodePolicy.canAttemptAsynchronousDecompression(codecType: codecType) else {
-            KSLog(level: .debug, "[video] VideoToolbox hardware decode unsupported for \(codecType.string)")
+        let hardwareDecodeAvailability = VideoToolboxHardwareDecodePolicy.availability(codecType: codecType)
+        guard hardwareDecodeAvailability.isSupported else {
+            KSLog(level: .debug, "[video] VideoToolbox hardware decode unavailable for \(codecType.string): "
+                  + "\(hardwareDecodeAvailability)")
             return nil
         }
         self.formatDescription = formatDescription
@@ -173,6 +274,27 @@ class DecompressionSession {
 }
 
 enum VideoToolboxHardwareDecodePolicy {
+    enum Availability: Equatable, CustomStringConvertible {
+        case supported
+        case unsupported(String)
+
+        var isSupported: Bool {
+            if case .supported = self {
+                return true
+            }
+            return false
+        }
+
+        var description: String {
+            switch self {
+            case .supported:
+                return "supported"
+            case let .unsupported(reason):
+                return reason
+            }
+        }
+    }
+
     static let knownHardwareCodecTypes: Set<CMVideoCodecType> = [
         kCMVideoCodecType_H263,
         kCMVideoCodecType_H264,
@@ -196,19 +318,56 @@ enum VideoToolboxHardwareDecodePolicy {
 
     static func canAttemptAsynchronousDecompression(
         codecType: CMVideoCodecType,
-        isHardwareDecodeSupported: (CMVideoCodecType) -> Bool = VTIsHardwareDecodeSupported
+        isHardwareDecodeSupported: (CMVideoCodecType) -> Bool = VTIsHardwareDecodeSupported,
+        isHardwareDecodeAllowedOnCurrentPlatform: () -> Bool = hardwareDecodeAllowedOnCurrentPlatform
     ) -> Bool {
-        knownHardwareCodecTypes.contains(codecType) && isHardwareDecodeSupported(codecType)
+        availability(
+            codecType: codecType,
+            isHardwareDecodeSupported: isHardwareDecodeSupported,
+            isHardwareDecodeAllowedOnCurrentPlatform: isHardwareDecodeAllowedOnCurrentPlatform
+        ).isSupported
+    }
+
+    static func availability(
+        codecType: CMVideoCodecType,
+        isHardwareDecodeSupported: (CMVideoCodecType) -> Bool = VTIsHardwareDecodeSupported,
+        isHardwareDecodeAllowedOnCurrentPlatform: () -> Bool = hardwareDecodeAllowedOnCurrentPlatform
+    ) -> Availability {
+        guard knownHardwareCodecTypes.contains(codecType) else {
+            return .unsupported("unknown hardware codec")
+        }
+        guard isHardwareDecodeAllowedOnCurrentPlatform() else {
+            return .unsupported("hardware decode is unavailable on this platform")
+        }
+        guard isHardwareDecodeSupported(codecType) else {
+            return .unsupported("VideoToolbox reports no hardware decoder")
+        }
+        return .supported
+    }
+
+    private static func hardwareDecodeAllowedOnCurrentPlatform() -> Bool {
+        #if targetEnvironment(simulator)
+        return false
+        #else
+        return true
+        #endif
     }
 }
 #endif
 
 extension CMFormatDescription {
-    fileprivate func getSampleBuffer(packet: Packet, isConvertNALSize: Bool, data: UnsafeMutablePointer<UInt8>, size: Int) throws -> CMSampleBuffer {
+    fileprivate func getSampleBuffer(
+        packet: Packet,
+        isConvertNALSize: Bool,
+        data: UnsafeMutablePointer<UInt8>,
+        size: Int,
+        codecType: CMVideoCodecType
+    ) throws -> CMSampleBuffer {
         let sampleData = try VideoToolboxSampleData.makeLengthPrefixedSample(
             data: UnsafePointer(data),
             size: size,
-            convertsThreeByteNALSize: isConvertNALSize
+            convertsThreeByteNALSize: isConvertNALSize,
+            codecType: codecType
         )
         return try createSampleBuffer(data: sampleData, timing: packet.videoToolboxSampleTiming)
     }
@@ -244,10 +403,21 @@ extension CMFormatDescription {
 
 enum VideoToolboxSampleData {
     static func isAnnexB(data: UnsafePointer<UInt8>, size: Int) -> Bool {
-        findStartCode(in: data, size: size, from: 0, scanLimit: min(size, 64)) != nil
+        guard let startCode = findStartCodeAtSampleStart(in: data, size: size) else {
+            return false
+        }
+        return startCode.length == 4 || !isFourByteLengthPrefixedSample(data: data, size: size)
     }
 
-    static func makeLengthPrefixedSample(data: UnsafePointer<UInt8>, size: Int, convertsThreeByteNALSize: Bool) throws -> Data {
+    static func makeLengthPrefixedSample(
+        data: UnsafePointer<UInt8>,
+        size: Int,
+        convertsThreeByteNALSize: Bool,
+        codecType: CMVideoCodecType = kCMVideoCodecType_H264
+    ) throws -> Data {
+        guard usesNALLengthPrefixes(codecType: codecType) else {
+            return Data(bytes: data, count: size)
+        }
         if isAnnexB(data: data, size: size) {
             return try convertAnnexBToLengthPrefixed(data: data, size: size)
         }
@@ -255,6 +425,18 @@ enum VideoToolboxSampleData {
             return try convertThreeByteNALSizeToFourByte(data: data, size: size)
         }
         return Data(bytes: data, count: size)
+    }
+
+    static func usesNALLengthPrefixes(codecType: CMVideoCodecType) -> Bool {
+        switch codecType {
+        case kCMVideoCodecType_H264,
+             kCMVideoCodecType_HEVC,
+             kCMVideoCodecType_HEVCWithAlpha,
+             kCMVideoCodecType_DolbyVisionHEVC:
+            return true
+        default:
+            return false
+        }
     }
 
     static func convertAnnexBToLengthPrefixed(data: UnsafePointer<UInt8>, size: Int) throws -> Data {
@@ -302,6 +484,38 @@ enum VideoToolboxSampleData {
             offset += nalSize
         }
         return output
+    }
+
+    static func isFourByteLengthPrefixedSample(data: UnsafePointer<UInt8>, size: Int) -> Bool {
+        var offset = 0
+        var hasNALUnit = false
+        while offset < size {
+            guard offset + MemoryLayout<UInt32>.size <= size else {
+                return false
+            }
+            let nalSize = Int(data[offset]) << 24 | Int(data[offset + 1]) << 16 | Int(data[offset + 2]) << 8 | Int(data[offset + 3])
+            offset += MemoryLayout<UInt32>.size
+            guard nalSize > 0, offset + nalSize <= size else {
+                return false
+            }
+            offset += nalSize
+            hasNALUnit = true
+        }
+        return hasNALUnit
+    }
+
+    private static func findStartCodeAtSampleStart(in data: UnsafePointer<UInt8>, size: Int) -> (offset: Int, length: Int)? {
+        guard size >= 3 else {
+            return nil
+        }
+        var index = 0
+        while index < size, data[index] == 0 {
+            index += 1
+        }
+        guard index < size, data[index] == 1, index >= 2 else {
+            return nil
+        }
+        return (index > 2 ? index - 3 : 0, index > 2 ? 4 : 3)
     }
 
     private static func findStartCode(in data: UnsafePointer<UInt8>, size: Int, from offset: Int, scanLimit: Int? = nil) -> (offset: Int, length: Int)? {

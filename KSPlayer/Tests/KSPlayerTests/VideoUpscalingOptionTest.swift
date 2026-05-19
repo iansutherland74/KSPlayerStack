@@ -22,6 +22,10 @@ final class VideoUpscalingOptionTest: XCTestCase {
         XCTAssertEqual(VideoUpscalingMode.appleSuperResolution(scaleFactor: .nan).requestedScaleFactor, 2)
     }
 
+    func testAppleSuperResolutionRuntimeAvailabilityCanBeQueried() {
+        _ = VideoUpscalingMode.isAppleSuperResolutionRuntimeAvailable
+    }
+
     func testUpscalingStateDefaultsToInactive() {
         XCTAssertEqual(KSOptions().videoUpscalingState, .inactive)
         XCTAssertFalse(KSOptions().videoUpscalingState.isActive)

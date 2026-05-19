@@ -19,18 +19,44 @@ final class MemorySeekCache<Item: MemorySeekCacheItem> {
     private var entries = [Entry]()
     private var nextInsertionIndex = 0
     private var _totalByteSize = 0
+    private var _maxDuration: TimeInterval
+    private var _maxByteSize: Int
     private let lock = NSLock()
     var totalByteSize: Int {
         lock.lock()
         defer { lock.unlock() }
         return _totalByteSize
     }
-    var maxDuration: TimeInterval
-    var maxByteSize: Int
+    var maxDuration: TimeInterval {
+        get {
+            lock.lock()
+            defer { lock.unlock() }
+            return _maxDuration
+        }
+        set {
+            lock.lock()
+            defer { lock.unlock() }
+            _maxDuration = newValue
+            trim()
+        }
+    }
+    var maxByteSize: Int {
+        get {
+            lock.lock()
+            defer { lock.unlock() }
+            return _maxByteSize
+        }
+        set {
+            lock.lock()
+            defer { lock.unlock() }
+            _maxByteSize = newValue
+            trim()
+        }
+    }
 
     init(maxDuration: TimeInterval = 0, maxByteSize: Int = 0) {
-        self.maxDuration = maxDuration
-        self.maxByteSize = maxByteSize
+        _maxDuration = maxDuration
+        _maxByteSize = maxByteSize
     }
 
     var isEmpty: Bool {
@@ -59,12 +85,15 @@ final class MemorySeekCache<Item: MemorySeekCacheItem> {
     }
 
     func store(_ item: Item) {
-        guard maxDuration > 0, maxByteSize > 0, item.seconds.isFinite, item.size > 0, let copy = item.makeMemorySeekCacheCopy() as? Item else {
+        guard item.seconds.isFinite, item.size > 0, let copy = item.makeMemorySeekCacheCopy() as? Item else {
             return
         }
         let byteSize = Int(item.size)
         lock.lock()
         defer { lock.unlock() }
+        guard _maxDuration > 0, _maxByteSize > 0 else {
+            return
+        }
         entries.append(Entry(item: copy, seconds: item.seconds, byteSize: byteSize, insertionIndex: nextInsertionIndex))
         nextInsertionIndex += 1
         _totalByteSize += byteSize
@@ -122,10 +151,11 @@ final class MemorySeekCache<Item: MemorySeekCacheItem> {
         defer { lock.unlock() }
         entries.removeAll(keepingCapacity: true)
         _totalByteSize = 0
+        nextInsertionIndex = 0
     }
 
     private func trim() {
-        while _totalByteSize > maxByteSize, let first = entries.first {
+        while _totalByteSize > _maxByteSize, let first = entries.first {
             _totalByteSize -= first.byteSize
             entries.removeFirst()
         }
@@ -133,7 +163,7 @@ final class MemorySeekCache<Item: MemorySeekCacheItem> {
         guard let newestSeconds = entries.map(\.seconds).max() else {
             return
         }
-        let minimumSeconds = newestSeconds - maxDuration
+        let minimumSeconds = newestSeconds - _maxDuration
         entries.removeAll { entry in
             guard entry.seconds < minimumSeconds else {
                 return false

@@ -17,9 +17,13 @@ public class EmptySubtitleInfo: SubtitleInfo {
 }
 
 public class URLSubtitleInfo: KSSubtitle, SubtitleInfo, SubtitleKindProviding, @unchecked Sendable {
+    nonisolated(unsafe) static var externalImageSubtitleLoader: @Sendable (URL, String?) async throws -> [SubtitlePart] = { url, userAgent in
+        try await ExternalImageSubtitleLoader.load(url: url, userAgent: userAgent)
+    }
+
     public var isEnabled: Bool = false {
         didSet {
-            if isEnabled, parts.isEmpty, downloadURL.isTextSubtitle {
+            if isEnabled, parts.isEmpty, downloadURL.isSubtitle {
                 Task {
                     try? await loadIfNeeded()
                 }
@@ -28,6 +32,9 @@ public class URLSubtitleInfo: KSSubtitle, SubtitleInfo, SubtitleKindProviding, @
                     translationGeneration += 1
                     translationTask?.cancel()
                     activeTranslationCacheKey = nil
+                }
+                if downloadURL.isImageSubtitle {
+                    parts.removeAll()
                 }
             }
         }
@@ -79,7 +86,14 @@ public class URLSubtitleInfo: KSSubtitle, SubtitleInfo, SubtitleKindProviding, @
     }
 
     public func loadIfNeeded() async throws {
-        guard parts.isEmpty, downloadURL.isTextSubtitle else {
+        guard parts.isEmpty else {
+            return
+        }
+        if downloadURL.isImageSubtitle {
+            parts = try await Self.externalImageSubtitleLoader(downloadURL, userAgent)
+            return
+        }
+        guard downloadURL.isTextSubtitle else {
             return
         }
         try await parse(url: downloadURL, userAgent: userAgent)
@@ -144,12 +158,21 @@ public class URLSubtitleInfo: KSSubtitle, SubtitleInfo, SubtitleKindProviding, @
         }
 
         let cacheKey = translationCacheKey(configuration: configuration, snapshots: snapshots)
-        if let cached = translationLock.locked({ translatedPartCache[cacheKey] }) {
-            parts = cached.map { $0.part() }
+        let shouldStartTranslation = translationLock.locked { () -> Bool in
+            if let cached = translatedPartCache[cacheKey] {
+                parts = cached.map { $0.part() }
+                activeTranslationCacheKey = cacheKey
+                return false
+            }
+            guard activeTranslationCacheKey != cacheKey else {
+                return false
+            }
             activeTranslationCacheKey = cacheKey
-            return
+            translationTask?.cancel()
+            parts = snapshots.map { $0.part() }
+            return true
         }
-        guard activeTranslationCacheKey != cacheKey else {
+        guard shouldStartTranslation else {
             return
         }
 
@@ -160,9 +183,7 @@ public class URLSubtitleInfo: KSSubtitle, SubtitleInfo, SubtitleKindProviding, @
             sourceLanguage: configuration.sourceLanguage,
             targetLanguage: configuration.targetLanguage
         )
-        activeTranslationCacheKey = cacheKey
-        translationTask?.cancel()
-        translationTask = Task { [weak self] in
+        let task = Task { [weak self] in
             do {
                 let translations = try await configuration.provider.translateSubtitles(texts, request: request)
                 try Task.checkCancellation()
@@ -176,7 +197,19 @@ public class URLSubtitleInfo: KSSubtitle, SubtitleInfo, SubtitleKindProviding, @
             } catch is CancellationError {
             } catch {
                 KSLog(error)
+                self?.applyTranslationFailureFallback(
+                    snapshots: snapshots,
+                    cacheKey: cacheKey,
+                    generation: generation
+                )
             }
+        }
+        translationLock.locked {
+            guard generation == translationGeneration, activeTranslationCacheKey == cacheKey else {
+                task.cancel()
+                return
+            }
+            translationTask = task
         }
     }
 
@@ -209,6 +242,22 @@ public class URLSubtitleInfo: KSSubtitle, SubtitleInfo, SubtitleKindProviding, @
         }
         translatedPartCache[cacheKey] = translatedSnapshots
         parts = translatedSnapshots.map { $0.part() }
+    }
+
+    private func applyTranslationFailureFallback(
+        snapshots: [SubtitlePartSnapshot],
+        cacheKey: String,
+        generation: Int
+    ) {
+        translationLock.lock()
+        defer {
+            translationLock.unlock()
+        }
+        guard generation == translationGeneration, activeTranslationCacheKey == cacheKey else {
+            return
+        }
+        activeTranslationCacheKey = nil
+        parts = snapshots.map { $0.part() }
     }
 
     private func translationCacheKey(configuration: SubtitleTranslationConfiguration, snapshots: [SubtitlePartSnapshot]) -> String {
@@ -246,6 +295,7 @@ public class PlistCacheSubtitleDataSouce: CacheSubtitleDataSouce {
     nonisolated(unsafe) public static let singleton = PlistCacheSubtitleDataSouce()
     public var infos = [any SubtitleInfo]()
     private let srtCacheInfoPath: String
+    private let cacheQueue = DispatchQueue(label: "KSPlayer.PlistCacheSubtitleDataSouce")
     // 因为plist不能保存URL
     private var srtInfoCaches: [String: [String]]
     private init() {
@@ -254,13 +304,7 @@ public class PlistCacheSubtitleDataSouce: CacheSubtitleDataSouce {
             try? FileManager.default.createDirectory(atPath: cacheFolder, withIntermediateDirectories: true, attributes: nil)
         }
         srtCacheInfoPath = (cacheFolder as NSString).appendingPathComponent("KSSrtInfo.plist")
-        srtInfoCaches = [String: [String]]()
-        DispatchQueue.global().async { [weak self] in
-            guard let self else {
-                return
-            }
-            self.srtInfoCaches = (NSMutableDictionary(contentsOfFile: self.srtCacheInfoPath) as? [String: [String]]) ?? [String: [String]]()
-        }
+        srtInfoCaches = (NSMutableDictionary(contentsOfFile: srtCacheInfoPath) as? [String: [String]]) ?? [String: [String]]()
     }
 
     public func searchSubtitle(fileURL: URL?) async throws {
@@ -268,28 +312,35 @@ public class PlistCacheSubtitleDataSouce: CacheSubtitleDataSouce {
         guard let fileURL else {
             return
         }
-        infos = srtInfoCaches[fileURL.absoluteString]?.compactMap { downloadURL -> (any SubtitleInfo)? in
+        let cachedURLs = cacheQueue.sync {
+            srtInfoCaches[fileURL.absoluteString] ?? []
+        }
+        infos = cachedURLs.compactMap { downloadURL -> (any SubtitleInfo)? in
             guard let url = URL(string: downloadURL) else {
                 return nil
             }
             let info = URLSubtitleInfo(url: url)
             info.comment = "local"
             return info
-        } ?? [any SubtitleInfo]()
+        }
     }
 
     public func addCache(fileURL: URL, downloadURL: URL) {
         let file = fileURL.absoluteString
         let path = downloadURL.absoluteString
-        var array = srtInfoCaches[file] ?? [String]()
-        if !array.contains(where: { $0 == path }) {
+        let snapshot = cacheQueue.sync { () -> [String: [String]]? in
+            var array = srtInfoCaches[file] ?? [String]()
+            guard !array.contains(where: { $0 == path }) else {
+                return nil
+            }
             array.append(path)
             srtInfoCaches[file] = array
-            DispatchQueue.global().async { [weak self] in
-                guard let self else {
-                    return
-                }
-                (self.srtInfoCaches as NSDictionary).write(toFile: self.srtCacheInfoPath, atomically: false)
+            return srtInfoCaches
+        }
+        if let snapshot {
+            let cacheInfoPath = srtCacheInfoPath
+            DispatchQueue.global().async {
+                (snapshot as NSDictionary).write(toFile: cacheInfoPath, atomically: false)
             }
         }
     }

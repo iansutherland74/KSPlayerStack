@@ -43,13 +43,13 @@ struct SubtitlePartSnapshot: Sendable {
         self.start = start
         self.end = end
         self.identifier = identifier
-        self.text = text
+        self.text = text.trimmingCharacters(in: .whitespacesAndNewlines)
         self.wordTimings = wordTimings
         self.textPosition = textPosition
     }
 
     init?(part: SubtitlePart) {
-        guard let text = part.text?.string, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+        guard let text = part.text?.string.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty else {
             return nil
         }
         start = part.start

@@ -129,9 +129,10 @@ public class AssParse: KSParseProtocol {
         guard var text = dic["Text"] else {
             return nil
         }
+        let wordTimings = SubtitleInlineTimingParser.assKaraokeWordTimings(in: text, cueStart: start, cueEnd: end)
         text = text.replacingOccurrences(of: "\\N", with: "\n")
         text = text.replacingOccurrences(of: "\\n", with: "\n")
-        let part = SubtitlePart(start, end, attributedString: text.build(textPosition: &textPosition, attributed: attributes))
+        let part = SubtitlePart(start, end, attributedString: text.build(textPosition: &textPosition, attributed: attributes), wordTimings: wordTimings)
         part.textPosition = textPosition
         return part
     }
@@ -370,8 +371,12 @@ public class VTTParse: KSParseProtocol {
                     text += "\n"
                 }
             } while newLine == "\n" || newLine == "\r\n"
+            text = text.trimmingCharacters(in: .newlines)
+            let start = startString.parseDuration()
+            let end = endString.parseDuration()
+            let timedText = SubtitleInlineTimingParser.vttTimedText(in: text, cueEnd: end)
             var textPosition = TextPosition()
-            return SubtitlePart(startString.parseDuration(), endString.parseDuration(), attributedString: text.build(textPosition: &textPosition))
+            return SubtitlePart(start, end, attributedString: timedText.text.build(textPosition: &textPosition), wordTimings: timedText.wordTimings)
         }
         return nil
     }
@@ -415,9 +420,129 @@ public class SrtParse: KSParseProtocol {
                     text += "\n"
                 }
             } while newLine == "\n" || newLine == "\r\n"
+            text = text.trimmingCharacters(in: .newlines)
+            let start = startString.parseDuration()
+            let end = endString.parseDuration()
+            let timedText = SubtitleInlineTimingParser.vttTimedText(in: text, cueEnd: end)
             var textPosition = TextPosition()
-            return SubtitlePart(startString.parseDuration(), endString.parseDuration(), attributedString: text.build(textPosition: &textPosition))
+            return SubtitlePart(start, end, attributedString: timedText.text.build(textPosition: &textPosition), wordTimings: timedText.wordTimings)
         }
         return nil
+    }
+}
+
+private enum SubtitleInlineTimingParser {
+    static func vttTimedText(in text: String, cueEnd: TimeInterval) -> (text: String, wordTimings: [SubtitleWordTiming]) {
+        let matches = timestampTagMatches(in: text)
+        guard !matches.isEmpty else {
+            return (text, [])
+        }
+
+        let strippedText = replacingMatches(matches, in: text, with: "")
+        var wordTimings = [SubtitleWordTiming]()
+        for (index, match) in matches.enumerated() {
+            guard let timeRange = Range(match.range(at: 1), in: text) else {
+                continue
+            }
+            let start = String(text[timeRange]).parseDuration()
+            let end: TimeInterval
+            if matches.indices.contains(index + 1), let nextTimeRange = Range(matches[index + 1].range(at: 1), in: text) {
+                end = String(text[nextTimeRange]).parseDuration()
+            } else {
+                end = cueEnd
+            }
+            guard start < end,
+                  let segmentRange = timedTextSegmentRange(after: match, before: matches[safe: index + 1], in: text)
+            else {
+                continue
+            }
+            let wordText = plainTimedWordText(String(text[segmentRange]))
+            if !wordText.isEmpty {
+                wordTimings.append(SubtitleWordTiming(start: start, end: end, text: wordText))
+            }
+        }
+        return (strippedText, wordTimings)
+    }
+
+    static func assKaraokeWordTimings(in text: String, cueStart: TimeInterval, cueEnd: TimeInterval) -> [SubtitleWordTiming] {
+        let matches = assKaraokeMatches(in: text)
+        guard !matches.isEmpty else {
+            return []
+        }
+
+        var cursor = cueStart
+        var wordTimings = [SubtitleWordTiming]()
+        for (index, match) in matches.enumerated() {
+            guard let durationRange = Range(match.range(at: 1), in: text),
+                  let duration = TimeInterval(String(text[durationRange]))
+            else {
+                continue
+            }
+            let start = cursor
+            let end = min(cueEnd, start + duration / 100.0)
+            cursor = end
+            guard start < end,
+                  let segmentRange = timedTextSegmentRange(after: match, before: matches[safe: index + 1], in: text)
+            else {
+                continue
+            }
+            let wordText = plainTimedWordText(String(text[segmentRange]))
+            if !wordText.isEmpty {
+                wordTimings.append(SubtitleWordTiming(start: start, end: end, text: wordText))
+            }
+        }
+        return wordTimings
+    }
+
+    private static func timestampTagMatches(in text: String) -> [NSTextCheckingResult] {
+        matches(pattern: #"<((?:\d{1,2}:)?\d{2}:\d{2}[\.,]\d{3})>"#, in: text)
+    }
+
+    private static func assKaraokeMatches(in text: String) -> [NSTextCheckingResult] {
+        matches(pattern: #"\{[^}]*\\(?:k|K|kf|ko)(\d+)[^}]*\}"#, in: text)
+    }
+
+    private static func matches(pattern: String, in text: String) -> [NSTextCheckingResult] {
+        guard let regex = try? NSRegularExpression(pattern: pattern) else {
+            return []
+        }
+        return regex.matches(in: text, range: NSRange(text.startIndex ..< text.endIndex, in: text))
+    }
+
+    private static func replacingMatches(_ matches: [NSTextCheckingResult], in text: String, with replacement: String) -> String {
+        var result = text
+        for match in matches.reversed() {
+            guard let range = Range(match.range, in: result) else {
+                continue
+            }
+            result.replaceSubrange(range, with: replacement)
+        }
+        return result
+    }
+
+    private static func timedTextSegmentRange(after match: NSTextCheckingResult, before nextMatch: NSTextCheckingResult?, in text: String) -> Range<String.Index>? {
+        guard let start = Range(match.range, in: text)?.upperBound else {
+            return nil
+        }
+        let end = nextMatch.flatMap { Range($0.range, in: text)?.lowerBound } ?? text.endIndex
+        guard start <= end else {
+            return nil
+        }
+        return start ..< end
+    }
+
+    private static func plainTimedWordText(_ text: String) -> String {
+        let withoutOverrideTags = replacingMatches(matches(pattern: #"\{[^}]*\}"#, in: text), in: text, with: "")
+        let withoutHTMLTags = replacingMatches(matches(pattern: #"</?[^>]+>"#, in: withoutOverrideTags), in: withoutOverrideTags, with: "")
+        return withoutHTMLTags
+            .replacingOccurrences(of: "\\N", with: "\n")
+            .replacingOccurrences(of: "\\n", with: "\n")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
+private extension Array {
+    subscript(safe index: Index) -> Element? {
+        indices.contains(index) ? self[index] : nil
     }
 }

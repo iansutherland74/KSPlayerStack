@@ -45,6 +45,20 @@ final class MemorySeekCacheTest: XCTestCase {
         XCTAssertEqual(cache.packets(for: 2, requiredTrackIDs: [2])?.map(\.seconds), [2, 4])
     }
 
+    func testUpdatingCapsTrimsExistingPackets() {
+        let cache = MemorySeekCache<TestMemorySeekItem>(maxDuration: 10, maxByteSize: 10_000)
+        cache.store(TestMemorySeekItem(trackID: 2, mediaType: .audio, seconds: 1, size: 50))
+        cache.store(TestMemorySeekItem(trackID: 2, mediaType: .audio, seconds: 2, size: 50))
+        cache.store(TestMemorySeekItem(trackID: 2, mediaType: .audio, seconds: 4, size: 50))
+
+        cache.maxDuration = 2
+        cache.maxByteSize = 100
+
+        XCTAssertEqual(cache.totalByteSize, 100)
+        XCTAssertNil(cache.packets(for: 1, requiredTrackIDs: [2]))
+        XCTAssertEqual(cache.packets(for: 2, requiredTrackIDs: [2])?.map(\.seconds), [2, 4])
+    }
+
     func testInvalidateClearsCache() {
         let cache = MemorySeekCache<TestMemorySeekItem>(maxDuration: 10, maxByteSize: 10_000)
         cache.store(TestMemorySeekItem(trackID: 2, mediaType: .audio, seconds: 1, size: 50))

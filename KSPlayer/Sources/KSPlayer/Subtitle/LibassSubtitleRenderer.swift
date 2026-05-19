@@ -10,6 +10,8 @@ import AppKit
 import libass
 
 final class LibassSubtitleRenderer {
+    private static let maxEmbeddedFontSize = 32 * 1024 * 1024
+
     private let library: OpaquePointer
     private let renderer: OpaquePointer
     private let track: UnsafeMutablePointer<ASS_Track>
@@ -30,6 +32,7 @@ final class LibassSubtitleRenderer {
 
         if let fontDirectoryURL {
             ass_set_fonts_dir(library, fontDirectoryURL.path)
+            addFonts(from: fontDirectoryURL)
         }
         ass_set_frame_size(renderer, Int32(canvasSize.width), Int32(canvasSize.height))
         ass_set_storage_size(renderer, Int32(canvasSize.width), Int32(canvasSize.height))
@@ -81,6 +84,41 @@ final class LibassSubtitleRenderer {
         part.imageRect = CGRect(origin: .zero, size: canvasSize)
         part.imageCanvasSize = canvasSize
         return part
+    }
+
+    private func addFonts(from directoryURL: URL) {
+        let fontExtensions: Set<String> = ["otc", "otf", "ttc", "ttf"]
+        guard let fontURLs = try? FileManager.default.contentsOfDirectory(
+            at: directoryURL,
+            includingPropertiesForKeys: [.fileSizeKey, .isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return
+        }
+
+        for fontURL in fontURLs where fontExtensions.contains(fontURL.pathExtension.lowercased()) {
+            do {
+                let values = try fontURL.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey])
+                guard values.isRegularFile == true,
+                      let fileSize = values.fileSize,
+                      fileSize > 0,
+                      fileSize <= Self.maxEmbeddedFontSize
+                else {
+                    continue
+                }
+                let fontData = try Data(contentsOf: fontURL)
+                fontData.withUnsafeBytes { buffer in
+                    guard let baseAddress = buffer.bindMemory(to: CChar.self).baseAddress else {
+                        return
+                    }
+                    fontURL.lastPathComponent.withCString { name in
+                        ass_add_font(library, name, baseAddress, Int32(buffer.count))
+                    }
+                }
+            } catch {
+                KSLog("[subtitle] failed to add embedded font to libass \(fontURL.lastPathComponent): \(error)")
+            }
+        }
     }
 
     private func makeImage(from imageList: UnsafeMutablePointer<ASS_Image>) -> UIImage? {

@@ -42,7 +42,8 @@ class SubtitleDecode: DecodeProtocol {
                 _ = assParse.canParse(scanner: Scanner(string: subtitleHeader))
             }
             #if canImport(libass)
-            if let context = codecContext?.pointee,
+            if options.isAssSubtitleImageRenderingEnabled,
+               let context = codecContext?.pointee,
                AssImageSubtitleRenderPolicy.canRender(codecID: context.codec_id)
             {
                 let canvasSize = AssImageSubtitleRenderPolicy.canvasSize(

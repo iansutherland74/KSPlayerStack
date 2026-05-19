@@ -33,13 +33,13 @@ To experience the powerful features of the LGPL version, you can download the ap
 |Video switching with zero delay|💰|❌|
 |Audio Passthrough Output by Wi-Fi|💰|❌|
 |Dovi P5 displays HDR (not overheating)|💰|❌|
-|Live streaming supports rewind viewing|💰|❌|
+|Live streaming supports rewind viewing|💰|✅|
 |ISO Blu-ray disc playback on all Apple platforms|💰|❌|
-|Simultaneous playback of separate audio and video URLs|💰|❌|
+|Simultaneous playback of separate audio and video URLs|✅|❌|
 |Offline AI real-time subtitle generation and translation|💰|❌|
 |ProAVPlayer supports MKV, native Dolby Vision and Dolby Atmos.|💰|❌|
-|Play videos in a small window in the App (resumable, supports iOS and tvOS)|💰|❌|
-|Dolby AC-4|✅|❌|
+|Play videos in a small window in the App (resumable, supports iOS, tvOS and visionOS)|💰|❌|
+|Dolby AC-4 detection and metadata|✅|❌|
 |Swift Concurrency|✅|❌|
 |AV1 hardware decoding|✅|❌|
 |Word-by-word subtitles|✅|❌|
@@ -73,6 +73,23 @@ To experience the powerful features of the LGPL version, you can download the ap
 |Low latency 4K live video streaming (less than 200ms on LAN)|✅|✅|
 |Automatically switch to multi-bitrate streams based on network|✅|✅|
 
+
+## Playback routing notes
+
+KSPlayer chooses between AVFoundation (`KSAVPlayer`) and FFmpeg/Metal (`KSMEPlayer`) by capability. Separate audio/video URLs, AirPlay-oriented wireless routes, and AVFoundation-supported containers stay on the native path so system Dolby Vision, Dolby Atmos, external playback, and route sharing can work where Apple supports them. Matroska/WebM containers (`.mkv`, `.mk3d`, `.mka`, `.mks`, `.webm`), Blu-ray sources, FFmpeg-only URL schemes, VR display, offline subtitle generation, color adjustment, and VideoToolbox upscaling use `KSMEPlayer`.
+
+For Dolby media, this means MP4/MOV/HLS Dolby Vision or Dolby Atmos content can remain native when AVFoundation supports the source and output route. MKV Dolby Vision/Atmos falls back to `KSMEPlayer`: Dolby Vision metadata and HDR fallback state are preserved for rendering diagnostics, while decoded FFmpeg audio is output as PCM unless the content is on a native Apple passthrough route. AC-4 tracks are labeled and preserved as Dolby metadata when demuxed, but FFmpeg 8.1 does not expose a public AC-4 decoder/parser, so KSPlayer marks AC-4 as unsupported on the FFmpeg path and leaves any native AC-4 playback to Apple's AVPlayer capabilities.
+
+## Video color adjustment
+
+Use `KSOptions.videoColorAdjustment` to apply Metal-side saturation, brightness, and contrast changes:
+
+```swift
+let options = KSOptions()
+options.videoColorAdjustment = VideoColorAdjustment(saturation: 1.1, brightness: 0.05, contrast: 1.05)
+```
+
+Neutral values are saturation `1`, brightness `0`, and contrast `1`. Inputs are clamped to safe ranges, and non-finite values fall back to the neutral channel default. Color adjustment requires the `KSMEPlayer`/Metal path; native AVPlayer playback, separate audio/video URLs, and wireless-route playback cannot apply it. SDR content is adjusted by default, while HDR10, HLG, and Dolby Vision are preserved unless `hdrPolicy: .allowHDR` is explicitly requested.
 
 ## Requirements
 
@@ -187,6 +204,22 @@ let asset = KSPlayerResource(name: "Video Name",
 playerView.set(resource: asset)
 ```
 
+#### Audio AirPlay / Wi-Fi output
+
+```swift
+let options = KSOptions()
+options.audioRouteSharingPolicy = .longFormAudio
+playerView.set(url: url, options: options)
+```
+
+Use `.longFormAudio` when the app should expose audio-only AirPlay/Wi-Fi routes. Native encoded Dolby passthrough depends on Apple's AVPlayer route; KSMEPlayer's FFmpeg path decodes audio to PCM before output and does not bitstream AC-4/TrueHD passthrough.
+
+#### High-performance 8K / high-FPS playback
+
+KSPlayer automatically applies its high-performance policy when the selected MEPlayer video track is 8K or 90+ FPS: synchronous video decode is avoided, VideoToolbox asynchronous decompression is enabled when hardware decode is still allowed, frame queues are expanded for high FPS, and 8K queues stay capped to limit memory pressure. Live streams keep smaller queues for latency.
+
+Apps can query the same decisions with `HighPerformanceVideoPlaybackPolicy.isHighWorkload(fps:naturalSize:)`, `frameCapacity(fps:naturalSize:isLive:)`, and `displayFrameRateRange(fps:)`. Deinterlacing filters, rotation filters, simulator/runtime hardware availability, and unsupported codecs can still force software fallback.
+
 #### Video upscaling
 
 ```swift
@@ -209,6 +242,82 @@ playerView.set(url: url, options: options)
 ```
 
 Progress previews show a scrubber time bubble and can warm thumbnail images for finite, seekable VOD. The default `.localOnly` mode avoids network work; use `.always` only when remote thumbnail warming is acceptable. Live and DVR streams keep the time preview but skip thumbnail warming because generation performs background seeks.
+
+#### Main and secondary subtitles
+
+KSPlayer can render two selected subtitle tracks at the same playback time. Main subtitles default to the bottom safe area and secondary subtitles default to the top safe area, while authored ASS/image positioning is preserved. Text, external, online, cached, embedded FFmpeg, and offline-generated subtitles share the same selection model; native AVFoundation legible tracks remain system-rendered and are limited by AVPlayer's single active legible media selection.
+
+#### ASS/SSA image rendering
+
+```swift
+let options = KSOptions()
+options.isAssSubtitleImageRenderingEnabled = true
+playerView.set(url: url, options: options)
+```
+
+When the `libass` module is linked for the current platform, embedded ASS/SSA subtitle packets are rendered first as authored bitmap overlays so positioning, vector drawing, karaoke styling, and embedded Matroska fonts can be preserved more faithfully than the text fallback. If libass is unavailable, disabled, or cannot render a packet, KSPlayer falls back to the existing parsed text subtitle path. These bitmap overlays keep authored pixels and are not restyled by system caption appearance, HDR subtitle effects, or external subtitle translation.
+
+#### Picture in Picture subtitles
+
+Use `KSOptions.pictureInPictureSubtitlePolicy` to control subtitle exposure for Picture in Picture. The default `.automatic` keeps AVFoundation legible subtitle tracks available so Apple's native AVPlayer PiP window can render them. Set `.disabled` to hide those native PiP subtitle choices.
+
+Apple Picture in Picture does not display arbitrary UIKit/AppKit overlay views. KSPlayer-owned overlays, including external text subtitles, image/SUP subtitles, secondary subtitles, and KSMEPlayer/libass-rendered ASS bitmap subtitles, remain inline-only and are hidden from the inline view while system PiP is active. The KSMEPlayer sample-buffer PiP path currently sends video frames only; subtitles are not burned into those frames.
+
+#### Text subtitle translation
+
+```swift
+let options = KSOptions()
+options.isExternalSubtitleTranslationEnabled = true
+options.externalSubtitleTranslationProvider = appSubtitleTranslator
+options.externalSubtitleTranslationDisplayMode = .bilingual(separator: "\n")
+options.externalSubtitleTranslationSourceLanguage = "en"
+options.externalSubtitleTranslationTargetLanguage = "zh-Hans"
+playerView.set(url: url, options: options)
+```
+
+External subtitle translation is opt-in and only runs for parsed text subtitles (`.srt`, `.vtt`, `.ass`, `.ssa`). Image subtitle files such as SUP/PGS are skipped. KSPlayer batches parsed cue text through the app-supplied `SubtitleTranslationProvider`, keeps timing and positioning metadata, and falls back to the original text if translation fails.
+
+#### External image subtitles
+
+External bitmap subtitles (`.sup`/`.pgs`) are exposed as image subtitle tracks and loaded through the FFmpeg subtitle decoder when selected. Bitmap cues render as authored images in the primary or secondary subtitle overlay; text-only features such as translation, system caption appearance, word highlighting, and HDR subtitle styling are skipped for these cues so their pixels are not restyled. When a standalone image subtitle file does not carry an explicit video canvas, KSPlayer falls back to a 1920x1080 canvas while preserving decoded bitmap offsets.
+
+#### System caption appearance
+
+```swift
+let options = KSOptions()
+options.subtitleCaptionAppearancePolicy = .contentIfAvailable
+playerView.set(url: url, options: options)
+```
+
+Use `.contentIfAvailable` to apply Apple system caption appearance to unstyled text subtitle ranges while preserving embedded subtitle styling. Use `.alwaysOverride` only when your app should replace embedded text subtitle font, color, background, and edge styling with the user's system caption settings. Image subtitles and libass-rendered ASS images keep their authored bitmap appearance.
+
+#### HDR subtitle effects
+
+```swift
+let options = KSOptions()
+options.subtitleHDREffectPolicy = .automatic
+playerView.set(url: url, options: options)
+```
+
+Use `.automatic` to add contrast for text subtitles over HDR10, HLG, and Dolby Vision video when KSPlayer owns subtitle styling. Use `.enhanced` for a stronger window/background and outline treatment, or `.disabled` to keep SDR-era subtitle rendering. These effects are UI-overlay styling only; image subtitles and libass-rendered ASS bitmaps keep their authored pixels, and system caption appearance takes precedence when enabled.
+
+#### In-app compact playback
+
+```swift
+let layout = KSPlayerCompactLayout(corner: .bottomTrailing,
+                                   size: CGSize(width: 320, height: 180),
+                                   margin: 16)
+playerView.enterInAppCompactMode(in: view, layout: layout)
+
+let resumeState = playerView.resumeState
+playerView.exitInAppCompactMode()
+
+if let resumeState {
+    playerView.restorePlayback(from: resumeState, options: KSOptions())
+}
+```
+
+Compact playback keeps the existing `KSPlayerLayer` attached, so playback continues without replacing the player. The compact view is constrained to the container safe area and updates its size when the container changes, which keeps it usable during rotation, split view, tvOS focus-safe layouts, and visionOS window resizing. Use `resumeState?.resumableTime` to persist a safe restore point; `restorePlayback(from:options:)` reuses the current player when it is already on the same URL. Avoid entering compact mode while system Picture in Picture is active.
 
 #### Listening status change
 

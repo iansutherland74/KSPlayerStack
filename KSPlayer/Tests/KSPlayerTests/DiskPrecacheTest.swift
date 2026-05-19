@@ -92,7 +92,7 @@ final class DiskPrecacheTest: XCTestCase {
         options.diskPrecacheDirectoryURL = temporaryDirectory()
         let directory = KSDiskPrecache.cacheDirectoryURL(options: options)
         let cachedFile = directory.appendingPathComponent("cached.mp4")
-        let temporaryFile = directory.appendingPathComponent("partial.download")
+        let temporaryFile = directory.appendingPathComponent(".cached.mp4.partial.download")
         try writeFile(at: cachedFile, bytes: 4)
         try writeFile(at: temporaryFile, bytes: 8)
 
@@ -108,7 +108,7 @@ final class DiskPrecacheTest: XCTestCase {
         let directory = temporaryDirectory()
         let olderFile = directory.appendingPathComponent("older.mp4")
         let newerFile = directory.appendingPathComponent("newer.mp4")
-        let temporaryFile = directory.appendingPathComponent("partial.download")
+        let temporaryFile = directory.appendingPathComponent(".partial.download")
         try writeFile(at: olderFile, bytes: 4)
         try writeFile(at: newerFile, bytes: 4)
         try writeFile(at: temporaryFile, bytes: 4)
@@ -119,7 +119,7 @@ final class DiskPrecacheTest: XCTestCase {
 
         XCTAssertFalse(FileManager.default.fileExists(atPath: olderFile.path))
         XCTAssertTrue(FileManager.default.fileExists(atPath: newerFile.path))
-        XCTAssertTrue(FileManager.default.fileExists(atPath: temporaryFile.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: temporaryFile.path))
     }
 
     private func temporaryDirectory() -> URL {

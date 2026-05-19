@@ -24,6 +24,25 @@ class SubtitleTest: XCTestCase {
         XCTAssertEqual(KSOptions().pictureInPictureSubtitlePolicy, .automatic)
     }
 
+    func testAssImageSubtitleRenderingDefaultsToEnabled() {
+        XCTAssertTrue(KSOptions().isAssSubtitleImageRenderingEnabled)
+    }
+
+    func testPictureInPictureSubtitlePolicyResolverKeepsOnlyNativeLegibleInPiP() {
+        XCTAssertEqual(
+            PictureInPictureSubtitlePolicyResolver.renderMode(policy: .automatic, usesNativeLegibleSelection: true),
+            .nativeLegible
+        )
+        XCTAssertEqual(
+            PictureInPictureSubtitlePolicyResolver.renderMode(policy: .automatic, usesNativeLegibleSelection: false),
+            .inlineOverlayOnly
+        )
+        XCTAssertEqual(
+            PictureInPictureSubtitlePolicyResolver.renderMode(policy: .disabled, usesNativeLegibleSelection: true),
+            .disabled
+        )
+    }
+
     func testSrt() {
         let string = """
         1
@@ -122,6 +141,66 @@ class SubtitleTest: XCTestCase {
         XCTAssertEqual(parts.count, 7)
     }
 
+    func testVttInlineTimestampsBecomeWordTimings() throws {
+        let string = """
+        WEBVTT
+
+        00:00:00.000 --> 00:00:02.000
+        hello <00:00:01.000>world
+
+        """
+        let parse = VTTParse()
+        let parts = parse.parse(scanner: Scanner(string: string))
+        let part = try XCTUnwrap(parts.first)
+
+        XCTAssertEqual(part.text?.string, "hello world")
+        XCTAssertEqual(part.wordTimings, [
+            SubtitleWordTiming(start: 1, end: 2, text: "world"),
+        ])
+        XCTAssertEqual(part.activeWordIndex(at: 1.5), 0)
+    }
+
+    func testSrtInlineTimestampsBecomeWordTimingsWhenPresent() throws {
+        let string = """
+        1
+        00:00:00,000 --> 00:00:02,000
+        hello <00:00:01.000>world
+
+        """
+        let parse = SrtParse()
+        let parts = parse.parse(scanner: Scanner(string: string))
+        let part = try XCTUnwrap(parts.first)
+
+        XCTAssertEqual(part.text?.string, "hello world")
+        XCTAssertEqual(part.wordTimings, [
+            SubtitleWordTiming(start: 1, end: 2, text: "world"),
+        ])
+    }
+
+    func testAssKaraokeTagsBecomeWordTimings() throws {
+        let string = """
+        [Script Info]
+        Title: Karaoke
+        [V4+ Styles]
+        Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+        Style: Default,Arial,20,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,2,2,2,10,10,10,1
+        [Events]
+        Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+        Dialogue: 0,0:00:00.00,0:00:02.00,Default,,0,0,0,,{\\k100}hello {\\k100}world
+
+        """
+        let scanner = Scanner(string: string)
+        let parse = AssParse()
+        XCTAssertTrue(parse.canParse(scanner: scanner))
+        let part = try XCTUnwrap(parse.parse(scanner: scanner).first)
+
+        XCTAssertEqual(part.text?.string, "hello world")
+        XCTAssertEqual(part.wordTimings, [
+            SubtitleWordTiming(start: 0, end: 1, text: "hello"),
+            SubtitleWordTiming(start: 1, end: 2, text: "world"),
+        ])
+    }
+
     func testSubtitleStylePreservesEmbeddedAttributes() {
         let embeddedFont = UIFont.boldSystemFont(ofSize: 12)
         let embeddedColor = UIColor.red
@@ -150,9 +229,15 @@ class SubtitleTest: XCTestCase {
         let embeddedFont = UIFont.boldSystemFont(ofSize: 12)
         let systemFont = UIFont.systemFont(ofSize: 24)
         let attributed = NSMutableAttributedString(string: "hello")
+        let shadow = NSShadow()
+        shadow.shadowColor = UIColor.black
         attributed.addAttributes([
             .font: embeddedFont,
             .foregroundColor: UIColor.red,
+            .backgroundColor: UIColor.blue,
+            .shadow: shadow,
+            .strokeWidth: -2,
+            .strokeColor: UIColor.black,
         ], range: NSRange(location: 0, length: attributed.length))
 
         attributed.applySubtitleStyle(SubtitleResolvedStyle(
@@ -165,6 +250,61 @@ class SubtitleTest: XCTestCase {
 
         XCTAssertEqual((attributed.attribute(.font, at: 0, effectiveRange: nil) as? UIFont)?.pointSize, systemFont.pointSize)
         XCTAssertEqual(attributed.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? UIColor, UIColor.white)
+        XCTAssertNil(attributed.attribute(.backgroundColor, at: 0, effectiveRange: nil))
+        XCTAssertNil(attributed.attribute(.shadow, at: 0, effectiveRange: nil))
+        XCTAssertNil(attributed.attribute(.strokeWidth, at: 0, effectiveRange: nil))
+        XCTAssertNil(attributed.attribute(.strokeColor, at: 0, effectiveRange: nil))
+    }
+
+    func testSubtitleModelRefreshesVisibleTextWhenSystemCaptionAppearanceChanges() {
+        let info = StaticSubtitleInfo(
+            subtitleID: "caption-refresh",
+            name: "English",
+            parts: [SubtitlePart(0, 10, "hello")]
+        )
+        let model = SubtitleModel()
+        model.captionAppearancePolicy = .contentIfAvailable
+        model.selectedSubtitleInfo = info
+
+        XCTAssertTrue(model.subtitle(currentTime: 1))
+        XCTAssertFalse(model.subtitle(currentTime: 2))
+
+        SubtitleModel.invalidateSystemCaptionAppearance()
+
+        XCTAssertTrue(model.subtitle(currentTime: 2))
+    }
+
+    #if canImport(MediaAccessibility)
+    func testSystemCaptionFontMappingIgnoresPrivateSystemFontNames() {
+        XCTAssertTrue(SubtitleModel.isPrivateSystemFontName(".SFNS-Medium"))
+        XCTAssertFalse(SubtitleModel.isPrivateSystemFontName("HelveticaNeue"))
+    }
+    #endif
+
+    func testCaptionAppearanceRefreshRestylesPrimaryAndSecondarySubtitles() {
+        let primary = StaticSubtitleInfo(
+            subtitleID: "caption-primary",
+            name: "Primary",
+            parts: [SubtitlePart(0, 10, "primary")]
+        )
+        let secondary = StaticSubtitleInfo(
+            subtitleID: "caption-secondary",
+            name: "Secondary",
+            parts: [SubtitlePart(0, 10, "secondary")]
+        )
+        let model = SubtitleModel()
+        model.captionAppearancePolicy = .contentIfAvailable
+        model.selectedSubtitleInfo = primary
+        model.selectedSecondarySubtitleInfo = secondary
+
+        XCTAssertTrue(model.subtitle(currentTime: 1))
+        XCTAssertFalse(model.subtitle(currentTime: 2))
+
+        SubtitleModel.invalidateSystemCaptionAppearance()
+
+        XCTAssertTrue(model.subtitle(currentTime: 2))
+        XCTAssertEqual(model.parts.first?.text?.string, "primary")
+        XCTAssertEqual(model.secondaryParts.first?.text?.string, "secondary")
     }
 
     func testHDRSubtitleStyleAddsContrastForHDRVideo() {
@@ -222,6 +362,29 @@ class SubtitleTest: XCTestCase {
         XCTAssertGreaterThan(SubtitleModel.alpha(of: attributes[.backgroundColor] as? UIColor ?? .clear), 0)
     }
 
+    func testHDRGeneratedStyleIsRemovedWhenVideoReturnsToSDR() {
+        let attributed = NSMutableAttributedString(string: "hello")
+
+        attributed.applySubtitleStyle(policy: .never, dynamicRange: .hdr10, hdrEffectPolicy: .automatic)
+        XCTAssertNotNil(attributed.attribute(.shadow, at: 0, effectiveRange: nil))
+
+        attributed.applySubtitleStyle(policy: .never, dynamicRange: .sdr, hdrEffectPolicy: .automatic)
+        XCTAssertNil(attributed.attribute(.shadow, at: 0, effectiveRange: nil))
+    }
+
+    func testHDRGeneratedStyleRemovalPreservesEmbeddedSubtitleAttributes() {
+        let attributed = NSMutableAttributedString(string: "hello world")
+        let embeddedShadow = NSShadow()
+        embeddedShadow.shadowColor = UIColor.red
+        attributed.addAttribute(.shadow, value: embeddedShadow, range: NSRange(location: 0, length: 5))
+
+        attributed.applySubtitleStyle(policy: .never, dynamicRange: .hlg, hdrEffectPolicy: .automatic)
+        attributed.applySubtitleStyle(policy: .never, dynamicRange: .sdr, hdrEffectPolicy: .automatic)
+
+        XCTAssertTrue((attributed.attribute(.shadow, at: 0, effectiveRange: nil) as? NSShadow) === embeddedShadow)
+        XCTAssertNil(attributed.attribute(.shadow, at: 6, effectiveRange: nil))
+    }
+
     func testOfflineSubtitleGeneratorStoresOrdersAndTrimsSegments() {
         let generator = OfflineSubtitleGenerator(
             provider: EmptyOfflineSubtitleProvider(),
@@ -264,6 +427,86 @@ class SubtitleTest: XCTestCase {
             OfflineSubtitleSegment(identifier: "bilingual", start: 1, end: 2, text: "world", translation: "世界"),
         ])
         XCTAssertEqual(generator.search(for: 1.5).first?.text?.string, "world / 世界")
+    }
+
+    func testOfflineSubtitleGeneratorDropsWordTimingsForTranslatedOnlyText() {
+        let generator = OfflineSubtitleGenerator(
+            provider: EmptyOfflineSubtitleProvider(),
+            displayMode: .translation
+        )
+        generator.append(segments: [
+            OfflineSubtitleSegment(
+                start: 0,
+                end: 1,
+                text: "hello",
+                translation: "你好",
+                words: [OfflineSubtitleWord(start: 0, end: 1, text: "hello")]
+            ),
+        ])
+
+        let translatedPart = generator.search(for: 0.5).first
+        XCTAssertEqual(translatedPart?.text?.string, "你好")
+        XCTAssertTrue(translatedPart?.wordTimings.isEmpty == true)
+
+        generator.displayMode = .bilingual(separator: "\n")
+
+        let bilingualPart = generator.search(for: 0.5).first
+        XCTAssertEqual(bilingualPart?.text?.string, "hello\n你好")
+        XCTAssertEqual(bilingualPart?.wordTimings, [
+            OfflineSubtitleWord(start: 0, end: 1, text: "hello"),
+        ])
+    }
+
+    func testOfflineSubtitleGeneratorChangingDisplayModeRebuildsExistingSegments() {
+        let generator = OfflineSubtitleGenerator(
+            provider: EmptyOfflineSubtitleProvider(),
+            displayMode: .transcription
+        )
+        generator.append(segments: [
+            OfflineSubtitleSegment(identifier: "same", start: 0, end: 1, text: "hello", translation: "你好"),
+        ])
+        XCTAssertEqual(generator.search(for: 0.5).first?.text?.string, "hello")
+
+        generator.displayMode = .translation
+
+        XCTAssertEqual(generator.search(for: 0.5).first?.text?.string, "你好")
+    }
+
+    func testOfflineSubtitleGeneratorTranslatesGeneratedSegmentsWithAppProvider() async throws {
+        let generationProvider = StaticOfflineSubtitleProvider(segments: [
+            OfflineSubtitleSegment(identifier: "generated", start: 0, end: 1, text: "hello"),
+        ])
+        let translationProvider = RecordingSubtitleTranslationProvider(translations: ["你好"])
+        let generator = OfflineSubtitleGenerator(
+            provider: generationProvider,
+            displayMode: .translation,
+            translationProvider: translationProvider,
+            translationSourceLanguage: "en",
+            translationTargetLanguage: "zh-Hans"
+        )
+        generator.isEnabled = true
+
+        generator.append(frame: makeAudioFrame())
+        try await Task.sleep(nanoseconds: 50_000_000)
+
+        XCTAssertEqual(generator.search(for: 0.5).first?.text?.string, "你好")
+        let requests = await translationProvider.requests()
+        XCTAssertEqual(requests, [["hello"]])
+    }
+
+    func testOfflineSubtitleGeneratorProcessesFramesSerially() async throws {
+        let provider = SequencingOfflineSubtitleProvider()
+        let generator = OfflineSubtitleGenerator(provider: provider)
+        generator.isEnabled = true
+
+        generator.append(frame: makeAudioFrame(timestamp: 0))
+        generator.append(frame: makeAudioFrame(timestamp: 400))
+        try await Task.sleep(nanoseconds: 120_000_000)
+
+        let maxConcurrentProcessCount = await provider.maxConcurrentProcessCount()
+        XCTAssertEqual(maxConcurrentProcessCount, 1)
+        XCTAssertEqual(generator.search(for: 0.01).first?.text?.string, "segment 0.0")
+        XCTAssertEqual(generator.search(for: 0.03).first?.text?.string, "segment 0.025")
     }
 
     func testSubtitlePartSelectsAndHighlightsActiveWord() {
@@ -438,6 +681,33 @@ class SubtitleTest: XCTestCase {
         XCTAssertEqual(requests, [["hello"]])
     }
 
+    func testExternalSubtitleTranslationSupportsParsedTextFormats() async throws {
+        let fixtures = [
+            (fileExtension: "srt", text: simpleSrt(text: "hello")),
+            (fileExtension: "vtt", text: simpleVtt(text: "hello")),
+            (fileExtension: "ass", text: simpleAss(text: "hello")),
+        ]
+
+        for fixture in fixtures {
+            let provider = RecordingSubtitleTranslationProvider(translations: ["translated \(fixture.fileExtension)"])
+            let info = URLSubtitleInfo(url: try makeSubtitleFile(extension: fixture.fileExtension, text: fixture.text))
+            info.configureExternalSubtitleTranslation(
+                isEnabled: true,
+                provider: provider,
+                displayMode: .translation,
+                sourceLanguage: "en",
+                targetLanguage: "es"
+            )
+
+            try await info.loadIfNeeded()
+            await info.waitForExternalSubtitleTranslation()
+
+            XCTAssertEqual(info.search(for: 0.5).first?.text?.string, "translated \(fixture.fileExtension)")
+            let requests = await provider.requests()
+            XCTAssertEqual(requests, [["hello"]])
+        }
+    }
+
     func testExternalSubtitleBilingualModePreservesOriginalAndWords() async throws {
         let provider = RecordingSubtitleTranslationProvider(translations: ["世界"])
         let info = URLSubtitleInfo(url: try makeSubtitleFile(extension: "srt", text: simpleSrt(text: "world")))
@@ -486,8 +756,84 @@ class SubtitleTest: XCTestCase {
         XCTAssertEqual(requestCount, 1)
     }
 
+    func testExternalSubtitleTranslationFailureFallsBackAndCanRetry() async throws {
+        let provider = ControlledSubtitleTranslationProvider(
+            providerID: "retry",
+            translations: ["hola"],
+            failureCount: 1
+        )
+        let info = URLSubtitleInfo(url: try makeSubtitleFile(extension: "srt", text: simpleSrt(text: "hello")))
+        info.configureExternalSubtitleTranslation(
+            isEnabled: true,
+            provider: provider,
+            displayMode: .translation,
+            sourceLanguage: "en",
+            targetLanguage: "es"
+        )
+
+        try await info.loadIfNeeded()
+        await info.waitForExternalSubtitleTranslation()
+
+        XCTAssertEqual(info.search(for: 0.5).first?.text?.string, "hello")
+
+        info.translateParsedPartsIfNeeded()
+        await info.waitForExternalSubtitleTranslation()
+
+        XCTAssertEqual(info.search(for: 0.5).first?.text?.string, "hola")
+        let requestCount = await provider.requestCount()
+        XCTAssertEqual(requestCount, 2)
+    }
+
+    func testExternalSubtitleTranslationIgnoresStaleProviderResults() async throws {
+        let slowProvider = ControlledSubtitleTranslationProvider(
+            providerID: "slow",
+            translations: ["stale"],
+            delayNanoseconds: 80_000_000
+        )
+        let fastProvider = ControlledSubtitleTranslationProvider(
+            providerID: "fast",
+            translations: ["fresh"]
+        )
+        let info = URLSubtitleInfo(url: try makeSubtitleFile(extension: "srt", text: simpleSrt(text: "hello")))
+        info.parts = [SubtitlePart(0, 1, "hello")]
+
+        info.configureExternalSubtitleTranslation(
+            isEnabled: true,
+            provider: slowProvider,
+            displayMode: .translation,
+            sourceLanguage: "en",
+            targetLanguage: "es"
+        )
+        for _ in 0 ..< 10 where await slowProvider.requestCount() == 0 {
+            try await Task.sleep(nanoseconds: 1_000_000)
+        }
+        let startedSlowRequestCount = await slowProvider.requestCount()
+        XCTAssertEqual(startedSlowRequestCount, 1)
+        info.configureExternalSubtitleTranslation(
+            isEnabled: true,
+            provider: fastProvider,
+            displayMode: .translation,
+            sourceLanguage: "en",
+            targetLanguage: "fr"
+        )
+
+        await info.waitForExternalSubtitleTranslation()
+        try await Task.sleep(nanoseconds: 120_000_000)
+
+        XCTAssertEqual(info.search(for: 0.5).first?.text?.string, "fresh")
+        let slowRequestCount = await slowProvider.requestCount()
+        let fastRequestCount = await fastProvider.requestCount()
+        XCTAssertEqual(slowRequestCount, 1)
+        XCTAssertEqual(fastRequestCount, 1)
+    }
+
     func testExternalSubtitleTranslationSkipsImageSubtitles() async throws {
         let provider = RecordingSubtitleTranslationProvider(translations: ["ignored"])
+        let originalLoader = URLSubtitleInfo.externalImageSubtitleLoader
+        URLSubtitleInfo.externalImageSubtitleLoader = { _, _ in [] }
+        defer {
+            URLSubtitleInfo.externalImageSubtitleLoader = originalLoader
+        }
         let info = URLSubtitleInfo(url: URL(fileURLWithPath: "/tmp/movie.sup"))
         info.configureExternalSubtitleTranslation(
             isEnabled: true,
@@ -503,6 +849,49 @@ class SubtitleTest: XCTestCase {
         XCTAssertTrue(info.parts.isEmpty)
         let requestCount = await provider.requestCount()
         XCTAssertEqual(requestCount, 0)
+    }
+
+    func testExternalImageSubtitleLoadRoutesToBitmapLoader() async throws {
+        let originalLoader = URLSubtitleInfo.externalImageSubtitleLoader
+        let probe = ExternalImageSubtitleLoaderProbe()
+        URLSubtitleInfo.externalImageSubtitleLoader = { url, userAgent in
+            probe.load(url: url, userAgent: userAgent)
+        }
+        defer {
+            URLSubtitleInfo.externalImageSubtitleLoader = originalLoader
+        }
+
+        let url = URL(string: "https://example.com/subtitles/movie.sup")!
+        let info = URLSubtitleInfo(subtitleID: "image", name: "movie.sup", url: url, userAgent: "UnitTest")
+
+        try await info.loadIfNeeded()
+
+        let requests = probe.recordedRequests()
+        XCTAssertEqual(requests.map(\.url), [url])
+        XCTAssertEqual(requests.map(\.userAgent), ["UnitTest"])
+        let part = try XCTUnwrap(info.search(for: 0.5).first)
+        XCTAssertNotNil(part.image)
+        XCTAssertEqual(part.imageCanvasSize, CGSize(width: 1920, height: 1080))
+    }
+
+    func testExternalImageSubtitleDisableClearsDecodedBitmapParts() async throws {
+        let originalLoader = URLSubtitleInfo.externalImageSubtitleLoader
+        URLSubtitleInfo.externalImageSubtitleLoader = { _, _ in
+            let part = SubtitlePart(0, 1, attributedString: nil)
+            part.image = makeSubtitleImage(width: 100, height: 20)
+            return [part]
+        }
+        defer {
+            URLSubtitleInfo.externalImageSubtitleLoader = originalLoader
+        }
+
+        let info = URLSubtitleInfo(url: URL(fileURLWithPath: "/tmp/movie.sup"))
+        try await info.loadIfNeeded()
+
+        XCTAssertFalse(info.parts.isEmpty)
+        info.isEnabled = false
+
+        XCTAssertTrue(info.parts.isEmpty)
     }
 
     func testAssImageSubtitleRenderPolicyUsesCodecCanvasBeforePlayRes() {
@@ -531,6 +920,19 @@ class SubtitleTest: XCTestCase {
         )
     }
 
+    func testAssImageSubtitleRenderPolicyIgnoresInvalidPlayRes() {
+        let header = """
+        [Script Info]
+        PlayResX: nan
+        PlayResY: 720
+        """
+
+        XCTAssertEqual(
+            AssImageSubtitleRenderPolicy.canvasSize(codecWidth: 0, codecHeight: 0, subtitleHeader: header, fallback: CGSize(width: 640, height: 360)),
+            CGSize(width: 640, height: 360)
+        )
+    }
+
     func testEmbeddedFontAttachmentFilenamesAreSandboxSafe() {
         XCTAssertEqual(
             EmbeddedFontAttachmentStore.sanitizedFontFilename("../Fonts/Anime:Title?.ttf", fallbackBase: "font-1", preferredExtension: "ttf"),
@@ -552,6 +954,28 @@ class SubtitleTest: XCTestCase {
         XCTAssertEqual(EmbeddedFontAttachmentStore.uniqueFilename("font.ttf", usedFilenames: &usedFilenames), "font.ttf")
         XCTAssertEqual(EmbeddedFontAttachmentStore.uniqueFilename("font.ttf", usedFilenames: &usedFilenames), "font-1.ttf")
         XCTAssertEqual(EmbeddedFontAttachmentStore.uniqueFilename("font.ttf", usedFilenames: &usedFilenames), "font-2.ttf")
+    }
+
+    func testEmbeddedFontAttachmentFilteringUsesCodecMimeAndExtension() {
+        XCTAssertEqual(
+            EmbeddedFontAttachmentStore.preferredFontExtension(codecID: AV_CODEC_ID_TTF, metadata: ["mimetype": "text/plain"]),
+            "ttf"
+        )
+        XCTAssertEqual(
+            EmbeddedFontAttachmentStore.preferredFontExtension(codecID: AV_CODEC_ID_NONE, metadata: ["mimetype": "font/otf"]),
+            "otf"
+        )
+        XCTAssertEqual(
+            EmbeddedFontAttachmentStore.preferredFontExtension(codecID: AV_CODEC_ID_NONE, metadata: ["mimetype": "application/x-font-ttf"]),
+            "ttf"
+        )
+        XCTAssertEqual(
+            EmbeddedFontAttachmentStore.preferredFontExtension(codecID: AV_CODEC_ID_NONE, metadata: ["filename": "Font.TTC", "mimetype": "application/octet-stream"]),
+            "ttc"
+        )
+        XCTAssertNil(
+            EmbeddedFontAttachmentStore.preferredFontExtension(codecID: AV_CODEC_ID_NONE, metadata: ["filename": "not-a-font.ttf", "mimetype": "text/plain"])
+        )
     }
 
     func testOfflineSubtitleGeneratorCarriesWordTimingsAndSubtitleModelRefreshesActiveWord() {
@@ -624,6 +1048,37 @@ class SubtitleTest: XCTestCase {
         XCTAssertEqual(model.secondaryParts.first?.text?.string, "secondary")
     }
 
+    func testSubtitleModelDoesNotRefreshImagePartsForTextStyleChanges() {
+        let imagePart = SubtitlePart(0, 3, attributedString: nil)
+        imagePart.image = makeSubtitleImage(width: 100, height: 20)
+        imagePart.imageRect = CGRect(x: 100, y: 800, width: 100, height: 20)
+        imagePart.imageCanvasSize = CGSize(width: 1920, height: 1080)
+        let imageInfo = StaticSubtitleInfo(subtitleID: "image", name: "PGS", parts: [imagePart])
+        let model = SubtitleModel()
+        model.selectedSubtitleInfo = imageInfo
+
+        XCTAssertTrue(model.subtitle(currentTime: 1))
+        model.videoDynamicRange = .hdr10
+
+        XCTAssertFalse(model.subtitle(currentTime: 1))
+        XCTAssertEqual(model.parts.first?.imageRect, imagePart.imageRect)
+    }
+
+    func testSubtitleModelDeduplicatesRepeatedDataSourceAdds() {
+        let english = StaticSubtitleInfo(
+            subtitleID: "external-english",
+            name: "English",
+            parts: [SubtitlePart(0, 1, "hello")]
+        )
+        let dataSource = StaticSubtitleDataSouce(infos: [english])
+        let model = SubtitleModel()
+
+        model.addSubtitle(dataSouce: dataSource)
+        model.addSubtitle(dataSouce: dataSource)
+
+        XCTAssertEqual(model.subtitleInfos.map(\.subtitleID), ["external-english"])
+    }
+
     func testOfflineSubtitleGeneratorResetClearsSegments() async throws {
         let provider = RecordingOfflineSubtitleProvider()
         let generator = OfflineSubtitleGenerator(provider: provider)
@@ -646,6 +1101,7 @@ class SubtitleTest: XCTestCase {
         generator.isEnabled = true
 
         generator.append(frame: makeAudioFrame())
+        try await waitForOfflineProviderProcessCount(provider, count: 1)
         generator.reset()
         try await Task.sleep(nanoseconds: 100_000_000)
 
@@ -660,6 +1116,14 @@ class SubtitleTest: XCTestCase {
 private struct EmptyOfflineSubtitleProvider: OfflineSubtitleGenerationProvider {
     func process(frame _: OfflineSubtitleAudioFrame) async throws -> [OfflineSubtitleSegment] {
         []
+    }
+}
+
+private struct StaticOfflineSubtitleProvider: OfflineSubtitleGenerationProvider {
+    let segments: [OfflineSubtitleSegment]
+
+    func process(frame _: OfflineSubtitleAudioFrame) async throws -> [OfflineSubtitleSegment] {
+        segments
     }
 }
 
@@ -693,6 +1157,64 @@ private actor RecordingSubtitleTranslationProvider: SubtitleTranslationProvider 
 
     func requestCount() -> Int {
         recordedRequests.count
+    }
+}
+
+private actor ControlledSubtitleTranslationProvider: SubtitleTranslationProvider {
+    let providerID: String
+    private let translations: [String]
+    private let delayNanoseconds: UInt64
+    private var failureCount: Int
+    private var recordedRequests = [[String]]()
+
+    init(providerID: String, translations: [String], delayNanoseconds: UInt64 = 0, failureCount: Int = 0) {
+        self.providerID = providerID
+        self.translations = translations
+        self.delayNanoseconds = delayNanoseconds
+        self.failureCount = failureCount
+    }
+
+    func translateSubtitles(_ texts: [String], request _: SubtitleTranslationRequest) async throws -> [String] {
+        recordedRequests.append(texts)
+        if delayNanoseconds > 0 {
+            try await Task.sleep(nanoseconds: delayNanoseconds)
+        }
+        if failureCount > 0 {
+            failureCount -= 1
+            throw NSError(domain: "SubtitleTranslationTest", code: 1)
+        }
+        return translations
+    }
+
+    func requestCount() -> Int {
+        recordedRequests.count
+    }
+}
+
+private final class ExternalImageSubtitleLoaderProbe: @unchecked Sendable {
+    struct Request {
+        let url: URL
+        let userAgent: String?
+    }
+
+    private let lock = NSLock()
+    private var requests = [Request]()
+
+    func load(url: URL, userAgent: String?) -> [SubtitlePart] {
+        lock.lock()
+        requests.append(Request(url: url, userAgent: userAgent))
+        lock.unlock()
+        let part = SubtitlePart(0, 1, attributedString: nil)
+        part.image = makeSubtitleImage(width: 100, height: 20)
+        part.imageRect = CGRect(x: 100, y: 800, width: 100, height: 20)
+        part.imageCanvasSize = CGSize(width: 1920, height: 1080)
+        return [part]
+    }
+
+    func recordedRequests() -> [Request] {
+        lock.lock()
+        defer { lock.unlock() }
+        return requests
     }
 }
 
@@ -738,6 +1260,14 @@ private final class OneShotSubtitleInfo: SubtitleInfo {
     }
 }
 
+private final class StaticSubtitleDataSouce: SubtitleDataSouce {
+    let infos: [any SubtitleInfo]
+
+    init(infos: [any SubtitleInfo]) {
+        self.infos = infos
+    }
+}
+
 private actor RecordingOfflineSubtitleProvider: OfflineSubtitleGenerationProvider {
     private var resets = 0
 
@@ -760,7 +1290,7 @@ private actor DelayedOfflineSubtitleProvider: OfflineSubtitleGenerationProvider 
 
     func process(frame: OfflineSubtitleAudioFrame) async throws -> [OfflineSubtitleSegment] {
         processes += 1
-        try await Task.sleep(nanoseconds: 30_000_000)
+        try? await Task.sleep(nanoseconds: 30_000_000)
         return [
             OfflineSubtitleSegment(start: frame.startTime, end: frame.startTime + 1, text: "stale"),
         ]
@@ -779,13 +1309,32 @@ private actor DelayedOfflineSubtitleProvider: OfflineSubtitleGenerationProvider 
     }
 }
 
-private func makeAudioFrame() -> AudioFrame {
+private actor SequencingOfflineSubtitleProvider: OfflineSubtitleGenerationProvider {
+    private var activeProcessCount = 0
+    private var maxActiveProcessCount = 0
+
+    func process(frame: OfflineSubtitleAudioFrame) async throws -> [OfflineSubtitleSegment] {
+        activeProcessCount += 1
+        maxActiveProcessCount = max(maxActiveProcessCount, activeProcessCount)
+        try await Task.sleep(nanoseconds: 30_000_000)
+        activeProcessCount -= 1
+        return [
+            OfflineSubtitleSegment(start: frame.startTime, end: frame.startTime + 0.02, text: "segment \(frame.startTime)"),
+        ]
+    }
+
+    func maxConcurrentProcessCount() -> Int {
+        maxActiveProcessCount
+    }
+}
+
+private func makeAudioFrame(timestamp: Int64 = 0) -> AudioFrame {
     let format = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 16_000, channels: 1, interleaved: false)!
     let samples: [Float] = [0, 0.1, -0.1, 0]
     let frame = AudioFrame(dataSize: samples.count * MemoryLayout<Float>.size, audioFormat: format)
     frame.numberOfSamples = UInt32(samples.count)
     frame.timebase = Timebase(num: 1, den: 16_000)
-    frame.timestamp = 0
+    frame.timestamp = timestamp
     frame.duration = Int64(samples.count)
     frame.data[0]?.withMemoryRebound(to: Float.self, capacity: samples.count) { pointer in
         pointer.update(from: samples, count: samples.count)
@@ -793,11 +1342,44 @@ private func makeAudioFrame() -> AudioFrame {
     return frame
 }
 
+private func waitForOfflineProviderProcessCount(_ provider: DelayedOfflineSubtitleProvider, count: Int) async throws {
+    for _ in 0 ..< 20 {
+        if await provider.processCount() >= count {
+            return
+        }
+        try await Task.sleep(nanoseconds: 5_000_000)
+    }
+}
+
 private func simpleSrt(text: String) -> String {
     """
     1
     00:00:00,000 --> 00:00:01,000
     \(text)
+
+    """
+}
+
+private func simpleVtt(text: String) -> String {
+    """
+    WEBVTT
+
+    00:00:00.000 --> 00:00:01.000
+    \(text)
+
+    """
+}
+
+private func simpleAss(text: String) -> String {
+    """
+    [Script Info]
+    Title: Translation
+    [V4+ Styles]
+    Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+    Style: Default,Arial,20,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,2,2,2,10,10,10,1
+    [Events]
+    Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+    Dialogue: 0,0:00:00.00,0:00:01.00,Default,,0,0,0,,\(text)
 
     """
 }

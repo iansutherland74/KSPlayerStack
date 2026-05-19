@@ -39,38 +39,65 @@ public struct KSPlayerCompactLayout: Sendable {
     }
 
     @MainActor
-    func constraints(for view: UIView, in containerView: UIView) -> [NSLayoutConstraint] {
-        let resolvedSize = resolvedSize(containerSize: containerView.bounds.size)
-        var constraints = [
-            view.widthAnchor.constraint(equalToConstant: resolvedSize.width),
-            view.heightAnchor.constraint(equalToConstant: resolvedSize.height),
-        ]
+    func resolvedSize(in containerView: UIView) -> CGSize {
+        #if canImport(UIKit)
+        let safeAreaSize = containerView.safeAreaLayoutGuide.layoutFrame.size
+        #else
+        let safeAreaSize = containerView.safeAreaRect.size
+        #endif
+        let containerSize = safeAreaSize.width > 0 && safeAreaSize.height > 0 ? safeAreaSize : containerView.bounds.size
+        return resolvedSize(containerSize: containerSize)
+    }
 
+    @MainActor
+    func positionConstraints(for view: UIView, in containerView: UIView) -> [NSLayoutConstraint] {
         switch corner {
         case .topLeading:
-            constraints.append(view.topAnchor.constraint(equalTo: containerView.safeTopAnchor, constant: margin))
-            constraints.append(view.leadingAnchor.constraint(equalTo: containerView.safeLeadingAnchor, constant: margin))
+            return [
+                view.topAnchor.constraint(equalTo: containerView.safeTopAnchor, constant: margin),
+                view.leadingAnchor.constraint(equalTo: containerView.safeLeadingAnchor, constant: margin),
+            ]
         case .topTrailing:
-            constraints.append(view.topAnchor.constraint(equalTo: containerView.safeTopAnchor, constant: margin))
-            constraints.append(view.trailingAnchor.constraint(equalTo: containerView.safeTrailingAnchor, constant: -margin))
+            return [
+                view.topAnchor.constraint(equalTo: containerView.safeTopAnchor, constant: margin),
+                view.trailingAnchor.constraint(equalTo: containerView.safeTrailingAnchor, constant: -margin),
+            ]
         case .bottomLeading:
-            constraints.append(view.bottomAnchor.constraint(equalTo: containerView.safeBottomAnchor, constant: -margin))
-            constraints.append(view.leadingAnchor.constraint(equalTo: containerView.safeLeadingAnchor, constant: margin))
+            return [
+                view.bottomAnchor.constraint(equalTo: containerView.safeBottomAnchor, constant: -margin),
+                view.leadingAnchor.constraint(equalTo: containerView.safeLeadingAnchor, constant: margin),
+            ]
         case .bottomTrailing:
-            constraints.append(view.bottomAnchor.constraint(equalTo: containerView.safeBottomAnchor, constant: -margin))
-            constraints.append(view.trailingAnchor.constraint(equalTo: containerView.safeTrailingAnchor, constant: -margin))
+            return [
+                view.bottomAnchor.constraint(equalTo: containerView.safeBottomAnchor, constant: -margin),
+                view.trailingAnchor.constraint(equalTo: containerView.safeTrailingAnchor, constant: -margin),
+            ]
         }
-        return constraints
+    }
+
+    @MainActor
+    func constraints(for view: UIView, in containerView: UIView) -> (constraints: [NSLayoutConstraint], width: NSLayoutConstraint, height: NSLayoutConstraint) {
+        let resolvedSize = resolvedSize(in: containerView)
+        let width = view.widthAnchor.constraint(equalToConstant: resolvedSize.width)
+        let height = view.heightAnchor.constraint(equalToConstant: resolvedSize.height)
+        return ([width, height] + positionConstraints(for: view, in: containerView), width, height)
     }
 }
 
 struct KSPlayerCompactPresentation {
     weak var originalSuperview: UIView?
+    weak var originalNextSibling: UIView?
     let originalConstraints: [NSLayoutConstraint]
     let originalFrame: CGRect
     let originalTranslatesAutoresizingMaskIntoConstraints: Bool
     let compactConstraints: [NSLayoutConstraint]
+    let compactWidthConstraint: NSLayoutConstraint
+    let compactHeightConstraint: NSLayoutConstraint
+    let layout: KSPlayerCompactLayout
     let wasMaskShow: Bool
+    let accessibilityLabel: String?
+    let accessibilityHint: String?
+    let wasAccessibilityElement: Bool
 }
 
 public struct KSPlayerResumeState: Equatable, Sendable {
@@ -130,9 +157,30 @@ public extension VideoPlayerView {
 
     @MainActor
     @discardableResult
+    func restorePlayback(from state: KSPlayerResumeState, options: KSOptions) -> Bool {
+        if playerLayer?.url != state.url {
+            set(url: state.url, options: options)
+        }
+        guard let playerLayer else {
+            return false
+        }
+        playerLayer.player.playbackRate = state.playbackRate
+        if state.resumableTime > 0 {
+            playerLayer.seek(time: state.resumableTime, autoPlay: state.wasPlaying) { _ in }
+        } else if state.wasPlaying {
+            playerLayer.play()
+        }
+        return true
+    }
+
+    @MainActor
+    @discardableResult
     func enterInAppCompactMode(in containerView: UIView? = nil, layout: KSPlayerCompactLayout = KSPlayerCompactLayout()) -> Bool {
         guard compactPresentation == nil else {
             return true
+        }
+        guard playerLayer?.isPipActive != true else {
+            return false
         }
         guard let targetContainer = containerView ?? superview, targetContainer !== self, !targetContainer.isDescendant(of: self) else {
             return false
@@ -140,29 +188,56 @@ public extension VideoPlayerView {
 
         let originalConstraints = frameConstraints
         NSLayoutConstraint.deactivate(originalConstraints)
+        let originalNextSibling = nextSibling
         let wasMaskShow = isMaskShow
         let originalTranslatesAutoresizingMaskIntoConstraints = translatesAutoresizingMaskIntoConstraints
         let originalFrame = frame
         let originalSuperview = superview
+        let originalAccessibilityLabel = compactAccessibilityLabel
+        let originalAccessibilityHint = compactAccessibilityHint
+        let wasAccessibilityElement = compactIsAccessibilityElement
 
         targetContainer.addSubview(self)
         translatesAutoresizingMaskIntoConstraints = false
-        let compactConstraints = layout.constraints(for: self, in: targetContainer)
+        let compactLayout = layout.constraints(for: self, in: targetContainer)
+        let compactConstraints = compactLayout.constraints
         NSLayoutConstraint.activate(compactConstraints)
 
         compactPresentation = KSPlayerCompactPresentation(
             originalSuperview: originalSuperview,
+            originalNextSibling: originalNextSibling,
             originalConstraints: originalConstraints,
             originalFrame: originalFrame,
             originalTranslatesAutoresizingMaskIntoConstraints: originalTranslatesAutoresizingMaskIntoConstraints,
             compactConstraints: compactConstraints,
-            wasMaskShow: wasMaskShow
+            compactWidthConstraint: compactLayout.width,
+            compactHeightConstraint: compactLayout.height,
+            layout: layout,
+            wasMaskShow: wasMaskShow,
+            accessibilityLabel: originalAccessibilityLabel,
+            accessibilityHint: originalAccessibilityHint,
+            wasAccessibilityElement: wasAccessibilityElement
         )
+
+        compactIsAccessibilityElement = true
+        compactAccessibilityLabel = NSLocalizedString("Compact video player", comment: "")
+        compactAccessibilityHint = NSLocalizedString("Double-tap to show or hide playback controls.", comment: "")
+        updateInAppCompactLayout()
 
         if layout.automaticallyHidesControls {
             isMaskShow = false
         }
         return true
+    }
+
+    @MainActor
+    func updateInAppCompactLayout() {
+        guard let presentation = compactPresentation, let containerView = superview else {
+            return
+        }
+        let resolvedSize = presentation.layout.resolvedSize(in: containerView)
+        presentation.compactWidthConstraint.constant = resolvedSize.width
+        presentation.compactHeightConstraint.constant = resolvedSize.height
     }
 
     @MainActor
@@ -174,7 +249,7 @@ public extension VideoPlayerView {
 
         NSLayoutConstraint.deactivate(presentation.compactConstraints)
         if let originalSuperview = presentation.originalSuperview {
-            originalSuperview.addSubview(self)
+            restore(to: originalSuperview, before: presentation.originalNextSibling)
         } else {
             removeFromSuperview()
         }
@@ -185,7 +260,83 @@ public extension VideoPlayerView {
             NSLayoutConstraint.activate(presentation.originalConstraints)
         }
         isMaskShow = presentation.wasMaskShow
+        compactIsAccessibilityElement = presentation.wasAccessibilityElement
+        compactAccessibilityLabel = presentation.accessibilityLabel
+        compactAccessibilityHint = presentation.accessibilityHint
         compactPresentation = nil
         return true
+    }
+}
+
+private extension VideoPlayerView {
+    var compactAccessibilityLabel: String? {
+        get {
+            #if canImport(UIKit)
+            accessibilityLabel
+            #else
+            accessibilityLabel()
+            #endif
+        }
+        set {
+            #if canImport(UIKit)
+            accessibilityLabel = newValue
+            #else
+            setAccessibilityLabel(newValue)
+            #endif
+        }
+    }
+
+    var compactAccessibilityHint: String? {
+        get {
+            #if canImport(UIKit)
+            accessibilityHint
+            #else
+            accessibilityHelp()
+            #endif
+        }
+        set {
+            #if canImport(UIKit)
+            accessibilityHint = newValue
+            #else
+            setAccessibilityHelp(newValue)
+            #endif
+        }
+    }
+
+    var compactIsAccessibilityElement: Bool {
+        get {
+            #if canImport(UIKit)
+            isAccessibilityElement
+            #else
+            isAccessibilityElement()
+            #endif
+        }
+        set {
+            #if canImport(UIKit)
+            isAccessibilityElement = newValue
+            #else
+            setAccessibilityElement(newValue)
+            #endif
+        }
+    }
+
+    var nextSibling: UIView? {
+        guard let superview, let index = superview.subviews.firstIndex(of: self) else {
+            return nil
+        }
+        let nextIndex = superview.subviews.index(after: index)
+        return nextIndex < superview.subviews.endIndex ? superview.subviews[nextIndex] : nil
+    }
+
+    func restore(to originalSuperview: UIView, before sibling: UIView?) {
+        guard let sibling, sibling.superview === originalSuperview else {
+            originalSuperview.addSubview(self)
+            return
+        }
+        #if canImport(UIKit)
+        originalSuperview.insertSubview(self, belowSubview: sibling)
+        #else
+        originalSuperview.addSubview(self, positioned: .below, relativeTo: sibling)
+        #endif
     }
 }

@@ -9,45 +9,46 @@ class KSPlayerLayerTest: XCTestCase {
         KSOptions.isAccurateSeek = true
     }
 
-    func testPlayerLayer() {
+    @MainActor
+    func testPlayerLayer() async {
         if let path = Bundle(for: type(of: self)).path(forResource: "h264", ofType: "MP4") {
-            set(path: path)
+            await set(path: path)
         }
 //        if let path = Bundle(for: type(of: self)).path(forResource: "google-help-vr", ofType: "mp4") {
 //            set(path: path)
 //        }
         if let path = Bundle(for: type(of: self)).path(forResource: "mjpeg", ofType: "flac") {
-            set(path: path)
+            await set(path: path)
         }
         if let path = Bundle(for: type(of: self)).path(forResource: "hevc", ofType: "mkv") {
-            set(path: path)
+            await set(path: path)
         }
     }
 
-    func set(path: String) {
+    @MainActor
+    func set(path: String) async {
         let options = KSOptions()
         let playerLayer = KSPlayerLayer(url: URL(fileURLWithPath: path), options: options)
         playerLayer.delegate = self
         XCTAssertEqual(playerLayer.state, .preparing)
-        readyToPlayExpectation = expectation(description: "openVideo")
-        waitForExpectations(timeout: 2) { _ in
-            XCTAssert(playerLayer.player.isReadyToPlay == true)
-            XCTAssertEqual(playerLayer.state, .readyToPlay)
-            playerLayer.play()
-            playerLayer.pause()
-            XCTAssertEqual(playerLayer.state, .paused)
-            let seekExpectation = self.expectation(description: "seek")
-            playerLayer.seek(time: 2, autoPlay: true) { _ in
-                seekExpectation.fulfill()
-            }
-            XCTAssertEqual(playerLayer.state, .buffering)
-            self.waitForExpectations(timeout: 1000) { _ in
-                playerLayer.finish(player: playerLayer.player, error: nil)
-                XCTAssertEqual(playerLayer.state, .playedToTheEnd)
-                playerLayer.stop()
-                XCTAssertEqual(playerLayer.state, .initialized)
-            }
+        let readyExpectation = expectation(description: "openVideo")
+        readyToPlayExpectation = readyExpectation
+        await fulfillment(of: [readyExpectation], timeout: 2)
+        XCTAssert(playerLayer.player.isReadyToPlay == true)
+        XCTAssertEqual(playerLayer.state, .readyToPlay)
+        playerLayer.play()
+        playerLayer.pause()
+        XCTAssertEqual(playerLayer.state, .paused)
+        let seekExpectation = expectation(description: "seek")
+        playerLayer.seek(time: 2, autoPlay: true) { _ in
+            seekExpectation.fulfill()
         }
+        XCTAssertEqual(playerLayer.state, .buffering)
+        await fulfillment(of: [seekExpectation], timeout: 1000)
+        playerLayer.finish(player: playerLayer.player, error: nil)
+        XCTAssertEqual(playerLayer.state, .playedToTheEnd)
+        playerLayer.stop()
+        XCTAssertEqual(playerLayer.state, .initialized)
     }
 }
 

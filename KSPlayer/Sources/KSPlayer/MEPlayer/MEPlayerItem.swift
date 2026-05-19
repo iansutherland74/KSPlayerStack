@@ -169,12 +169,16 @@ public final class MEPlayerItem: @unchecked Sendable {
         if track.isEnabled {
             return false
         }
+        guard let assetTrack = track as? FFmpegAssetTrack else {
+            return false
+        }
+        guard assetTrack.isSelectableForFFmpegPlayback else {
+            KSLog("[audio] unsupported audio track selection skipped: \(assetTrack.description)")
+            return false
+        }
         memorySeekCache.invalidate()
         assetTracks.filter { $0.mediaType == track.mediaType }.forEach {
             $0.isEnabled = track === $0
-        }
-        guard let assetTrack = track as? FFmpegAssetTrack else {
-            return false
         }
         if assetTrack.mediaType == .video {
             findBestAudio(videoTrack: assetTrack)
@@ -235,6 +239,9 @@ extension MEPlayerItem {
 //        }
         setHttpProxy()
         options.prepareFormatContextOptions(for: url)
+        if let bluRaySource {
+            options.prepareFormatContextOptions(for: bluRaySource)
+        }
         var avOptions = options.formatContextOptions.avOptions
         if bluRaySource == nil, let pb = options.process(url: url) {
             // 如果要自定义协议的话，那就用avio_alloc_context，对formatCtx.pointee.pb赋值
@@ -326,6 +333,10 @@ extension MEPlayerItem {
             startRecord(url: outputURL)
         }
         if videoTrack == nil, audioTrack == nil {
+            if error == nil {
+                let unsupportedTrack = assetTracks.first { !$0.isSelectableForFFmpegPlayback }
+                error = NSError(description: unsupportedTrack?.description ?? "No decodable audio or video streams found")
+            }
             state = .failed
         } else {
             state = .opened
@@ -416,15 +427,22 @@ extension MEPlayerItem {
         }
         var videoIndex: Int32 = -1
         if !options.videoDisable {
-            let videos = assetTracks.filter { $0.mediaType == .video }
+            let allVideos = assetTracks.filter { $0.mediaType == .video }
+            let videos = FFmpegAssetTrack.decodableVideoTracks(allVideos)
             let wantedStreamNb: Int32
             if !videos.isEmpty, let index = options.wantedVideo(tracks: videos) {
                 wantedStreamNb = videos[index].trackID
             } else {
                 wantedStreamNb = -1
             }
-            videoIndex = av_find_best_stream(formatCtx, AVMEDIA_TYPE_VIDEO, wantedStreamNb, -1, nil, 0)
-            if let first = videos.first(where: { $0.trackID == videoIndex }) {
+            if !videos.isEmpty {
+                videoIndex = av_find_best_stream(formatCtx, AVMEDIA_TYPE_VIDEO, wantedStreamNb, -1, nil, 0)
+            }
+            let selectedVideo = videos.first {
+                videoIndex >= 0 && $0.trackID == videoIndex
+            } ?? videos.first
+            if let first = selectedVideo {
+                videoIndex = first.trackID
                 first.isEnabled = true
                 let rotation = first.rotation
                 if rotation > 0, options.autoRotate {
@@ -457,6 +475,8 @@ extension MEPlayerItem {
                     let bitRateState = VideoAdaptationState.BitRateState(bitRate: first.bitRate, time: CACurrentMediaTime())
                     videoAdaptation = VideoAdaptationState(bitRates: bitRates.sorted(by: <), duration: duration, fps: first.nominalFrameRate, bitRateStates: [bitRateState])
                 }
+            } else if let unsupportedVideo = allVideos.first(where: { !$0.videoDecodeSupport.isSupported }) {
+                KSLog("[video] unsupported video track skipped: \(unsupportedVideo.description)")
             }
         }
 
@@ -780,11 +800,13 @@ extension MEPlayerItem: MediaPlayback {
     public func shutdown() {
         guard state != .closed else { return }
         state = .closed
+        memorySeekCache.invalidate()
         av_packet_free(&outputPacket)
         stopRecord()
         // 故意循环引用。等结束了。才释放
         let closeOperation = BlockOperation {
             Thread.current.name = (self.operationQueue.name ?? "") + "_close"
+            self.memorySeekCache.invalidate()
             self.allPlayerItemTracks.forEach { $0.shutdown() }
             KSLog("清空formatCtx")
             // 自定义的协议才会av_class为空
@@ -834,14 +856,15 @@ extension MEPlayerItem: MediaPlayback {
     public func seek(time: TimeInterval, completion: @escaping ((Bool) -> Void)) {
         if state == .reading || state == .paused {
             seekTime = time
-            if restoreMemorySeekCache(time: time, completion: completion) {
+            let isShortMemorySeek = abs(currentPlaybackTime - time) <= options.memorySeekCacheDuration
+            if isShortMemorySeek, restoreMemorySeekCache(time: time, completion: completion) {
                 if options.isOfflineSubtitleGenerationEnabled {
                     options.offlineSubtitleGenerator?.reset()
                 }
                 isAudioStalled = audioTrack == nil
                 return
             }
-            if abs(currentPlaybackTime - time) > options.memorySeekCacheDuration {
+            if !isShortMemorySeek {
                 memorySeekCache.invalidate()
             }
             state = .seeking

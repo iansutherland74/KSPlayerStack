@@ -11,7 +11,7 @@ enum AssImageSubtitleRenderPolicy {
         if codecWidth > 0, codecHeight > 0 {
             return CGSize(width: Int(codecWidth), height: Int(codecHeight))
         }
-        if let playRes = playResSize(from: subtitleHeader), playRes.width > 0, playRes.height > 0 {
+        if let playRes = playResSize(from: subtitleHeader), isValidCanvasSize(playRes) {
             return playRes
         }
         return fallback
@@ -39,9 +39,16 @@ enum AssImageSubtitleRenderPolicy {
                 continue
             }
         }
-        guard let width, let height else {
+        guard let width, let height,
+              width.isFinite, height.isFinite,
+              width > 0, height > 0
+        else {
             return nil
         }
         return CGSize(width: width, height: height)
+    }
+
+    private static func isValidCanvasSize(_ size: CGSize) -> Bool {
+        size.width.isFinite && size.height.isFinite && size.width > 0 && size.height > 0
     }
 }

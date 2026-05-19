@@ -16,10 +16,29 @@ import UIKit
 #endif
 
 public enum PictureInPictureSubtitlePolicy: Sendable, Equatable {
-    /// Use PiP-compatible subtitle paths when available. AVPlayer uses native legible media selection; custom sample-buffer PiP keeps overlay subtitles in the main UI only.
+    /// Use PiP-compatible subtitle paths when available.
+    ///
+    /// AVPlayer can show system-rendered legible media selections in Picture in Picture. KSPlayer-owned
+    /// overlay subtitles, including external text/image subtitles, secondary subtitles, and KSMEPlayer/libass
+    /// bitmap subtitles, are not composited into the video frames sent to Apple's PiP window.
     case automatic
     /// Do not expose native PiP subtitle selection. Overlay subtitles continue to render in the inline player only.
     case disabled
+}
+
+enum PictureInPictureSubtitleRenderMode: Equatable {
+    case disabled
+    case nativeLegible
+    case inlineOverlayOnly
+}
+
+enum PictureInPictureSubtitlePolicyResolver {
+    static func renderMode(policy: PictureInPictureSubtitlePolicy, usesNativeLegibleSelection: Bool) -> PictureInPictureSubtitleRenderMode {
+        guard policy != .disabled else {
+            return .disabled
+        }
+        return usesNativeLegibleSelection ? .nativeLegible : .inlineOverlayOnly
+    }
 }
 
 public enum KSLowLatencyLiveProfile: Equatable, Sendable {
@@ -73,6 +92,22 @@ public enum MultichannelAudioPreference: Equatable, Sendable {
     /// Downmix decoded output to stereo.
     case stereo
 }
+
+#if !os(macOS)
+public enum AudioRouteSharingPolicyResolver {
+    public static var platformDefaultPolicy: AVAudioSession.RouteSharingPolicy {
+        #if os(tvOS)
+        .longFormAudio
+        #else
+        .longFormVideo
+        #endif
+    }
+
+    public static func resolvedPolicy(optionPolicy: AVAudioSession.RouteSharingPolicy?, defaultPolicy: AVAudioSession.RouteSharingPolicy?) -> AVAudioSession.RouteSharingPolicy {
+        optionPolicy ?? defaultPolicy ?? platformDefaultPolicy
+    }
+}
+#endif
 
 public enum PanoramaProjectionPolicy {
     public static func detectedProjection(metadata: [String: String]) -> VideoProjection? {
@@ -210,19 +245,27 @@ open class KSOptions {
     public var multichannelAudioPreference = KSOptions.multichannelAudioPreference
     #if !os(macOS)
     /// Overrides the AVAudioSession route sharing policy used for playback.
-    /// Set this to `.longFormAudio` when an app wants audio-only AirPlay routes.
+    /// Set this to `.longFormAudio` when an app wants audio-only AirPlay/Wi-Fi routes.
+    /// Encoded Dolby passthrough, including any system AC-4 support, is only available through Apple's native playback route.
+    /// KSMEPlayer decodes supported audio to PCM before output.
     public var audioRouteSharingPolicy = KSOptions.audioRouteSharingPolicy
     #endif
     // sutile
     public var autoSelectEmbedSubtitle = true
+    /// Allows seeking to refresh selected embedded bitmap subtitle tracks; external SUP/PGS URL subtitles are decoded into overlay image cues when selected.
     public var isSeekImageSubtitle = false
+    /// Renders embedded ASS/SSA subtitle tracks through libass as authored bitmap overlays when the libass module is available.
+    ///
+    /// If disabled, or if libass is not linked for the current platform, ASS/SSA tracks use KSPlayer's text parser fallback.
+    public var isAssSubtitleImageRenderingEnabled = KSOptions.isAssSubtitleImageRenderingEnabled
     /// Controls whether KSPlayer maps Apple's system caption appearance into rendered subtitles.
     public var subtitleCaptionAppearancePolicy = KSOptions.subtitleCaptionAppearancePolicy
     /// Improves subtitle contrast for HDR video while keeping subtitles as UI overlays.
     public var subtitleHDREffectPolicy = KSOptions.subtitleHDREffectPolicy
     /// Feeds decoded FFmpeg audio frames to an offline subtitle generator and exposes it as a subtitle track.
+    /// This routes single-URL playback through `KSMEPlayer`; AVPlayer, separate audio URLs, and wireless-route playback do not expose decoded frames here.
     public var isOfflineSubtitleGenerationEnabled = KSOptions.isOfflineSubtitleGenerationEnabled
-    /// Apps can provide an on-device Speech, Translation, or custom local-model generator without bundling weights in KSPlayer.
+    /// Apps can provide an on-device Speech, Translation, or custom local-model generator without bundling credentials or model weights in KSPlayer.
     public var offlineSubtitleGenerator: (any AudioRecognize)? = KSOptions.offlineSubtitleGenerator
     /// Apps can opt in to online subtitle search by supplying providers configured with their own credentials.
     public var onlineSubtitleProviders: [any OnlineSubtitleProvider] = KSOptions.onlineSubtitleProviders
@@ -277,7 +320,10 @@ open class KSOptions {
     public var isAdaptiveBitrateSwitchingEnabled = KSOptions.isAdaptiveBitrateSwitchingEnabled
     public var adaptiveBitrateSwitchingPolicy = KSOptions.adaptiveBitrateSwitchingPolicy
     public var syncDecodeVideo = false
+    /// Enables hardware-backed video decode when the selected player path and runtime codec support allow it.
+    /// Unsupported codecs or platforms fall back to FFmpeg software decode.
     public var hardwareDecode = KSOptions.hardwareDecode
+    /// Enables KSPlayer's direct asynchronous VideoToolbox decode path for eligible compressed video packets.
     public var asynchronousDecompression = KSOptions.asynchronousDecompression
     public var videoDisable = false
     public var canStartPictureInPictureAutomaticallyFromInline = KSOptions.canStartPictureInPictureAutomaticallyFromInline
@@ -370,10 +416,14 @@ open class KSOptions {
 
     private static func protocolWhitelistEntries(for scheme: String) -> [String] {
         switch scheme {
+        case "rtmp", "rtmps", "rtp", "rtsp":
+            return [scheme, "tcp", "udp"]
         case "nfs":
             return ["nfs", "tcp", "udp"]
         case "smb":
             return ["smb", "tcp"]
+        case "ftp", "sftp":
+            return [scheme, "tcp"]
         case "srt":
             return ["srt", "udp", "tcp"]
         default:
@@ -603,6 +653,9 @@ open class KSOptions {
                 }
             } else if let reason = decision.skipReason {
                 KSLog(level: .debug, "[video] deinterlace skipped: \(reason)")
+            }
+            if !decision.shouldApplyFilter {
+                HighPerformanceVideoPlaybackPolicy.apply(to: self, fps: assetTrack.nominalFrameRate, naturalSize: assetTrack.naturalSize)
             }
             if let lowLatencyLiveProfile,
                let diagnostic = LowLatencyLivePlaybackPolicy.diagnosticMessage(
@@ -902,6 +955,10 @@ public enum VideoUpscalingMode: Equatable, Sendable {
 }
 
 public struct VideoColorAdjustment: Equatable, Sendable {
+    public static let defaultSaturation: Float = 1
+    public static let defaultBrightness: Float = 0
+    public static let defaultContrast: Float = 1
+
     public enum HDRPolicy: Equatable, Sendable {
         /// Keep HDR/Dolby Vision output on the existing system-managed path.
         case preserveHDR
@@ -919,15 +976,20 @@ public struct VideoColorAdjustment: Equatable, Sendable {
     public let contrast: Float
     public let hdrPolicy: HDRPolicy
 
-    public init(saturation: Float = 1, brightness: Float = 0, contrast: Float = 1, hdrPolicy: HDRPolicy = .preserveHDR) {
-        self.saturation = Self.clamp(saturation, to: Self.saturationRange)
-        self.brightness = Self.clamp(brightness, to: Self.brightnessRange)
-        self.contrast = Self.clamp(contrast, to: Self.contrastRange)
+    public init(
+        saturation: Float = Self.defaultSaturation,
+        brightness: Float = Self.defaultBrightness,
+        contrast: Float = Self.defaultContrast,
+        hdrPolicy: HDRPolicy = .preserveHDR
+    ) {
+        self.saturation = Self.clamp(saturation, to: Self.saturationRange, defaultValue: Self.defaultSaturation)
+        self.brightness = Self.clamp(brightness, to: Self.brightnessRange, defaultValue: Self.defaultBrightness)
+        self.contrast = Self.clamp(contrast, to: Self.contrastRange, defaultValue: Self.defaultContrast)
         self.hdrPolicy = hdrPolicy
     }
 
     public var isNeutral: Bool {
-        saturation == 1 && brightness == 0 && contrast == 1
+        saturation == Self.defaultSaturation && brightness == Self.defaultBrightness && contrast == Self.defaultContrast
     }
 
     public func shouldApply(dynamicRange: DynamicRange?) -> Bool {
@@ -937,48 +999,60 @@ public struct VideoColorAdjustment: Equatable, Sendable {
         return hdrPolicy == .allowHDR || dynamicRange?.isHDR != true
     }
 
-    private static func clamp(_ value: Float, to range: ClosedRange<Float>) -> Float {
-        min(max(value, range.lowerBound), range.upperBound)
+    private static func clamp(_ value: Float, to range: ClosedRange<Float>, defaultValue: Float) -> Float {
+        guard value.isFinite else {
+            return defaultValue
+        }
+        return min(max(value, range.lowerBound), range.upperBound)
     }
 }
 
 public enum HighPerformanceVideoPlaybackPolicy {
-    static let highFrameRateThreshold: Float = 90
-    static let eightKPixelThreshold = 7_680 * 4_320
+    public static let highFrameRateThreshold: Float = 90
+    public static let eightKPixelThreshold = 7_680 * 4_320
 
-    static func isHighWorkload(fps: Float, naturalSize: CGSize) -> Bool {
-        fps >= highFrameRateThreshold || pixelCount(naturalSize) >= eightKPixelThreshold
+    public static func isHighWorkload(fps: Float, naturalSize: CGSize) -> Bool {
+        normalizedFPS(fps) >= highFrameRateThreshold || pixelCount(naturalSize) >= eightKPixelThreshold
     }
 
-    static func frameCapacity(fps: Float, naturalSize: CGSize, isLive: Bool) -> UInt8 {
+    public static func frameCapacity(fps: Float, naturalSize: CGSize, isLive: Bool) -> UInt8 {
         guard isHighWorkload(fps: fps, naturalSize: naturalSize) else {
             return isLive ? 4 : 16
         }
         if isLive {
             return 8
         }
-        let highFPSCapacity = Int(ceil(max(fps, 1) / 4))
-        return UInt8(min(32, max(16, highFPSCapacity)))
+        let isEightKWorkload = pixelCount(naturalSize) >= eightKPixelThreshold
+        let normalizedFPS = normalizedFPS(fps)
+        if isEightKWorkload, normalizedFPS < highFrameRateThreshold {
+            return 12
+        }
+        let highFPSCapacity = Int(ceil(normalizedFPS / 4))
+        return UInt8(min(isEightKWorkload ? 16 : 32, max(16, highFPSCapacity)))
     }
 
-    static func displayFrameRateRange(fps: Float) -> (minimum: Float, maximum: Float, preferred: Float) {
-        let preferred = max(1, ceil(fps))
-        if fps >= highFrameRateThreshold {
+    public static func displayFrameRateRange(fps: Float) -> (minimum: Float, maximum: Float, preferred: Float) {
+        let normalizedFPS = normalizedFPS(fps)
+        let preferred = max(1, ceil(normalizedFPS))
+        if normalizedFPS >= highFrameRateThreshold {
             return (minimum: min(60, preferred / 2), maximum: preferred, preferred: preferred)
         }
         return (minimum: preferred, maximum: preferred * 2, preferred: preferred)
     }
 
-    static func shouldApplyUpscaling(mode: VideoUpscalingMode, sourceSize: CGSize, fps: Float, dynamicRange: DynamicRange? = nil) -> Bool {
+    public static func shouldApplyUpscaling(mode: VideoUpscalingMode, sourceSize: CGSize, fps: Float, dynamicRange: DynamicRange? = nil) -> Bool {
         upscalingSkipReason(mode: mode, sourceSize: sourceSize, fps: fps, dynamicRange: dynamicRange) == nil
     }
 
-    static func upscalingSkipReason(mode: VideoUpscalingMode, sourceSize: CGSize, fps: Float, dynamicRange: DynamicRange? = nil) -> String? {
+    public static func upscalingSkipReason(mode: VideoUpscalingMode, sourceSize: CGSize, fps: Float, dynamicRange: DynamicRange? = nil) -> String? {
         guard mode.isEnabled else {
             return "disabled"
         }
         guard mode.requestedScaleFactor > 1 else {
             return "scale factor is 1x"
+        }
+        guard isKnownSourceSize(sourceSize) else {
+            return "unknown source size"
         }
         if dynamicRange?.isHDR == true, mode.hdrPolicy == .preserveHDR {
             return "HDR output is preserved"
@@ -986,16 +1060,45 @@ public enum HighPerformanceVideoPlaybackPolicy {
         if isHighWorkload(fps: fps, naturalSize: sourceSize) {
             return "high workload"
         }
-        guard sourceSize.width > 0, sourceSize.height > 0 else {
-            return "unknown source size"
-        }
         return nil
     }
 
+    public static func apply(to options: KSOptions, fps: Float, naturalSize: CGSize) {
+        guard isHighWorkload(fps: fps, naturalSize: naturalSize) else {
+            return
+        }
+        options.syncDecodeVideo = false
+        if options.hardwareDecode {
+            options.asynchronousDecompression = true
+        }
+    }
+
     private static func pixelCount(_ size: CGSize) -> Int {
-        let width = max(0, Int(size.width.rounded(.up)))
-        let height = max(0, Int(size.height.rounded(.up)))
-        return width * height
+        let width = normalizedDimension(size.width)
+        let height = normalizedDimension(size.height)
+        if width == Int.max || height == Int.max {
+            return Int.max
+        }
+        let (count, overflow) = width.multipliedReportingOverflow(by: height)
+        return overflow ? Int.max : count
+    }
+
+    private static func normalizedDimension(_ value: CGFloat) -> Int {
+        guard value.isFinite else {
+            return value > 0 ? Int.max : 0
+        }
+        return max(0, Int(value.rounded(.up)))
+    }
+
+    private static func normalizedFPS(_ fps: Float) -> Float {
+        guard fps.isFinite, fps > 0 else {
+            return 24
+        }
+        return fps
+    }
+
+    private static func isKnownSourceSize(_ size: CGSize) -> Bool {
+        size.width.isFinite && size.height.isFinite && size.width > 0 && size.height > 0
     }
 }
 
@@ -1125,6 +1228,7 @@ public extension KSOptions {
     nonisolated(unsafe) static var isAutoPlay = true
     /// seek完是否自动播放
     nonisolated(unsafe) static var isSeekedAutoPlay = true
+    /// Process-wide default for hardware-backed video decode when the runtime can create a decoder.
     nonisolated(unsafe) static var hardwareDecode = true
     nonisolated(unsafe) static var isDiskPrecacheEnabled = false
     nonisolated(unsafe) static var diskPrecacheMaxFileSize: Int64 = 1_073_741_824
@@ -1142,6 +1246,7 @@ public extension KSOptions {
     nonisolated(unsafe) static var panoramaMode = PanoramaMode.disabled
     nonisolated(unsafe) static var deinterlaceMode = VideoDeinterlaceMode.automatic
     nonisolated(unsafe) static var subtitleCaptionAppearancePolicy = SubtitleCaptionAppearancePolicy.never
+    nonisolated(unsafe) static var isAssSubtitleImageRenderingEnabled = true
     nonisolated(unsafe) static var subtitleHDREffectPolicy = SubtitleHDREffectPolicy.automatic
     nonisolated(unsafe) static var isOfflineSubtitleGenerationEnabled = false
     nonisolated(unsafe) static var offlineSubtitleGenerator: (any AudioRecognize)?
@@ -1155,6 +1260,7 @@ public extension KSOptions {
     nonisolated(unsafe) static var audioSpatializationPreference = AudioSpatializationPreference.automatic
     nonisolated(unsafe) static var multichannelAudioPreference = MultichannelAudioPreference.automatic
     // 默认不用自研的硬解，因为有些视频的AVPacket的pts顺序是不对的，只有解码后的AVFrame里面的pts是对的。
+    /// Process-wide default for KSPlayer's direct asynchronous VideoToolbox decode path.
     nonisolated(unsafe) static var asynchronousDecompression = false
     nonisolated(unsafe) static var isPipPopViewController = false
     nonisolated(unsafe) static var canStartPictureInPictureAutomaticallyFromInline = true
@@ -1163,6 +1269,7 @@ public extension KSOptions {
     nonisolated(unsafe) static var useSystemHTTPProxy = true
     #if !os(macOS)
     /// Optional process-wide default route sharing policy. Nil keeps KSPlayer's platform defaults.
+    /// Use `.longFormAudio` to expose audio-only AirPlay/Wi-Fi routes for native playback.
     nonisolated(unsafe) static var audioRouteSharingPolicy: AVAudioSession.RouteSharingPolicy?
     #endif
     /// 日志级别
@@ -1183,12 +1290,7 @@ public extension KSOptions {
         if category != .playAndRecord {
             category = .playback
         }
-        #if os(tvOS)
-        let defaultPolicy = AVAudioSession.RouteSharingPolicy.longFormAudio
-        #else
-        let defaultPolicy = AVAudioSession.RouteSharingPolicy.longFormVideo
-        #endif
-        let policy = options?.audioRouteSharingPolicy ?? audioRouteSharingPolicy ?? defaultPolicy
+        let policy = AudioRouteSharingPolicyResolver.resolvedPolicy(optionPolicy: options?.audioRouteSharingPolicy, defaultPolicy: audioRouteSharingPolicy)
         try? AVAudioSession.sharedInstance().setCategory(category, mode: .moviePlayback, policy: policy)
         configureMultichannelContentSupport(options: options, sourceChannelCount: nil, isSpatialRoute: nil)
         try? AVAudioSession.sharedInstance().setActive(true)

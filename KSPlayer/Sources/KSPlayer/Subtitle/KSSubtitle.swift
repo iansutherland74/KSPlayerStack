@@ -222,6 +222,7 @@ public protocol KSSubtitleProtocol {
     func search(for time: TimeInterval) -> [SubtitlePart]
 }
 
+/// Controls how KSPlayer maps Apple's system caption appearance into text subtitle rendering.
 public enum SubtitleCaptionAppearancePolicy: Sendable {
     /// Keep KSPlayer's existing subtitle styling behavior.
     case never
@@ -443,8 +444,12 @@ open class SubtitleModel: ObservableObject {
     nonisolated(unsafe) public static var activeWordTextColor: Color = .yellow
     nonisolated(unsafe) public static var activeWordBackgroundColor: Color = .clear
     nonisolated(unsafe) public static var isWordHighlightingEnabled = true
+    nonisolated(unsafe) public static var textFontName: String?
     public static var textFont: UIFont {
-        textBold ? .boldSystemFont(ofSize: textFontSize) : .systemFont(ofSize: textFontSize)
+        if let textFontName, let font = UIFont(name: textFontName, size: textFontSize) {
+            return font
+        }
+        return textBold ? UIFont.boldSystemFont(ofSize: textFontSize) : UIFont.systemFont(ofSize: textFontSize)
     }
 
     public static var activeWordAttributes: [NSAttributedString.Key: Any] {
@@ -466,6 +471,8 @@ open class SubtitleModel: ObservableObject {
     nonisolated(unsafe) public static var textItalic = false
     nonisolated(unsafe) public static var textPosition = TextPosition()
     nonisolated(unsafe) public static var audioRecognizes = [any AudioRecognize]()
+    nonisolated(unsafe) static var systemCaptionAppearanceRevision = 0
+    nonisolated(unsafe) private static var systemCaptionAppearanceObserver: NSObjectProtocol?
     private var subtitleDataSouces: [SubtitleDataSouce] = KSOptions.subtitleDataSouces
     @Published
     public private(set) var subtitleInfos = [any SubtitleInfo]()
@@ -498,6 +505,7 @@ open class SubtitleModel: ObservableObject {
     private var lastAppliedCaptionAppearancePolicy: SubtitleCaptionAppearancePolicy?
     private var lastAppliedHDREffectPolicy: SubtitleHDREffectPolicy?
     private var lastAppliedVideoDynamicRange: DynamicRange?
+    private var lastAppliedSystemCaptionAppearanceRevision: Int?
     public var url: URL? {
         didSet {
             subtitleInfos.removeAll()
@@ -576,12 +584,13 @@ open class SubtitleModel: ObservableObject {
         let newSecondaryParts = secondary.parts
         let newActiveWordIndexes = Self.isWordHighlightingEnabled ? activeWordIndexes(for: newParts, at: primary.time) : [:]
         let newSecondaryActiveWordIndexes = Self.isWordHighlightingEnabled ? activeWordIndexes(for: newSecondaryParts, at: secondary.time) : [:]
+        let shouldRefreshStyle = hasSubtitleStyleConfigurationChanged && (newParts.containsText || newSecondaryParts.containsText)
         // swiftUI不会判断是否相等。所以需要这边判断下。
         if newParts != parts ||
             newSecondaryParts != secondaryParts ||
             newActiveWordIndexes != activeWordIndexes ||
             newSecondaryActiveWordIndexes != secondaryActiveWordIndexes ||
-            hasSubtitleStyleConfigurationChanged
+            shouldRefreshStyle
         {
             style(parts: newParts)
             style(parts: newSecondaryParts)
@@ -592,6 +601,7 @@ open class SubtitleModel: ObservableObject {
             lastAppliedCaptionAppearancePolicy = captionAppearancePolicy
             lastAppliedHDREffectPolicy = hdrEffectPolicy
             lastAppliedVideoDynamicRange = videoDynamicRange
+            lastAppliedSystemCaptionAppearanceRevision = Self.systemCaptionAppearanceRevision
             parts = newParts
             secondaryParts = newSecondaryParts
             return true
@@ -611,7 +621,7 @@ open class SubtitleModel: ObservableObject {
                 Task { @MainActor in
                     try? await dataSouce.searchSubtitle(query: query, languages: languages)
                     dataSouce.infos.compactMap { $0 as? URLSubtitleInfo }.forEach(configureExternalSubtitleTranslation)
-                    subtitleInfos.append(contentsOf: dataSouce.infos)
+                    dataSouce.infos.forEach(addSubtitle)
                 }
             }
         }
@@ -621,12 +631,12 @@ open class SubtitleModel: ObservableObject {
         if let dataSouce = dataSouce as? FileURLSubtitleDataSouce {
             Task { @MainActor in
                 try? await dataSouce.searchSubtitle(fileURL: url)
-                    dataSouce.infos.compactMap { $0 as? URLSubtitleInfo }.forEach(configureExternalSubtitleTranslation)
-                subtitleInfos.append(contentsOf: dataSouce.infos)
+                dataSouce.infos.compactMap { $0 as? URLSubtitleInfo }.forEach(configureExternalSubtitleTranslation)
+                dataSouce.infos.forEach(addSubtitle)
             }
         } else {
-                dataSouce.infos.compactMap { $0 as? URLSubtitleInfo }.forEach(configureExternalSubtitleTranslation)
-            subtitleInfos.append(contentsOf: dataSouce.infos)
+            dataSouce.infos.compactMap { $0 as? URLSubtitleInfo }.forEach(configureExternalSubtitleTranslation)
+            dataSouce.infos.forEach(addSubtitle)
         }
     }
 
@@ -691,7 +701,14 @@ open class SubtitleModel: ObservableObject {
     private var hasSubtitleStyleConfigurationChanged: Bool {
         lastAppliedCaptionAppearancePolicy != captionAppearancePolicy ||
             lastAppliedHDREffectPolicy != hdrEffectPolicy ||
-            lastAppliedVideoDynamicRange != videoDynamicRange
+            lastAppliedVideoDynamicRange != videoDynamicRange ||
+            (captionAppearancePolicy != .never && lastAppliedSystemCaptionAppearanceRevision != Self.systemCaptionAppearanceRevision)
+    }
+}
+
+private extension Array where Element == SubtitlePart {
+    var containsText: Bool {
+        contains { $0.text != nil }
     }
 }
 
@@ -814,51 +831,93 @@ extension SubtitleModel {
     }
 
     static func updateSystemCaptionAppearance() {
+        observeSystemCaptionAppearanceChanges()
         #if canImport(MediaAccessibility)
         let domain = MACaptionAppearanceDomain.user
         var behavior = MACaptionAppearanceBehavior.useValue
 
-        let foregroundColor = MACaptionAppearanceCopyForegroundColor(domain, &behavior).takeRetainedValue()
-        if shouldUseSystemCaptionValue(behavior: behavior) {
+        if let foregroundColor = retainedValue(MACaptionAppearanceCopyForegroundColor(domain, &behavior)), shouldUseSystemCaptionValue(behavior: behavior) {
             textColor = color(from: foregroundColor, opacity: MACaptionAppearanceGetForegroundOpacity(domain, &behavior))
         }
 
         behavior = .useValue
-        let backgroundColor = MACaptionAppearanceCopyBackgroundColor(domain, &behavior).takeRetainedValue()
-        if shouldUseSystemCaptionValue(behavior: behavior) {
+        if let backgroundColor = retainedValue(MACaptionAppearanceCopyBackgroundColor(domain, &behavior)), shouldUseSystemCaptionValue(behavior: behavior) {
             textBackgroundColor = color(from: backgroundColor, opacity: MACaptionAppearanceGetBackgroundOpacity(domain, &behavior))
         }
 
         behavior = .useValue
-        let windowColor = MACaptionAppearanceCopyWindowColor(domain, &behavior).takeRetainedValue()
-        if shouldUseSystemCaptionValue(behavior: behavior) {
+        if let windowColor = retainedValue(MACaptionAppearanceCopyWindowColor(domain, &behavior)), shouldUseSystemCaptionValue(behavior: behavior) {
             textWindowColor = color(from: windowColor, opacity: MACaptionAppearanceGetWindowOpacity(domain, &behavior))
         }
 
         behavior = .useValue
         let relativeSize = MACaptionAppearanceGetRelativeCharacterSize(domain, &behavior)
-        let descriptor = MACaptionAppearanceCopyFontDescriptorForStyle(domain, &behavior, .default).takeRetainedValue()
         if shouldUseSystemCaptionValue(behavior: behavior) {
-            let fontSize = Size.standard.rawValue * max(relativeSize, 0.1)
-            let font = CTFontCreateWithFontDescriptor(descriptor, fontSize, nil)
+            textFontSize = Size.standard.rawValue * max(relativeSize, 0.1)
+        }
+
+        behavior = .useValue
+        if let descriptor = retainedValue(MACaptionAppearanceCopyFontDescriptorForStyle(domain, &behavior, .default)), shouldUseSystemCaptionValue(behavior: behavior) {
+            let font = CTFontCreateWithFontDescriptor(descriptor, textFontSize, nil)
             let fontName = CTFontCopyPostScriptName(font) as String
-            if let captionFont = UIFont(name: fontName, size: fontSize) {
+            let fontTraits = CTFontGetSymbolicTraits(font)
+            textBold = fontTraits.contains(.traitBold)
+            textItalic = fontTraits.contains(.traitItalic)
+            if isPrivateSystemFontName(fontName) {
+                textFontName = nil
+            } else if let captionFont = UIFont(name: fontName, size: textFontSize) {
+                textFontName = fontName
                 textFontSize = captionFont.pointSize
-                textBold = captionFont.fontDescriptor.symbolicTraits.contains(.traitBold)
-                textItalic = captionFont.fontDescriptor.symbolicTraits.contains(.traitItalic)
-            } else {
-                textFontSize = fontSize
+                textBold = captionFont.fontDescriptor.symbolicTraits.contains(UIFontDescriptor.SymbolicTraits.traitBold)
+                textItalic = captionFont.fontDescriptor.symbolicTraits.contains(UIFontDescriptor.SymbolicTraits.traitItalic)
             }
         }
 
         behavior = .useValue
-        textEdgeStyle = SubtitleTextEdgeStyle(MACaptionAppearanceGetTextEdgeStyle(domain, &behavior))
+        let edgeStyle = MACaptionAppearanceGetTextEdgeStyle(domain, &behavior)
+        if shouldUseSystemCaptionValue(behavior: behavior) {
+            textEdgeStyle = SubtitleTextEdgeStyle(edgeStyle)
+        }
+        #endif
+    }
+
+    #if canImport(MediaAccessibility)
+    private static func retainedValue<T>(_ value: Unmanaged<T>) -> T? {
+        value.takeRetainedValue()
+    }
+
+    private static func retainedValue<T>(_ value: Unmanaged<T>?) -> T? {
+        value?.takeRetainedValue()
+    }
+    #endif
+
+    static func invalidateSystemCaptionAppearance() {
+        updateSystemCaptionAppearance()
+        systemCaptionAppearanceRevision &+= 1
+    }
+
+    private static func observeSystemCaptionAppearanceChanges() {
+        #if canImport(MediaAccessibility)
+        guard systemCaptionAppearanceObserver == nil else {
+            return
+        }
+        systemCaptionAppearanceObserver = NotificationCenter.default.addObserver(
+            forName: Notification.Name(kMACaptionAppearanceSettingsChangedNotification as String),
+            object: nil,
+            queue: .main
+        ) { _ in
+            SubtitleModel.invalidateSystemCaptionAppearance()
+        }
         #endif
     }
 
     #if canImport(MediaAccessibility)
     static func shouldUseSystemCaptionValue(behavior: MACaptionAppearanceBehavior) -> Bool {
         behavior == .useValue || behavior == .useContentIfAvailable
+    }
+
+    static func isPrivateSystemFontName(_ fontName: String) -> Bool {
+        fontName.hasPrefix(".")
     }
     #endif
 
@@ -925,10 +984,13 @@ extension NSMutableAttributedString {
     }
 
     func applySubtitleStyle(_ style: SubtitleResolvedStyle) {
+        removeGeneratedSubtitleStyleAttributes()
         applySubtitleAttribute(.font, value: style.font, overrideExisting: style.overrideContentAttributes)
         applySubtitleAttribute(.foregroundColor, value: style.foregroundColor, overrideExisting: style.overrideContentAttributes)
         if SubtitleModel.alpha(of: style.backgroundColor) > 0 {
             applySubtitleAttribute(.backgroundColor, value: style.backgroundColor, overrideExisting: style.overrideContentAttributes)
+        } else if style.overrideContentAttributes {
+            removeAttribute(.backgroundColor, range: NSRange(location: 0, length: length))
         }
         applySubtitleEdgeStyle(style.edgeStyle, overrideExisting: style.overrideContentAttributes)
     }
@@ -937,13 +999,39 @@ extension NSMutableAttributedString {
         let fullRange = NSRange(location: 0, length: length)
         guard !overrideExisting else {
             addAttribute(key, value: value, range: fullRange)
+            markGeneratedSubtitleAttribute(key, range: fullRange)
             return
         }
         enumerateAttribute(key, in: fullRange) { existingValue, range, _ in
             if existingValue == nil {
                 addAttribute(key, value: value, range: range)
+                markGeneratedSubtitleAttribute(key, range: range)
             }
         }
+    }
+
+    private func removeGeneratedSubtitleStyleAttributes() {
+        let fullRange = NSRange(location: 0, length: length)
+        for (attributeKey, markerKey) in NSAttributedString.Key.generatedSubtitleStyleMarkerKeys {
+            var generatedRanges = [NSRange]()
+            enumerateAttribute(markerKey, in: fullRange, options: []) { marker, range, _ in
+                guard marker != nil else {
+                    return
+                }
+                generatedRanges.append(range)
+            }
+            for range in generatedRanges {
+                removeAttribute(attributeKey, range: range)
+                removeAttribute(markerKey, range: range)
+            }
+        }
+    }
+
+    private func markGeneratedSubtitleAttribute(_ key: NSAttributedString.Key, range: NSRange) {
+        guard let markerKey = NSAttributedString.Key.generatedSubtitleStyleMarkerKeys[key] else {
+            return
+        }
+        addAttribute(markerKey, value: true, range: range)
     }
 
     private func applySubtitleEdgeStyle(_ edgeStyle: SubtitleTextEdgeStyle, overrideExisting: Bool) {
@@ -952,6 +1040,7 @@ extension NSMutableAttributedString {
             if overrideExisting {
                 removeAttribute(.shadow, range: NSRange(location: 0, length: length))
                 removeAttribute(.strokeWidth, range: NSRange(location: 0, length: length))
+                removeAttribute(.strokeColor, range: NSRange(location: 0, length: length))
             }
         case .dropShadow:
             let shadow = NSShadow()
@@ -974,4 +1063,22 @@ extension NSMutableAttributedString {
             applySubtitleAttribute(.shadow, value: shadow, overrideExisting: overrideExisting)
         }
     }
+}
+
+private extension NSAttributedString.Key {
+    static let ksGeneratedSubtitleFont = NSAttributedString.Key("com.kingslay.ksplayer.subtitle.generated.font")
+    static let ksGeneratedSubtitleForegroundColor = NSAttributedString.Key("com.kingslay.ksplayer.subtitle.generated.foregroundColor")
+    static let ksGeneratedSubtitleBackgroundColor = NSAttributedString.Key("com.kingslay.ksplayer.subtitle.generated.backgroundColor")
+    static let ksGeneratedSubtitleShadow = NSAttributedString.Key("com.kingslay.ksplayer.subtitle.generated.shadow")
+    static let ksGeneratedSubtitleStrokeWidth = NSAttributedString.Key("com.kingslay.ksplayer.subtitle.generated.strokeWidth")
+    static let ksGeneratedSubtitleStrokeColor = NSAttributedString.Key("com.kingslay.ksplayer.subtitle.generated.strokeColor")
+
+    static let generatedSubtitleStyleMarkerKeys: [NSAttributedString.Key: NSAttributedString.Key] = [
+        .font: .ksGeneratedSubtitleFont,
+        .foregroundColor: .ksGeneratedSubtitleForegroundColor,
+        .backgroundColor: .ksGeneratedSubtitleBackgroundColor,
+        .shadow: .ksGeneratedSubtitleShadow,
+        .strokeWidth: .ksGeneratedSubtitleStrokeWidth,
+        .strokeColor: .ksGeneratedSubtitleStrokeColor,
+    ]
 }

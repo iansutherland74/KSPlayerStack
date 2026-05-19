@@ -397,7 +397,7 @@ extension AVCodecID {
         case AV_CODEC_ID_EAC3:
             return .enhancedAC3
         case AV_CODEC_ID_AC4:
-            return CMFormatDescription.MediaSubType(rawValue: "ac-4".fourCharCode)
+            return .dolbyAC4
         case AV_CODEC_ID_TRUEHD, AV_CODEC_ID_MLP:
             return CMFormatDescription.MediaSubType(rawValue: "mlpa".fourCharCode)
         case AV_CODEC_ID_GSM_MS:

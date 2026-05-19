@@ -23,7 +23,7 @@ import AppKit
  - playedToTheEnd: played to the End
  - error:          error with playing
  */
-public enum KSPlayerState: CustomStringConvertible {
+public enum KSPlayerState: CustomStringConvertible, Sendable {
     case initialized
     case preparing
     case readyToPlay
@@ -86,10 +86,41 @@ struct DefinitionSwitchPrewarmPolicy {
     }
 }
 
+struct DefinitionSwitchTrackSelection {
+    let mediaType: AVMediaType
+    let trackID: Int32
+    let name: String
+    let languageCode: String?
+
+    init?(track: (any MediaPlayerTrack)?) {
+        guard let track else {
+            return nil
+        }
+        mediaType = track.mediaType
+        trackID = track.trackID
+        name = track.name
+        languageCode = track.languageCode
+    }
+
+    init(mediaType: AVMediaType, trackID: Int32, name: String, languageCode: String?) {
+        self.mediaType = mediaType
+        self.trackID = trackID
+        self.name = name
+        self.languageCode = languageCode
+    }
+
+    func matchingTrack(in player: any MediaPlayerProtocol) -> (any MediaPlayerTrack)? {
+        let tracks = player.tracks(mediaType: mediaType)
+        return tracks.first { $0.trackID == trackID } ?? tracks.first {
+            $0.name == name && $0.languageCode == languageCode
+        }
+    }
+}
+
 private final class DefinitionSwitchPrewarmDelegate: MediaPlayerDelegate {
-    nonisolated(unsafe) var readyToPlayHandler: ((any MediaPlayerProtocol) -> Void)?
-    nonisolated(unsafe) var loadStateHandler: ((any MediaPlayerProtocol) -> Void)?
-    nonisolated(unsafe) var finishHandler: ((any MediaPlayerProtocol, Error?) -> Void)?
+    nonisolated(unsafe) var readyToPlayHandler: (@MainActor (any MediaPlayerProtocol) -> Void)?
+    nonisolated(unsafe) var loadStateHandler: (@MainActor (any MediaPlayerProtocol) -> Void)?
+    nonisolated(unsafe) var finishHandler: (@MainActor (any MediaPlayerProtocol, Error?) -> Void)?
 
     func readyToPlay(player: some MediaPlayerProtocol) {
         readyToPlayHandler?(player)
@@ -112,26 +143,30 @@ private final class DefinitionSwitchPrewarmContext {
     let player: any MediaPlayerProtocol
     let delegate: DefinitionSwitchPrewarmDelegate
     let url: URL
+    let audioURL: URL?
     let options: KSOptions
     let requestedTime: TimeInterval
     let startedAt = CACurrentMediaTime()
     let shouldAutoPlayAfterSwitch: Bool
     let playbackRate: Float
     let playbackVolume: Float
+    let selectedTrackSelections: [DefinitionSwitchTrackSelection]
     var timeoutWorkItem: DispatchWorkItem?
     var didSeek = false
 
-    init(player: any MediaPlayerProtocol, delegate: DefinitionSwitchPrewarmDelegate, url: URL, options: KSOptions, requestedTime: TimeInterval,
-         shouldAutoPlayAfterSwitch: Bool, playbackRate: Float, playbackVolume: Float)
+    init(player: any MediaPlayerProtocol, delegate: DefinitionSwitchPrewarmDelegate, url: URL, audioURL: URL?, options: KSOptions, requestedTime: TimeInterval,
+         shouldAutoPlayAfterSwitch: Bool, playbackRate: Float, playbackVolume: Float, selectedTrackSelections: [DefinitionSwitchTrackSelection])
     {
         self.player = player
         self.delegate = delegate
         self.url = url
+        self.audioURL = audioURL
         self.options = options
         self.requestedTime = requestedTime
         self.shouldAutoPlayAfterSwitch = shouldAutoPlayAfterSwitch
         self.playbackRate = playbackRate
         self.playbackVolume = playbackVolume
+        self.selectedTrackSelections = selectedTrackSelections
     }
 
     func cancel() {
@@ -157,9 +192,9 @@ open class KSPlayerLayer: NSObject, @unchecked Sendable {
 
                 if isPipActive {
                     // 一定要async才不会pip之后就暂停播放
-                    runOnMainThread { [weak self] in
+                    Task { @MainActor [weak self] in
                         guard let self else { return }
-                        pipController.start(view: self)
+                        self.player.pipController?.start(view: self)
                     }
                 } else {
                     pipController.stop(restoreUserInterface: true)
@@ -207,7 +242,7 @@ open class KSPlayerLayer: NSObject, @unchecked Sendable {
             if isCommittingPrewarmedPlayer {
                 return
             }
-            let firstPlayerType = preferredPlayerType(for: url, respectsWirelessRoute: true)
+            let firstPlayerType = preferredPlayerType(for: url, audioURL: audioURL, respectsWirelessRoute: true)
             if type(of: player) == firstPlayerType {
                 if url == oldValue {
                     if isAutoPlay {
@@ -215,24 +250,26 @@ open class KSPlayerLayer: NSObject, @unchecked Sendable {
                     }
                 } else {
                     stop()
-                    player.replace(url: url, options: options)
+                    player.replace(url: url, audioURL: audioURL, options: options)
                     if isAutoPlay {
                         prepareToPlay()
                     }
                 }
             } else {
                 stop()
-                player = firstPlayerType.init(url: url, options: options)
+                player = firstPlayerType.init(url: url, audioURL: audioURL, options: options)
             }
         }
     }
+
+    public private(set) var audioURL: URL?
 
     /// 播发器的几种状态
 
     public private(set) var state = KSPlayerState.initialized {
         willSet {
             if state != newValue {
-                runOnMainThread { [weak self] in
+                Task { @MainActor [weak self] in
                     guard let self else { return }
                     KSLog("playerStateDidChange - \(newValue)")
                     self.delegate?.player(layer: self, state: newValue)
@@ -265,12 +302,13 @@ open class KSPlayerLayer: NSObject, @unchecked Sendable {
     private var startTime: TimeInterval = 0
     private var prewarmContext: DefinitionSwitchPrewarmContext?
     private var isCommittingPrewarmedPlayer = false
-    public init(url: URL, isAutoPlay: Bool = KSOptions.isAutoPlay, options: KSOptions, delegate: KSPlayerLayerDelegate? = nil) {
+    public init(url: URL, audioURL: URL? = nil, isAutoPlay: Bool = KSOptions.isAutoPlay, options: KSOptions, delegate: KSPlayerLayerDelegate? = nil) {
         self.url = url
+        self.audioURL = audioURL
         self.options = options
         self.delegate = delegate
-        let firstPlayerType = Self.preferredPlayerType(for: url, options: options)
-        player = firstPlayerType.init(url: url, options: options)
+        let firstPlayerType = Self.preferredPlayerType(for: url, audioURL: audioURL, options: options)
+        player = firstPlayerType.init(url: url, audioURL: audioURL, options: options)
         self.isAutoPlay = isAutoPlay
         super.init()
         player.playbackRate = options.startPlayRate
@@ -303,6 +341,7 @@ open class KSPlayerLayer: NSObject, @unchecked Sendable {
     }
 
     deinit {
+        cancelPrewarmContext()
         if #available(iOS 15.0, tvOS 15.0, macOS 12.0, *) {
             player.pipController?.contentSource = nil
         }
@@ -324,31 +363,66 @@ open class KSPlayerLayer: NSObject, @unchecked Sendable {
     }
 
     public func set(url: URL, options: KSOptions) {
+        set(url: url, audioURL: nil, options: options)
+    }
+
+    public func set(url: URL, audioURL: URL?, options: KSOptions) {
+        let previousUpscaling = self.options.videoUpscaling
+        let previousColorAdjustment = self.options.videoColorAdjustment
+        let previousAudioURL = self.audioURL
         self.options = options
         runOnMainThread {
-            self.url = url
+            self.cancelPrewarmContext()
+            if self.url == url {
+                if previousUpscaling != options.videoUpscaling ||
+                    previousColorAdjustment != options.videoColorAdjustment ||
+                    previousAudioURL != audioURL
+                {
+                    self.audioURL = audioURL
+                    self.replaceCurrentURLForOptionChange(url: url, audioURL: audioURL, options: options)
+                } else if self.isAutoPlay {
+                    self.play()
+                }
+            } else {
+                self.audioURL = audioURL
+                self.url = url
+            }
         }
     }
 
     public func set(url: URL, options: KSOptions, preservingCurrentTime targetTime: TimeInterval) {
+        set(url: url, audioURL: nil, options: options, preservingCurrentTime: targetTime)
+    }
+
+    public func set(url: URL, audioURL: URL?, options: KSOptions, preservingCurrentTime targetTime: TimeInterval) {
         runOnMainThread {
-            self.replaceURLPreservingPlaybackTime(url: url, options: options, targetTime: targetTime)
+            self.replaceURLPreservingPlaybackTime(url: url, audioURL: audioURL, options: options, targetTime: targetTime)
         }
     }
 
     public func set(urls: [URL], options: KSOptions) {
+        let previousUpscaling = self.options.videoUpscaling
+        let previousColorAdjustment = self.options.videoColorAdjustment
         self.options = options
+        self.audioURL = nil
         self.urls.removeAll()
         self.urls.append(contentsOf: urls)
         if let first = urls.first {
             runOnMainThread {
-                self.url = first
+                self.cancelPrewarmContext()
+                let didRendererOptionsChange = previousUpscaling != options.videoUpscaling ||
+                    previousColorAdjustment != options.videoColorAdjustment
+                if self.url == first, didRendererOptionsChange {
+                    self.replaceCurrentURLForOptionChange(url: first, audioURL: nil, options: options)
+                } else {
+                    self.url = first
+                }
             }
         }
     }
 
     open func play() {
-        runOnMainThread {
+        Task { @MainActor in
             UIApplication.shared.isIdleTimerDisabled = true
         }
         isAutoPlay = true
@@ -381,13 +455,14 @@ open class KSPlayerLayer: NSObject, @unchecked Sendable {
         timer.fireDate = Date.distantFuture
         state = .paused
         MPNowPlayingInfoCenter.default().playbackState = .paused
-        runOnMainThread {
+        Task { @MainActor in
             UIApplication.shared.isIdleTimerDisabled = false
         }
     }
 
     public func stop() {
         KSLog("stop Player")
+        cancelPrewarmContext()
         state = .initialized
         player.shutdown()
         bufferedCount = 0
@@ -395,19 +470,18 @@ open class KSPlayerLayer: NSObject, @unchecked Sendable {
         player.playbackRate = 1
         player.playbackVolume = 1
         MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
-        runOnMainThread {
+        Task { @MainActor in
             UIApplication.shared.isIdleTimerDisabled = false
         }
     }
 
     open func seek(time: TimeInterval, autoPlay: Bool, completion: @escaping ((Bool) -> Void)) {
-        if time.isInfinite || time.isNaN {
+        guard let resolvedTime = MediaSeekTimeResolver.resolvedSeekTime(time, seekableTimeRange: player.seekableTimeRange) else {
             completion(false)
             return
         }
         if player.isReadyToPlay, player.seekable {
-            let seekTime = player.seekableTimeRange?.clamped(time) ?? time
-            player.seek(time: seekTime) { [weak self] finished in
+            player.seek(time: resolvedTime) { [weak self] finished in
                 guard let self else { return }
                 if finished, autoPlay {
                     self.play()
@@ -416,7 +490,7 @@ open class KSPlayerLayer: NSObject, @unchecked Sendable {
             }
         } else {
             isAutoPlay = autoPlay
-            shouldSeekTo = time
+            shouldSeekTo = resolvedTime
             completion(false)
         }
     }
@@ -428,18 +502,15 @@ extension KSPlayerLayer: MediaPlayerDelegate {
     public func readyToPlay(player: some MediaPlayerProtocol) {
         state = .readyToPlay
         #if os(macOS)
-        runOnMainThread { [weak self] in
-            guard let self else { return }
-            if let window = player.view?.window {
-                window.isMovableByWindowBackground = true
-                if options.automaticWindowResize {
-                    let naturalSize = player.naturalSize
-                    if naturalSize.width > 0, naturalSize.height > 0 {
-                        window.aspectRatio = naturalSize
-                        var frame = window.frame
-                        frame.size.height = frame.width * naturalSize.height / naturalSize.width
-                        window.setFrame(frame, display: true)
-                    }
+        if let window = player.view?.window {
+            window.isMovableByWindowBackground = true
+            if options.automaticWindowResize {
+                let naturalSize = player.naturalSize
+                if naturalSize.width > 0, naturalSize.height > 0 {
+                    window.aspectRatio = naturalSize
+                    var frame = window.frame
+                    frame.size.height = frame.width * naturalSize.height / naturalSize.width
+                    window.setFrame(frame, display: true)
                 }
             }
         }
@@ -452,16 +523,13 @@ extension KSPlayerLayer: MediaPlayerDelegate {
         }
         #endif
         updateNowPlayingInfo()
-        if isAutoPlay {
-            if shouldSeekTo > 0 {
-                seek(time: shouldSeekTo, autoPlay: true) { [weak self] _ in
-                    guard let self else { return }
-                    self.shouldSeekTo = 0
-                }
-
-            } else {
-                play()
+        if shouldSeekTo > 0 {
+            seek(time: shouldSeekTo, autoPlay: isAutoPlay) { [weak self] _ in
+                guard let self else { return }
+                self.shouldSeekTo = 0
             }
+        } else if isAutoPlay {
+            play()
         }
     }
 
@@ -469,7 +537,7 @@ extension KSPlayerLayer: MediaPlayerDelegate {
         guard player.playbackState != .seeking else { return }
         if player.loadState == .playable, startTime > 0 {
             let diff = CACurrentMediaTime() - startTime
-            runOnMainThread { [weak self] in
+            Task { @MainActor [weak self] in
                 guard let self else { return }
                 delegate?.player(layer: self, bufferedCount: bufferedCount, consumeTime: diff)
             }
@@ -516,15 +584,15 @@ extension KSPlayerLayer: MediaPlayerDelegate {
 
     public func finish(player: some MediaPlayerProtocol, error: Error?) {
         if let error {
-            if type(of: player) != KSOptions.secondPlayerType, let secondPlayerType = KSOptions.secondPlayerType {
-                self.player = secondPlayerType.init(url: url, options: options)
+            if audioURL == nil, type(of: player) != KSOptions.secondPlayerType, let secondPlayerType = KSOptions.secondPlayerType {
+                self.player = secondPlayerType.init(url: url, audioURL: nil, options: options)
                 return
             }
             state = .error
             KSLog(error as CustomStringConvertible)
         } else {
             let duration = player.duration
-            runOnMainThread { [weak self] in
+            Task { @MainActor [weak self] in
                 guard let self else { return }
                 delegate?.player(layer: self, currentTime: duration, totalTime: duration)
             }
@@ -532,7 +600,7 @@ extension KSPlayerLayer: MediaPlayerDelegate {
         }
         timer.fireDate = Date.distantFuture
         bufferedCount = 1
-        runOnMainThread { [weak self] in
+        Task { @MainActor [weak self] in
             guard let self else { return }
             delegate?.player(layer: self, finish: error)
         }
@@ -558,29 +626,63 @@ extension KSPlayerLayer: AVPictureInPictureControllerDelegate {
 // MARK: - private functions
 
 extension KSPlayerLayer {
-    static func preferredPlayerType(for url: URL, options: KSOptions) -> MediaPlayerProtocol.Type {
-        if options.display != .plane || url.isBluRayInputCandidate || url.isFFmpegOnlyInputScheme || !options.videoColorAdjustment.isNeutral || options.videoUpscaling.isEnabled {
+    static func preferredPlayerType(for url: URL, audioURL: URL? = nil, options: KSOptions) -> MediaPlayerProtocol.Type {
+        if audioURL != nil {
+            return KSAVPlayer.self
+        }
+        if options.display != .plane ||
+            url.isBluRayInputCandidate ||
+            url.isFFmpegOnlyInputScheme ||
+            url.isMatroskaContainer ||
+            !options.videoColorAdjustment.isNeutral ||
+            options.videoUpscaling.isEnabled ||
+            (options.isOfflineSubtitleGenerationEnabled && options.offlineSubtitleGenerator != nil)
+        {
             return KSMEPlayer.self
         }
         return KSOptions.firstPlayerType
     }
 
-    private func preferredPlayerType(for url: URL, respectsWirelessRoute: Bool) -> MediaPlayerProtocol.Type {
-        if respectsWirelessRoute, isWirelessRouteActive, !url.isBluRayInputCandidate, !url.isFFmpegOnlyInputScheme {
+    private func preferredPlayerType(for url: URL, audioURL: URL?, respectsWirelessRoute: Bool) -> MediaPlayerProtocol.Type {
+        if respectsWirelessRoute, isWirelessRouteActive, !url.isBluRayInputCandidate, !url.isFFmpegOnlyInputScheme, !url.isMatroskaContainer {
             // airplay的话，默认使用KSAVPlayer
             if options.videoUpscaling.isEnabled {
                 options.videoUpscalingState = .unavailable(reason: "video upscaling is unavailable during wireless route playback")
             }
+            if !options.videoColorAdjustment.isNeutral {
+                KSLog("[video] color adjustment is unavailable during wireless route playback")
+            }
+            if options.isOfflineSubtitleGenerationEnabled {
+                KSLog("offline subtitle generation is unavailable during wireless route playback")
+            }
             return KSAVPlayer.self
         }
-        return Self.preferredPlayerType(for: url, options: options)
+        return Self.preferredPlayerType(for: url, audioURL: audioURL, options: options)
+    }
+
+    private func replaceCurrentURLForOptionChange(url: URL, audioURL: URL?, options: KSOptions) {
+        let playerType = preferredPlayerType(for: url, audioURL: audioURL, respectsWirelessRoute: true)
+        stop()
+        if type(of: player) == playerType {
+            player.replace(url: url, audioURL: audioURL, options: options)
+            if isAutoPlay {
+                prepareToPlay()
+            }
+        } else {
+            player = playerType.init(url: url, audioURL: audioURL, options: options)
+        }
+    }
+
+    private func cancelPrewarmContext() {
+        prewarmContext?.cancel()
+        prewarmContext = nil
     }
 
     #if canImport(UIKit) && !os(xrOS)
     @MainActor
     private func switchToWirelessRoutePlayerIfNeeded() {
         guard type(of: player) != KSAVPlayer.self,
-              preferredPlayerType(for: url, respectsWirelessRoute: true) == KSAVPlayer.self
+              preferredPlayerType(for: url, audioURL: audioURL, respectsWirelessRoute: true) == KSAVPlayer.self
         else {
             return
         }
@@ -589,7 +691,7 @@ extension KSPlayerLayer {
         if targetTime.isFinite, targetTime > 0 {
             shouldSeekTo = targetTime
         }
-        let nextPlayer = KSAVPlayer(url: url, options: options)
+        let nextPlayer = KSAVPlayer(url: url, audioURL: audioURL, options: options)
         nextPlayer.playbackRate = oldPlayer.playbackRate
         nextPlayer.playbackVolume = oldPlayer.playbackVolume
         nextPlayer.isMuted = oldPlayer.isMuted
@@ -608,7 +710,8 @@ extension KSPlayerLayer {
         player.prepareToPlay()
     }
 
-    private func replaceURLPreservingPlaybackTime(url: URL, options: KSOptions, targetTime: TimeInterval) {
+    private func replaceURLPreservingPlaybackTime(url: URL, audioURL: URL?, options: KSOptions, targetTime: TimeInterval) {
+        let shouldAutoPlayAfterSwitch = isAutoPlay
         let canPrewarm = DefinitionSwitchPrewarmPolicy.canPrewarm(
             isEnabled: options.isDefinitionSwitchPrewarmingEnabled,
             duration: player.duration,
@@ -618,24 +721,25 @@ extension KSPlayerLayer {
             isPictureInPictureActive: isPipActive
         )
         guard canPrewarm else {
-            replaceURLWithoutPrewarm(url: url, options: options, targetTime: targetTime)
+            replaceURLWithoutPrewarm(url: url, audioURL: audioURL, options: options, targetTime: targetTime, autoPlayAfterSwitch: shouldAutoPlayAfterSwitch)
             return
         }
 
-        prewarmContext?.cancel()
-        let playerType = preferredPlayerType(for: url, respectsWirelessRoute: true)
-        let nextPlayer: any MediaPlayerProtocol = playerType.init(url: url, options: options)
+        cancelPrewarmContext()
+        let playerType = preferredPlayerType(for: url, audioURL: audioURL, respectsWirelessRoute: true)
+        let nextPlayer: any MediaPlayerProtocol = playerType.init(url: url, audioURL: audioURL, options: options)
         let prewarmDelegate = DefinitionSwitchPrewarmDelegate()
-        let shouldAutoPlayAfterSwitch = isAutoPlay || (targetTime > 0 && options.isSeekedAutoPlay)
         let context = DefinitionSwitchPrewarmContext(
             player: nextPlayer,
             delegate: prewarmDelegate,
             url: url,
+            audioURL: audioURL,
             options: options,
             requestedTime: targetTime,
             shouldAutoPlayAfterSwitch: shouldAutoPlayAfterSwitch,
             playbackRate: player.playbackRate,
-            playbackVolume: player.playbackVolume
+            playbackVolume: player.playbackVolume,
+            selectedTrackSelections: currentTrackSelections()
         )
         prewarmContext = context
 
@@ -648,27 +752,31 @@ extension KSPlayerLayer {
         nextPlayer.delegate = prewarmDelegate
 
         prewarmDelegate.readyToPlayHandler = { [weak self, weak context] prewarmedPlayer in
-            guard let self, let context, self.prewarmContext === context, ObjectIdentifier(prewarmedPlayer) == ObjectIdentifier(context.player) else { return }
+            guard let self, let context, self.isCurrentPrewarmPlayer(prewarmedPlayer, context: context) else { return }
             self.seekPrewarmedPlayer(context: context)
         }
         prewarmDelegate.loadStateHandler = { [weak self, weak context] prewarmedPlayer in
-            guard let self, let context, self.prewarmContext === context, ObjectIdentifier(prewarmedPlayer) == ObjectIdentifier(context.player) else { return }
+            guard let self, let context, self.isCurrentPrewarmPlayer(prewarmedPlayer, context: context) else { return }
             self.commitPrewarmedPlayerIfReady(context: context)
         }
         prewarmDelegate.finishHandler = { [weak self, weak context] prewarmedPlayer, error in
-            guard let self, let context, self.prewarmContext === context, ObjectIdentifier(prewarmedPlayer) == ObjectIdentifier(context.player), error != nil else { return }
-            self.replaceURLWithoutPrewarm(url: context.url, options: context.options, targetTime: context.requestedTime)
+            guard let self, let context, self.isCurrentPrewarmPlayer(prewarmedPlayer, context: context), error != nil else { return }
+            self.fallbackToNormalDefinitionSwitch(context: context)
         }
 
         let timeout = max(options.definitionSwitchPrewarmTimeout, 0.1)
         let timeoutWorkItem = DispatchWorkItem { [weak self, weak context] in
             guard let self, let context, self.prewarmContext === context else { return }
-            self.replaceURLWithoutPrewarm(url: context.url, options: context.options, targetTime: context.requestedTime)
+            self.fallbackToNormalDefinitionSwitch(context: context)
         }
         context.timeoutWorkItem = timeoutWorkItem
         DispatchQueue.main.asyncAfter(deadline: .now() + timeout, execute: timeoutWorkItem)
 
         nextPlayer.prepareToPlay()
+    }
+
+    private func isCurrentPrewarmPlayer(_ player: any MediaPlayerProtocol, context: DefinitionSwitchPrewarmContext) -> Bool {
+        prewarmContext === context && ObjectIdentifier(player) == ObjectIdentifier(context.player)
     }
 
     private func seekPrewarmedPlayer(context: DefinitionSwitchPrewarmContext) {
@@ -682,7 +790,7 @@ extension KSPlayerLayer {
         context.player.seek(time: seekTime) { [weak self, weak context] finished in
             guard let self, let context, self.prewarmContext === context else { return }
             guard finished else {
-                self.replaceURLWithoutPrewarm(url: context.url, options: context.options, targetTime: context.requestedTime)
+                self.fallbackToNormalDefinitionSwitch(context: context)
                 return
             }
             context.didSeek = true
@@ -700,7 +808,9 @@ extension KSPlayerLayer {
         let oldPlayer = player
         isCommittingPrewarmedPlayer = true
         self.options = context.options
+        self.audioURL = context.audioURL
         self.url = context.url
+        applyTrackSelections(context.selectedTrackSelections, to: context.player)
         self.player = context.player
         isCommittingPrewarmedPlayer = false
         oldPlayer.shutdown()
@@ -726,13 +836,54 @@ extension KSPlayerLayer {
         updateNowPlayingInfo()
     }
 
-    private func replaceURLWithoutPrewarm(url: URL, options: KSOptions, targetTime: TimeInterval) {
-        prewarmContext?.cancel()
-        prewarmContext = nil
+    private func fallbackToNormalDefinitionSwitch(context: DefinitionSwitchPrewarmContext) {
+        let fallbackTime = player.currentPlaybackTime.isFinite ? player.currentPlaybackTime : context.requestedTime
+        replaceURLWithoutPrewarm(url: context.url, audioURL: context.audioURL, options: context.options, targetTime: fallbackTime, autoPlayAfterSwitch: context.shouldAutoPlayAfterSwitch)
+    }
+
+    private func replaceURLWithoutPrewarm(url: URL, audioURL: URL?, options: KSOptions, targetTime: TimeInterval, autoPlayAfterSwitch: Bool? = nil) {
+        let shouldAutoPlayAfterSwitch = autoPlayAfterSwitch ?? isAutoPlay
+        let playbackRate = player.playbackRate
+        let playbackVolume = player.playbackVolume
+        let isMuted = player.isMuted
+        let allowsExternalPlayback = player.allowsExternalPlayback
+        let usesExternalPlaybackWhileExternalScreenIsActive = player.usesExternalPlaybackWhileExternalScreenIsActive
+        let contentMode = player.contentMode
+        cancelPrewarmContext()
         self.options = options
-        self.url = url
+        self.audioURL = audioURL
+        isAutoPlay = shouldAutoPlayAfterSwitch
+        if self.url == url {
+            replaceCurrentURLForOptionChange(url: url, audioURL: audioURL, options: options)
+        } else {
+            self.url = url
+        }
+        player.playbackRate = playbackRate
+        player.playbackVolume = playbackVolume
+        player.isMuted = isMuted
+        player.allowsExternalPlayback = allowsExternalPlayback
+        player.usesExternalPlaybackWhileExternalScreenIsActive = usesExternalPlaybackWhileExternalScreenIsActive
+        player.contentMode = contentMode
+        if !shouldAutoPlayAfterSwitch, !player.isReadyToPlay {
+            prepareToPlay()
+        }
         if targetTime > 0 {
-            seek(time: targetTime, autoPlay: options.isSeekedAutoPlay) { _ in }
+            seek(time: targetTime, autoPlay: shouldAutoPlayAfterSwitch) { _ in }
+        }
+    }
+
+    private func currentTrackSelections() -> [DefinitionSwitchTrackSelection] {
+        [.audio, .video, .subtitle].compactMap { mediaType in
+            DefinitionSwitchTrackSelection(track: player.tracks(mediaType: mediaType).first { $0.isEnabled })
+        }
+    }
+
+    private func applyTrackSelections(_ selections: [DefinitionSwitchTrackSelection], to player: any MediaPlayerProtocol) {
+        for selection in selections {
+            guard let track = selection.matchingTrack(in: player) else {
+                continue
+            }
+            player.select(track: track)
         }
     }
 

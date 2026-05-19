@@ -82,12 +82,13 @@ final class ProgressPreviewView: UIView {
         timeLabel.text = timeText
         imageView.image = image
         imageView.isHidden = image == nil
-        placeholderLabel.text = isLoading ? NSLocalizedString("Loading preview", comment: "") : NSLocalizedString("Preview unavailable", comment: "")
+        let placeholderText = isLoading ? NSLocalizedString("Loading preview", comment: "") : NSLocalizedString("Preview unavailable", comment: "")
+        placeholderLabel.text = placeholderText
         placeholderLabel.isHidden = image != nil
         #if canImport(UIKit)
-        accessibilityLabel = image == nil ? "\(timeText), \(placeholderLabel.text ?? "")" : timeText
+        accessibilityLabel = image == nil ? "\(timeText), \(placeholderText)" : timeText
         #else
-        setAccessibilityLabel(image == nil ? "\(timeText), \(placeholderLabel.text ?? "")" : timeText)
+        setAccessibilityLabel(image == nil ? "\(timeText), \(placeholderText)" : timeText)
         #endif
     }
 

@@ -154,6 +154,7 @@ open class VideoPlayerView: PlayerView {
     override public var playerLayer: KSPlayerLayer? {
         didSet {
             oldValue?.player.view?.removeFromSuperview()
+            bindPictureInPictureState()
             if let view = playerLayer?.player.view {
                 #if canImport(UIKit)
                 insertSubview(view, belowSubview: contentOverlayView)
@@ -174,11 +175,27 @@ open class VideoPlayerView: PlayerView {
     override public init(frame: CGRect) {
         super.init(frame: frame)
         setupUIComponents()
-        cancellable = playerLayer?.$isPipActive.assign(to: \.isSelected, on: toolBar.pipButton)
         toolBar.onFocusUpdate = { [weak self] _ in
             self?.autoFadeOutViewWithAnimation()
         }
     }
+
+    #if canImport(UIKit)
+    override open func layoutSubviews() {
+        super.layoutSubviews()
+        updateInAppCompactLayout()
+    }
+
+    override open func safeAreaInsetsDidChange() {
+        super.safeAreaInsetsDidChange()
+        updateInAppCompactLayout()
+    }
+    #else
+    override open func layout() {
+        super.layout()
+        updateInAppCompactLayout()
+    }
+    #endif
 
     // MARK: - Action Response
 
@@ -187,6 +204,9 @@ open class VideoPlayerView: PlayerView {
         super.onButtonPressed(type: type, button: button)
         if type == .pictureInPicture {
             if #available(tvOS 14.0, *) {
+                if playerLayer?.isPipActive != true, isInAppCompactMode {
+                    exitInAppCompactMode()
+                }
                 playerLayer?.isPipActive.toggle()
             }
         }
@@ -303,6 +323,25 @@ open class VideoPlayerView: PlayerView {
         updateAdaptiveBitrateSwitching(layer: layer)
     }
 
+    private func bindPictureInPictureState() {
+        cancellable = playerLayer?.$isPipActive.sink { [weak self] isActive in
+            guard let self else { return }
+            self.toolBar.pipButton.isSelected = isActive
+            self.updateSubtitleOverlayForPictureInPicture(isActive: isActive)
+        }
+        updateSubtitleOverlayForPictureInPicture(isActive: playerLayer?.isPipActive == true)
+    }
+
+    private func updateSubtitleOverlayForPictureInPicture(isActive: Bool) {
+        guard isActive else {
+            renderSubtitle(parts: srtControl.parts, time: srtControl.currentSubtitleTime, backView: subtitleBackView, label: subtitleLabel, positionConstraints: subtitleBackViewPositionConstraints)
+            renderSubtitle(parts: srtControl.secondaryParts, time: srtControl.currentSecondarySubtitleTime, backView: secondarySubtitleBackView, label: secondarySubtitleLabel, positionConstraints: secondarySubtitleBackViewPositionConstraints)
+            return
+        }
+        clearSubtitleOverlay(backView: subtitleBackView, label: subtitleLabel, positionConstraints: subtitleBackViewPositionConstraints)
+        clearSubtitleOverlay(backView: secondarySubtitleBackView, label: secondarySubtitleLabel, positionConstraints: secondarySubtitleBackViewPositionConstraints)
+    }
+
     override open func player(layer: KSPlayerLayer, state: KSPlayerState) {
         super.player(layer: layer, state: state)
         updateAdaptiveBitrateSwitching(layer: layer)
@@ -411,9 +450,9 @@ open class VideoPlayerView: PlayerView {
             KSLog("[abr] switched definition to \(asset.definition)")
         }
         if let playerLayer {
-            playerLayer.set(url: asset.url, options: asset.options, preservingCurrentTime: shouldSeekTo)
+            playerLayer.set(url: asset.url, audioURL: asset.audioURL, options: asset.options, preservingCurrentTime: shouldSeekTo)
         } else {
-            super.set(url: asset.url, options: asset.options)
+            super.set(url: asset.url, audioURL: asset.audioURL, options: asset.options)
             if shouldSeekTo > 0 {
                 seek(time: shouldSeekTo) { _ in }
             }
@@ -429,7 +468,7 @@ open class VideoPlayerView: PlayerView {
         updateSrt()
         if isSetUrl {
             let asset = resource.definitions[currentDefinition]
-            super.set(url: asset.url, options: asset.options)
+            super.set(url: asset.url, audioURL: asset.audioURL, options: asset.options)
         }
         self.resource = resource
     }
@@ -653,15 +692,7 @@ extension VideoPlayerView {
                 self.playerLayer?.player.playbackRate = value
             }
         }
-        toolBar.srtButton.setMenu(title: NSLocalizedString("subtitle", comment: ""), current: srtControl.selectedSubtitleInfo, list: srtControl.subtitleInfos, addDisabled: true) { value in
-            value.displayName
-        } completition: { [weak self] value in
-            guard let self else { return }
-            self.srtControl.selectedSubtitleInfo = value
-            if let track = value as? MediaPlayerTrack {
-                self.playerLayer?.player.select(track: track)
-            }
-        }
+        configureSubtitleMenu()
         #if os(iOS)
         toolBar.definitionButton.showsMenuAsPrimaryAction = true
         toolBar.videoSwitchButton.showsMenuAsPrimaryAction = true
@@ -670,6 +701,65 @@ extension VideoPlayerView {
         toolBar.srtButton.showsMenuAsPrimaryAction = true
         #endif
         #endif
+    }
+
+    @available(iOS 14.0, tvOS 15.0, *)
+    private func configureSubtitleMenu() {
+        let subtitleInfos = srtControl.subtitleInfos
+        guard !subtitleInfos.isEmpty else {
+            toolBar.srtButton.menu = nil
+            return
+        }
+        var actions = [UIAction]()
+        actions.append(subtitleAction(
+            title: NSLocalizedString("Main subtitles: Off", comment: ""),
+            isSelected: srtControl.selectedSubtitleInfo == nil
+        ) { [weak self] in
+            self?.selectSubtitle(nil, isSecondary: false)
+        })
+        actions.append(subtitleAction(
+            title: NSLocalizedString("Secondary subtitles: Off", comment: ""),
+            isSelected: srtControl.selectedSecondarySubtitleInfo == nil
+        ) { [weak self] in
+            self?.selectSubtitle(nil, isSecondary: true)
+        })
+        for info in subtitleInfos {
+            actions.append(subtitleAction(
+                title: String(format: NSLocalizedString("Main subtitles: %@", comment: ""), info.displayName),
+                isSelected: srtControl.selectedSubtitleInfo?.subtitleID == info.subtitleID
+            ) { [weak self] in
+                self?.selectSubtitle(info, isSecondary: false)
+            })
+            actions.append(subtitleAction(
+                title: String(format: NSLocalizedString("Secondary subtitles: %@", comment: ""), info.displayName),
+                isSelected: srtControl.selectedSecondarySubtitleInfo?.subtitleID == info.subtitleID
+            ) { [weak self] in
+                self?.selectSubtitle(info, isSecondary: true)
+            })
+        }
+        toolBar.srtButton.menu = UIMenu(title: NSLocalizedString("subtitle", comment: ""), children: actions)
+    }
+
+    @available(iOS 14.0, tvOS 15.0, *)
+    private func subtitleAction(title: String, isSelected: Bool, handler: @escaping () -> Void) -> UIAction {
+        let action = UIAction(title: title) { _ in
+            handler()
+        }
+        action.state = isSelected ? .on : .off
+        return action
+    }
+
+    @available(iOS 14.0, tvOS 15.0, *)
+    private func selectSubtitle(_ info: (any SubtitleInfo)?, isSecondary: Bool) {
+        if isSecondary {
+            srtControl.selectedSecondarySubtitleInfo = info
+        } else {
+            srtControl.selectedSubtitleInfo = info
+        }
+        if let track = info as? MediaPlayerTrack {
+            playerLayer?.player.select(track: track)
+        }
+        configureSubtitleMenu()
     }
 }
 
@@ -1000,11 +1090,15 @@ extension VideoPlayerView {
             subtitleBackView.bottomAnchor.constraint(equalTo: safeBottomAnchor, constant: -5),
             subtitleBackView.centerXAnchor.constraint(equalTo: centerXAnchor),
             subtitleBackView.widthAnchor.constraint(lessThanOrEqualTo: widthAnchor, constant: -10),
+            subtitleBackView.leadingAnchor.constraint(greaterThanOrEqualTo: safeLeadingAnchor, constant: 5),
+            subtitleBackView.trailingAnchor.constraint(lessThanOrEqualTo: safeTrailingAnchor, constant: -5),
         ]
         secondarySubtitleBackViewPositionConstraints = [
             secondarySubtitleBackView.topAnchor.constraint(equalTo: safeTopAnchor, constant: 5),
             secondarySubtitleBackView.centerXAnchor.constraint(equalTo: centerXAnchor),
             secondarySubtitleBackView.widthAnchor.constraint(lessThanOrEqualTo: widthAnchor, constant: -10),
+            secondarySubtitleBackView.leadingAnchor.constraint(greaterThanOrEqualTo: safeLeadingAnchor, constant: 5),
+            secondarySubtitleBackView.trailingAnchor.constraint(lessThanOrEqualTo: safeTrailingAnchor, constant: -5),
         ]
         NSLayoutConstraint.activate([
             secondarySubtitleLabel.leadingAnchor.constraint(equalTo: secondarySubtitleBackView.leadingAnchor, constant: 10),
@@ -1036,6 +1130,10 @@ extension VideoPlayerView {
     }
 
     private func renderSubtitle(parts: [SubtitlePart], time: TimeInterval, backView: UIImageView, label: UILabel, positionConstraints: [NSLayoutConstraint]) {
+        guard playerLayer?.isPipActive != true else {
+            clearSubtitleOverlay(backView: backView, label: label, positionConstraints: positionConstraints)
+            return
+        }
         if let part = parts.first {
             if let image = part.image {
                 backView.image = image
@@ -1056,6 +1154,13 @@ extension VideoPlayerView {
             label.attributedText = nil
             backView.isHidden = true
         }
+    }
+
+    private func clearSubtitleOverlay(backView: UIImageView, label: UILabel, positionConstraints: [NSLayoutConstraint]) {
+        NSLayoutConstraint.activate(positionConstraints)
+        backView.image = nil
+        label.attributedText = nil
+        backView.isHidden = true
     }
 
     /**

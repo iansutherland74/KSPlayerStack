@@ -22,7 +22,7 @@ public class KSMEPlayer: NSObject, @unchecked Sendable {
     public private(set) var videoOutput: (VideoOutput & UIView)? {
         didSet {
             oldValue?.invalidate()
-            runOnMainThread {
+            Task { @MainActor in
                 oldValue?.removeFromSuperview()
             }
         }
@@ -30,7 +30,7 @@ public class KSMEPlayer: NSObject, @unchecked Sendable {
 
     public private(set) var bufferingProgress = 0 {
         willSet {
-            runOnMainThread { [weak self] in
+            Task { @MainActor [weak self] in
                 guard let self else { return }
                 delegate?.changeBuffering(player: self, progress: newValue)
             }
@@ -105,7 +105,7 @@ public class KSMEPlayer: NSObject, @unchecked Sendable {
             if playbackState != oldValue {
                 playOrPause()
                 if playbackState == .finished {
-                    runOnMainThread { [weak self] in
+                    Task { @MainActor [weak self] in
                         guard let self else { return }
                         delegate?.finish(player: self, error: nil)
                     }
@@ -116,7 +116,6 @@ public class KSMEPlayer: NSObject, @unchecked Sendable {
 
     public required init(url: URL, options: KSOptions) {
         KSOptions.setAudioSession(options: options)
-        options.videoUpscalingState = .inactive
         audioOutput = KSOptions.audioPlayerType.init()
         playerItem = MEPlayerItem(url: url, options: options)
         if options.videoDisable {
@@ -152,7 +151,7 @@ public class KSMEPlayer: NSObject, @unchecked Sendable {
 
 private extension KSMEPlayer {
     func playOrPause() {
-        runOnMainThread { [weak self] in
+        Task { @MainActor [weak self] in
             guard let self else { return }
             let isPaused = !(self.playbackState == .playing && self.loadState == .playable)
             if isPaused {
@@ -202,7 +201,7 @@ extension KSMEPlayer: MEPlayerDelegate {
         let audioDescriptor = tracks(mediaType: .audio).first { $0.isEnabled }.flatMap {
             $0 as? FFmpegAssetTrack
         }?.audioDescriptor
-        runOnMainThread { [weak self] in
+        Task { @MainActor [weak self] in
             guard let self else { return }
             if let audioDescriptor {
                 audioDescriptor.updateAudioFormat(options: options)
@@ -217,14 +216,14 @@ extension KSMEPlayer: MEPlayerDelegate {
     }
 
     func sourceDidFailed(error: NSError?) {
-        runOnMainThread { [weak self] in
+        Task { @MainActor [weak self] in
             guard let self else { return }
             self.delegate?.finish(player: self, error: error)
         }
     }
 
     func sourceDidFinished() {
-        runOnMainThread { [weak self] in
+        Task { @MainActor [weak self] in
             guard let self else { return }
             if self.options.isLoopPlay {
                 self.loopCount += 1
@@ -328,7 +327,6 @@ extension KSMEPlayer: @preconcurrency MediaPlayerProtocol {
         KSLog("replaceUrl \(self)")
         KSOptions.setAudioSession(options: options)
         shutdown()
-        options.videoUpscalingState = .inactive
         playerItem.delegate = nil
         playerItem = MEPlayerItem(url: url, options: options)
         if options.videoDisable {
@@ -367,7 +365,10 @@ extension KSMEPlayer: @preconcurrency MediaPlayerProtocol {
     }
 
     public func seek(time: TimeInterval, completion: @escaping ((Bool) -> Void)) {
-        let time = max(time, 0)
+        guard let time = MediaSeekTimeResolver.resolvedSeekTime(time, seekableTimeRange: seekableTimeRange) else {
+            completion(false)
+            return
+        }
         playbackState = .seeking
         runOnMainThread { [weak self] in
             self?.bufferingProgress = 0
@@ -418,11 +419,13 @@ extension KSMEPlayer: @preconcurrency MediaPlayerProtocol {
 
     public func shutdown() {
         KSLog("shutdown \(self)")
-        options.videoUpscalingState = .inactive
         playbackState = .stopped
         loadState = .idle
         isReadyToPlay = false
         loopCount = 0
+        if options.isOfflineSubtitleGenerationEnabled {
+            options.offlineSubtitleGenerator?.reset()
+        }
         playerItem.shutdown()
         options.prepareTime = 0
         options.dnsStartTime = 0

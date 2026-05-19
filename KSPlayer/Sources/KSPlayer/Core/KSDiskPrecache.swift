@@ -9,6 +9,7 @@ public enum KSDiskPrecache {
     private static let queue = DispatchQueue(label: "KSPlayer.KSDiskPrecache")
     nonisolated(unsafe) private static var activeDownloads = Set<String>()
     nonisolated(unsafe) private static var activeDownloadTasks = [String: URLSessionTask]()
+    nonisolated(unsafe) private static var pendingCancelledDownloads = Set<String>()
 
     public static func playbackURL(for url: URL, options: KSOptions) -> URL {
         guard options.isDiskPrecacheEnabled else {
@@ -91,33 +92,39 @@ public enum KSDiskPrecache {
         return fileURL
     }
 
+    /// Returns the total bytes occupied by completed disk precache files.
     public static func cacheSize(options: KSOptions) -> Int64 {
         cacheSize(directory: cacheDirectoryURL(options: options))
     }
 
+    /// Applies the configured maximum cache size by removing least-recently-used completed files.
     public static func trimCache(options: KSOptions) {
         trimCache(directory: cacheDirectoryURL(options: options), maxSize: options.diskPrecacheMaxCacheSize)
     }
 
+    /// Cancels in-flight precache downloads and removes the configured disk precache directory.
     public static func clearCache(options: KSOptions) {
         cancelAllPrecache()
         try? FileManager.default.removeItem(at: cacheDirectoryURL(options: options))
     }
 
+    /// Cancels the in-flight precache download for a URL, if one exists.
     public static func cancelPrecache(for url: URL) {
         let key = cacheKey(for: url)
         let task = queue.sync {
-            activeDownloadTasks[key]
+            if activeDownloads.contains(key) {
+                pendingCancelledDownloads.insert(key)
+            }
+            return activeDownloadTasks[key]
         }
         task?.cancel()
     }
 
+    /// Cancels all in-flight disk precache downloads.
     public static func cancelAllPrecache() {
         let tasks = queue.sync {
-            let tasks = Array(activeDownloadTasks.values)
-            activeDownloads.removeAll()
-            activeDownloadTasks.removeAll()
-            return tasks
+            pendingCancelledDownloads.formUnion(activeDownloads)
+            return Array(activeDownloadTasks.values)
         }
         tasks.forEach { $0.cancel() }
     }
@@ -159,16 +166,21 @@ public enum KSDiskPrecache {
                 return false
             }
             activeDownloads.insert(key)
+            pendingCancelledDownloads.remove(key)
             return true
         }
     }
 
     private static func markDownloadTask(_ task: URLSessionTask, key: String) {
-        queue.sync {
+        let shouldCancel = queue.sync {
             guard activeDownloads.contains(key) else {
-                return
+                return true
             }
             activeDownloadTasks[key] = task
+            return pendingCancelledDownloads.contains(key)
+        }
+        if shouldCancel {
+            task.cancel()
         }
     }
 
@@ -176,6 +188,7 @@ public enum KSDiskPrecache {
         queue.sync {
             _ = activeDownloads.remove(key)
             activeDownloadTasks[key] = nil
+            pendingCancelledDownloads.remove(key)
         }
     }
 
@@ -228,10 +241,11 @@ public enum KSDiskPrecache {
         guard let files = try? fileManager.contentsOfDirectory(
             at: directory,
             includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey, .isRegularFileKey],
-            options: [.skipsHiddenFiles]
+            options: []
         ) else {
             return
         }
+        removeTemporaryFiles(in: files, fileManager: fileManager)
         var entries = files.compactMap { url -> (url: URL, size: Int64, date: Date)? in
             guard url.pathExtension != temporaryExtension,
                   let values = try? url.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey, .isRegularFileKey]),
@@ -257,7 +271,7 @@ public enum KSDiskPrecache {
         guard let files = try? FileManager.default.contentsOfDirectory(
             at: directory,
             includingPropertiesForKeys: [.fileSizeKey, .isRegularFileKey],
-            options: [.skipsHiddenFiles]
+            options: []
         ) else {
             return 0
         }
@@ -268,6 +282,12 @@ public enum KSDiskPrecache {
                 return total
             }
             return total + size
+        }
+    }
+
+    private static func removeTemporaryFiles(in files: [URL], fileManager: FileManager) {
+        for url in files where url.pathExtension == temporaryExtension {
+            try? fileManager.removeItem(at: url)
         }
     }
 

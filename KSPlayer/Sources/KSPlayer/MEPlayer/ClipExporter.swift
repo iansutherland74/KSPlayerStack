@@ -1,4 +1,5 @@
 import AVFoundation
+import CoreMedia
 import FFmpegKit
 import Foundation
 import Libavcodec
@@ -8,6 +9,8 @@ public enum KSPlayerClipExportError: Error, Equatable, LocalizedError {
     case invalidTimeRange
     case unsupportedNonSeekableSource
     case noWritableDestination
+    case destinationExists(URL)
+    case sourceAndDestinationMatch(URL)
     case noExportableStreams
     case ffmpegFailure(String)
 
@@ -19,6 +22,10 @@ public enum KSPlayerClipExportError: Error, Equatable, LocalizedError {
             return "Clip export requires a finite, seekable media range."
         case .noWritableDestination:
             return "Clip export destination is not writable."
+        case let .destinationExists(url):
+            return "Clip export destination already exists: \(url.path)."
+        case let .sourceAndDestinationMatch(url):
+            return "Clip export source and destination must be different files: \(url.path)."
         case .noExportableStreams:
             return "No audio, video, or subtitle streams can be copied to the destination container."
         case let .ffmpegFailure(message):
@@ -27,31 +34,53 @@ public enum KSPlayerClipExportError: Error, Equatable, LocalizedError {
     }
 }
 
+public enum KSPlayerClipExportPhase: Equatable, Sendable {
+    case validating
+    case exporting
+    case finished
+}
+
+public struct KSPlayerClipExportProgress: Equatable, Sendable {
+    public let phase: KSPlayerClipExportPhase
+    public let fractionCompleted: Double?
+
+    public init(phase: KSPlayerClipExportPhase, fractionCompleted: Double? = nil) {
+        self.phase = phase
+        self.fractionCompleted = fractionCompleted
+    }
+}
+
 public struct KSPlayerClipExportRequest: Equatable, Sendable {
     public let start: TimeInterval
     public let end: TimeInterval
     public let destination: URL
+    public let overwriteExisting: Bool
 
     public var duration: TimeInterval {
         end - start
     }
 
-    public init(start: TimeInterval, end: TimeInterval, destination: URL) throws {
-        guard start.isFinite, end.isFinite, end > start else {
+    public init(start: TimeInterval, end: TimeInterval, destination: URL, overwriteExisting: Bool = false) throws {
+        guard start.isFinite, end.isFinite else {
             throw KSPlayerClipExportError.invalidTimeRange
         }
-        self.start = max(start, 0)
+        let clampedStart = max(start, 0)
+        guard end > clampedStart else {
+            throw KSPlayerClipExportError.invalidTimeRange
+        }
+        self.start = clampedStart
         self.end = end
         self.destination = destination
+        self.overwriteExisting = overwriteExisting
     }
 
-    static func validated(start: TimeInterval, end: TimeInterval, destination: URL, availableRange: MediaPlaybackTimeRange?) throws -> Self {
+    static func validated(start: TimeInterval, end: TimeInterval, destination: URL, overwriteExisting: Bool = false, availableRange: MediaPlaybackTimeRange?) throws -> Self {
         guard let availableRange else {
             throw KSPlayerClipExportError.unsupportedNonSeekableSource
         }
         let clampedStart = availableRange.clamped(start)
         let clampedEnd = availableRange.clamped(end)
-        return try Self(start: clampedStart, end: clampedEnd, destination: destination)
+        return try Self(start: clampedStart, end: clampedEnd, destination: destination, overwriteExisting: overwriteExisting)
     }
 }
 
@@ -60,10 +89,21 @@ struct KSPlayerClipDestination {
         let directory = directory
             ?? FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
             ?? FileManager.default.temporaryDirectory
-        let basename = sourceURL.deletingPathExtension().lastPathComponent.isEmpty ? "clip" : sourceURL.deletingPathExtension().lastPathComponent
+        let basename = safeBaseName(for: sourceURL)
         let startText = timeComponent(start)
         let endText = timeComponent(end)
         return directory.appendingPathComponent("\(basename)-\(startText)-\(endText)").appendingPathExtension(fileExtension)
+    }
+
+    private static func safeBaseName(for sourceURL: URL) -> String {
+        let candidate = sourceURL.deletingPathExtension().lastPathComponent.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !candidate.isEmpty else {
+            return "clip"
+        }
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-_ "))
+        let scalars = candidate.unicodeScalars.map { allowed.contains($0) ? Character($0) : "-" }
+        let name = String(scalars).trimmingCharacters(in: CharacterSet(charactersIn: "-_ "))
+        return name.isEmpty ? "clip" : name
     }
 
     private static func timeComponent(_ time: TimeInterval) -> String {
@@ -79,54 +119,95 @@ private struct KSPlayerFFmpegClipExportOptions: @unchecked Sendable {
 }
 
 public final class KSPlayerClipExporter: @unchecked Sendable {
+    public typealias ProgressHandler = @Sendable (KSPlayerClipExportProgress) -> Void
+
     public init() {}
 
-    public func export(sourceURL: URL, start: TimeInterval, end: TimeInterval, destination: URL, options: KSOptions = KSOptions(), availableRange: MediaPlaybackTimeRange? = nil) async throws -> URL {
+    /// Exports a finite, seekable clip by stream-copying supported tracks into `destination`.
+    ///
+    /// Local files, direct FFmpeg-readable remote URLs, FFmpeg-only schemes configured in `KSOptions`,
+    /// Blu-ray file inputs, and custom `KSOptions.process(url:)` IO are prepared with the same URL
+    /// handling used by `KSMEPlayer`. Live/non-seekable inputs are rejected unless callers provide a
+    /// finite seekable range.
+    @discardableResult
+    public func export(
+        sourceURL: URL,
+        start: TimeInterval,
+        end: TimeInterval,
+        destination: URL,
+        overwriteExisting: Bool = false,
+        options: KSOptions = KSOptions(),
+        availableRange: MediaPlaybackTimeRange? = nil,
+        progress: ProgressHandler? = nil
+    ) async throws -> URL {
+        progress?(KSPlayerClipExportProgress(phase: .validating, fractionCompleted: 0))
         let playbackURL = KSDiskPrecache.playbackURL(for: sourceURL, options: options)
-        let request = try KSPlayerClipExportRequest.validated(
-            start: start,
-            end: end,
-            destination: destination,
-            availableRange: availableRange ?? MediaPlaybackTimeRange(start: 0, duration: end)
-        )
+        let request: KSPlayerClipExportRequest
+        if let availableRange {
+            request = try KSPlayerClipExportRequest.validated(start: start, end: end, destination: destination, overwriteExisting: overwriteExisting, availableRange: availableRange)
+        } else {
+            request = try KSPlayerClipExportRequest(start: start, end: end, destination: destination, overwriteExisting: overwriteExisting)
+        }
+        try KSPlayerClipPathPolicy.validate(sourceURL: playbackURL, request: request)
+        let clipSource = KSPlayerClipSource(sourceURL: playbackURL, options: options)
         let exportOptions = KSPlayerFFmpegClipExportOptions(formatContextOptions: options.formatContextOptions)
 
-        return try await Task.detached(priority: .utility) {
-            try Self.remux(sourceURL: playbackURL, request: request, options: exportOptions)
+        let outputURL = try await Task.detached(priority: .utility) {
+            try Self.remux(source: clipSource, request: request, options: exportOptions, progress: progress)
         }.value
+        progress?(KSPlayerClipExportProgress(phase: .finished, fractionCompleted: 1))
+        return outputURL
     }
 
-    private static func remux(sourceURL: URL, request: KSPlayerClipExportRequest, options: KSPlayerFFmpegClipExportOptions) throws -> URL {
+    private static func remux(source: KSPlayerClipSource, request: KSPlayerClipExportRequest, options: KSPlayerFFmpegClipExportOptions, progress: ProgressHandler?) throws -> URL {
         let fileManager = FileManager.default
         let destinationDirectory = request.destination.deletingLastPathComponent()
+        let temporaryDestination = destinationDirectory
+            .appendingPathComponent(".\(request.destination.deletingPathExtension().lastPathComponent).\(UUID().uuidString)")
+            .appendingPathExtension(request.destination.pathExtension.isEmpty ? "mp4" : request.destination.pathExtension)
         do {
             try fileManager.createDirectory(at: destinationDirectory, withIntermediateDirectories: true)
-            if fileManager.fileExists(atPath: request.destination.path) {
-                try fileManager.removeItem(at: request.destination)
+            if fileManager.fileExists(atPath: temporaryDestination.path) {
+                try fileManager.removeItem(at: temporaryDestination)
             }
         } catch {
             throw KSPlayerClipExportError.noWritableDestination
         }
 
-        let sourceAccess = sourceURL.isFileURL ? KSSecurityScopedURLAccess(url: sourceURL) : nil
-        let destinationAccess = request.destination.isFileURL ? KSSecurityScopedURLAccess(url: destinationDirectory) : nil
+        let sourceAccess = KSSecurityScopedURLAccess(urls: source.securityScopedURLs)
+        let destinationAccess = KSSecurityScopedURLAccess(url: destinationDirectory)
         defer {
-            sourceAccess?.stop()
-            destinationAccess?.stop()
+            sourceAccess.stop()
+            destinationAccess.stop()
+            try? fileManager.removeItem(at: temporaryDestination)
         }
 
         var inputContext = avformat_alloc_context()
         defer {
+            if let inputContext, inputContext.pointee.flags & AVFMT_FLAG_CUSTOM_IO != 0,
+               let pb = inputContext.pointee.pb,
+               let opaque = pb.pointee.opaque
+            {
+                let customIO = Unmanaged<AbstractAVIOContext>.fromOpaque(opaque).takeRetainedValue()
+                customIO.close()
+                pb.pointee.opaque = nil
+            }
             avformat_close_input(&inputContext)
         }
         guard inputContext != nil else {
             throw NSError(errorCode: .formatCreate)
         }
+        inputContext?.pointee.interrupt_callback.callback = { _ in
+            Task.isCancelled ? 1 : 0
+        }
+        if let customIO = source.customIO {
+            inputContext?.pointee.pb = customIO.getContext()
+            inputContext?.pointee.flags |= AVFMT_FLAG_CUSTOM_IO
+        }
 
         setHttpProxy()
         var inputOptions = options.formatContextOptions.avOptions
-        let source = sourceURL.isFileURL ? sourceURL.path : sourceURL.absoluteString
-        var result = avformat_open_input(&inputContext, source, nil, &inputOptions)
+        var result = avformat_open_input(&inputContext, source.ffmpegURLString, nil, &inputOptions)
         av_dict_free(&inputOptions)
         guard result == 0, let inputContext else {
             throw NSError(errorCode: .formatOpenInput, avErrorCode: result)
@@ -141,9 +222,14 @@ public final class KSPlayerClipExporter: @unchecked Sendable {
         guard inputDuration > 0, request.start < inputDuration else {
             throw KSPlayerClipExportError.unsupportedNonSeekableSource
         }
+        let effectiveEnd = min(request.end, inputDuration)
+        guard effectiveEnd > request.start else {
+            throw KSPlayerClipExportError.invalidTimeRange
+        }
+        let effectiveDuration = effectiveEnd - request.start
 
         var outputContext: UnsafeMutablePointer<AVFormatContext>?
-        let destination = request.destination.isFileURL ? request.destination.path : request.destination.absoluteString
+        let destination = temporaryDestination.path
         result = avformat_alloc_output_context2(&outputContext, nil, nil, destination)
         guard result >= 0, let outputContext else {
             throw NSError(errorCode: .formatOutputCreate, avErrorCode: result)
@@ -174,7 +260,7 @@ public final class KSPlayerClipExporter: @unchecked Sendable {
 
         let formatStartTime = inputContext.pointee.start_time == swift_AV_NOPTS_VALUE ? 0 : inputContext.pointee.start_time
         let startTimestamp = formatStartTime + Int64(request.start * TimeInterval(AV_TIME_BASE))
-        let endTimestamp = formatStartTime + Int64(request.end * TimeInterval(AV_TIME_BASE))
+        let endTimestamp = formatStartTime + Int64(effectiveEnd * TimeInterval(AV_TIME_BASE))
         result = avformat_seek_file(inputContext, -1, Int64.min, startTimestamp, endTimestamp, AVSEEK_FLAG_BACKWARD)
         guard result >= 0 else {
             throw KSPlayerClipExportError.unsupportedNonSeekableSource
@@ -210,6 +296,8 @@ public final class KSPlayerClipExporter: @unchecked Sendable {
                 if packetTime > endTimestamp {
                     break
                 }
+                let seconds = Double(packetTime - startTimestamp) / Double(AV_TIME_BASE)
+                progress?(KSPlayerClipExportProgress(phase: .exporting, fractionCompleted: KSPlayerClipProgressPolicy.clampedFraction(completed: seconds, duration: effectiveDuration)))
             }
 
             let inputTimeBase = inputStream.pointee.time_base
@@ -230,10 +318,24 @@ public final class KSPlayerClipExporter: @unchecked Sendable {
                 throw KSPlayerClipExportError.ffmpegFailure(String(avErrorCode: result))
             }
         }
+        try Task.checkCancellation()
 
         result = av_write_trailer(outputContext)
         guard result >= 0 else {
             throw KSPlayerClipExportError.ffmpegFailure(String(avErrorCode: result))
+        }
+        do {
+            if fileManager.fileExists(atPath: request.destination.path) {
+                guard request.overwriteExisting else {
+                    throw KSPlayerClipExportError.destinationExists(request.destination)
+                }
+                try fileManager.removeItem(at: request.destination)
+            }
+            try fileManager.moveItem(at: temporaryDestination, to: request.destination)
+        } catch let error as KSPlayerClipExportError {
+            throw error
+        } catch {
+            throw KSPlayerClipExportError.noWritableDestination
         }
         return request.destination
     }
@@ -241,6 +343,9 @@ public final class KSPlayerClipExporter: @unchecked Sendable {
     private static func makeOutputStreams(inputContext: UnsafeMutablePointer<AVFormatContext>, outputContext: UnsafeMutablePointer<AVFormatContext>) throws -> [Int: Int] {
         var streamMapping = [Int: Int]()
         let formatName = outputContext.pointee.oformat.pointee.name.flatMap { String(cString: $0).lowercased() } ?? ""
+        let isQuickTimeContainer = formatName.split(separator: ",").contains { name in
+            name == "mp4" || name == "mov"
+        }
         for inputIndex in 0 ..< Int(inputContext.pointee.nb_streams) {
             guard let inputStream = inputContext.pointee.streams[inputIndex] else {
                 continue
@@ -249,7 +354,7 @@ public final class KSPlayerClipExporter: @unchecked Sendable {
             guard codecType == AVMEDIA_TYPE_VIDEO || codecType == AVMEDIA_TYPE_AUDIO || codecType == AVMEDIA_TYPE_SUBTITLE else {
                 continue
             }
-            if codecType == AVMEDIA_TYPE_SUBTITLE, (formatName == "mp4" || formatName == "mov"),
+            if codecType == AVMEDIA_TYPE_SUBTITLE, isQuickTimeContainer,
                inputStream.pointee.codecpar.pointee.codec_id != AV_CODEC_ID_MOV_TEXT
             {
                 continue
@@ -261,7 +366,11 @@ public final class KSPlayerClipExporter: @unchecked Sendable {
             guard result >= 0 else {
                 throw KSPlayerClipExportError.ffmpegFailure(String(avErrorCode: result))
             }
-            outputStream.pointee.codecpar.pointee.codec_tag = 0
+            if inputStream.pointee.codecpar.pointee.codec_id == AV_CODEC_ID_HEVC, isQuickTimeContainer {
+                outputStream.pointee.codecpar.pointee.codec_tag = CMFormatDescription.MediaSubType.hevc.rawValue.bigEndian
+            } else {
+                outputStream.pointee.codecpar.pointee.codec_tag = 0
+            }
             outputStream.pointee.time_base = inputStream.pointee.time_base
             streamMapping[inputIndex] = Int(outputStream.pointee.index)
         }
@@ -269,20 +378,91 @@ public final class KSPlayerClipExporter: @unchecked Sendable {
     }
 }
 
+private struct KSPlayerClipSource: @unchecked Sendable {
+    let ffmpegURLString: String
+    let securityScopedURLs: [URL]
+    let customIO: AbstractAVIOContext?
+
+    init(sourceURL: URL, options: KSOptions) {
+        let bluRaySource = KSBluRayURLResolver.source(for: sourceURL)
+        options.prepareFormatContextOptions(for: sourceURL)
+        if let bluRaySource {
+            options.prepareFormatContextOptions(for: bluRaySource)
+            ffmpegURLString = bluRaySource.ffmpegURLString
+            securityScopedURLs = bluRaySource.url == sourceURL ? [sourceURL] : [sourceURL, bluRaySource.url]
+            customIO = nil
+        } else {
+            ffmpegURLString = sourceURL.isFileURL ? sourceURL.path : sourceURL.absoluteString
+            securityScopedURLs = sourceURL.isFileURL ? [sourceURL] : []
+            customIO = options.process(url: sourceURL)
+        }
+    }
+}
+
+enum KSPlayerClipPathPolicy {
+    static func validate(sourceURL: URL, request: KSPlayerClipExportRequest, fileManager: FileManager = .default) throws {
+        guard request.destination.isFileURL,
+              !request.destination.path.isEmpty,
+              !request.destination.lastPathComponent.isEmpty
+        else {
+            throw KSPlayerClipExportError.noWritableDestination
+        }
+
+        let destination = request.destination.standardizedFileURL
+        if sourceURL.isFileURL, sourceURL.standardizedFileURL == destination {
+            throw KSPlayerClipExportError.sourceAndDestinationMatch(request.destination)
+        }
+
+        var isDirectory = ObjCBool(false)
+        if fileManager.fileExists(atPath: destination.path, isDirectory: &isDirectory) {
+            if isDirectory.boolValue {
+                throw KSPlayerClipExportError.noWritableDestination
+            }
+            if !request.overwriteExisting {
+                throw KSPlayerClipExportError.destinationExists(request.destination)
+            }
+        }
+    }
+}
+
+enum KSPlayerClipProgressPolicy {
+    static func clampedFraction(completed: TimeInterval, duration: TimeInterval) -> Double? {
+        guard completed.isFinite, duration.isFinite, duration > 0 else {
+            return nil
+        }
+        return min(max(completed / duration, 0), 1)
+    }
+}
+
 public extension KSPlayerLayer {
+    /// Records a seekable slice of the current media to a local file using FFmpeg stream copy.
+    ///
+    /// The player must expose a finite seekable range; non-DVR live streams are rejected. The default
+    /// destination is in the user's document directory and existing files are preserved unless
+    /// `overwriteExisting` is true.
     @discardableResult
-    func recordClip(start: TimeInterval, end: TimeInterval, destination: URL? = nil) async throws -> URL {
+    func recordClip(
+        start: TimeInterval,
+        end: TimeInterval,
+        destination: URL? = nil,
+        overwriteExisting: Bool = false,
+        progress: KSPlayerClipExporter.ProgressHandler? = nil
+    ) async throws -> URL {
         let sourceURL = url
         let options = self.options
-        let availableRange = player.seekableTimeRange
+        guard let availableRange = player.seekableTimeRange else {
+            throw KSPlayerClipExportError.unsupportedNonSeekableSource
+        }
         let destination = destination ?? KSPlayerClipDestination.makeDefault(sourceURL: sourceURL, start: start, end: end)
         return try await KSPlayerClipExporter().export(
             sourceURL: sourceURL,
             start: start,
             end: end,
             destination: destination,
+            overwriteExisting: overwriteExisting,
             options: options,
-            availableRange: availableRange
+            availableRange: availableRange,
+            progress: progress
         )
     }
 }

@@ -4,7 +4,7 @@ import PackageDescription
 let package = Package(
     name: "KSPlayer",
     defaultLocalization: "en",
-    platforms: [.macOS(.v26), .macCatalyst(.v26), .iOS(.v26), .tvOS(.v26),
+    platforms: [.macOS(.v15), .macCatalyst(.v26), .iOS(.v26), .tvOS(.v26),
                 .visionOS(.v26)],
     products: [
         .library(
@@ -26,7 +26,7 @@ let package = Package(
                 .product(name: "Libavutil", package: "FFmpegKit"),
                 .product(name: "Libswresample", package: "FFmpegKit"),
                 .product(name: "Libswscale", package: "FFmpegKit"),
-                .product(name: "libass", package: "FFmpegKit", condition: .when(platforms: [.visionOS])),
+                .product(name: "libass", package: "FFmpegKit", condition: .when(platforms: [.macOS, .visionOS])),
                 "DisplayCriteria",
             ],
             resources: [.process("Metal/Shaders.metal")],

@@ -8,6 +8,7 @@ final class EmbeddedFontAttachmentStore {
     private static let maxFontAttachmentSize = 32 * 1024 * 1024
     private static let maxTotalFontAttachmentSize = 128 * 1024 * 1024
     private static let supportedFontExtensions: Set<String> = ["otc", "otf", "ttc", "ttf"]
+    private static let genericAttachmentMimeTypes: Set<String> = ["application/octet-stream", "binary/octet-stream"]
 
     private let fileManager: FileManager
     private let directoryURL: URL
@@ -107,15 +108,45 @@ final class EmbeddedFontAttachmentStore {
             return "otf"
         }
 
-        if let extensionHint = metadata["filename"]?.fontFileExtension, supportedFontExtensions.contains(extensionHint) {
+        let extensionHint = metadata["filename"]?.fontFileExtension
+        let mimeType = normalizedMimeType(metadata["mimetype"] ?? metadata["mime_type"])
+        if let mimeExtension = fontExtension(forMimeType: mimeType) {
+            return supportedFontExtensions.contains(extensionHint ?? "") ? extensionHint : mimeExtension
+        }
+        if let mimeType, !genericAttachmentMimeTypes.contains(mimeType) {
+            return nil
+        }
+        if let extensionHint, supportedFontExtensions.contains(extensionHint) {
             return extensionHint
         }
+        return nil
+    }
 
-        let mimeType = (metadata["mimetype"] ?? metadata["mime_type"] ?? "").lowercased()
-        if mimeType.contains("opentype") {
+    private static func normalizedMimeType(_ mimeType: String?) -> String? {
+        guard let mimeType else {
+            return nil
+        }
+        let normalized = mimeType
+            .split(separator: ";", maxSplits: 1)
+            .first
+            .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines).lowercased() } ?? ""
+        return normalized.isEmpty ? nil : normalized
+    }
+
+    private static func fontExtension(forMimeType mimeType: String?) -> String? {
+        guard let mimeType else {
+            return nil
+        }
+        if mimeType == "font/otf" || mimeType == "application/vnd.ms-opentype" || mimeType.contains("opentype") || mimeType.contains("font-otf") {
             return "otf"
         }
-        if mimeType.contains("truetype") || mimeType.contains("font-sfnt") {
+        if mimeType == "font/ttf" || mimeType.contains("truetype") || mimeType.contains("font-ttf") {
+            return "ttf"
+        }
+        if mimeType == "font/collection" || mimeType.contains("font-ttc") || mimeType.contains("font-collection") {
+            return "ttc"
+        }
+        if mimeType.contains("font-sfnt") {
             return "ttf"
         }
         return nil

@@ -93,6 +93,16 @@ public struct MediaPlaybackTimeRange: Equatable {
     }
 }
 
+enum MediaSeekTimeResolver {
+    static func resolvedSeekTime(_ time: TimeInterval, seekableTimeRange: MediaPlaybackTimeRange?) -> TimeInterval? {
+        guard time.isFinite else {
+            return nil
+        }
+        let nonNegativeTime = max(time, 0)
+        return seekableTimeRange?.clamped(nonNegativeTime) ?? nonNegativeTime
+    }
+}
+
 public protocol MediaPlayerProtocol: MediaPlayback {
     var delegate: MediaPlayerDelegate? { get set }
     var view: UIView? { get }
@@ -118,7 +128,9 @@ public protocol MediaPlayerProtocol: MediaPlayback {
     var pipController: KSPictureInPictureController? { get }
     var dynamicInfo: DynamicInfo? { get }
     init(url: URL, options: KSOptions)
+    init(url: URL, audioURL: URL?, options: KSOptions)
     func replace(url: URL, options: KSOptions)
+    func replace(url: URL, audioURL: URL?, options: KSOptions)
     func play()
     func pause()
     func enterBackground()
@@ -129,6 +141,14 @@ public protocol MediaPlayerProtocol: MediaPlayback {
 }
 
 public extension MediaPlayerProtocol {
+    init(url: URL, audioURL _: URL?, options: KSOptions) {
+        self.init(url: url, options: options)
+    }
+
+    func replace(url: URL, audioURL _: URL?, options: KSOptions) {
+        replace(url: url, options: options)
+    }
+
     var nominalFrameRate: Float {
         tracks(mediaType: .video).first { $0.isEnabled }?.nominalFrameRate ?? 0
     }
@@ -300,7 +320,7 @@ extension DOVIDecoderConfigurationRecord: CustomStringConvertible {
     }
 }
 
-public enum FFmpegFieldOrder: UInt8 {
+public enum FFmpegFieldOrder: UInt8, Sendable {
     case unknown = 0
     case progressive
     case tt // < Top coded_first, top displayed first
@@ -465,6 +485,14 @@ public extension CMFormatDescription {
         } else {
             return false
         }
+    }
+}
+
+extension CMFormatDescription.MediaSubType {
+    static let dolbyAC4 = CMFormatDescription.MediaSubType(rawValue: "ac-4".fourCharCode)
+
+    var audioCodecDisplayName: String? {
+        self == .dolbyAC4 ? "Dolby AC-4" : nil
     }
 }
 

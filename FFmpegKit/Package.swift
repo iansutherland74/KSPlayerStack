@@ -35,6 +35,8 @@ let sdl2CFlags = pkgConfigTokens(["--cflags", "sdl2"]).filter { $0 != "-D_THREAD
 let sdl2Libs = pkgConfigTokens(["--libs", "sdl2"])
 let sdl2CSettings: [CSetting] = sdl2CFlags.isEmpty ? [] : [.unsafeFlags(sdl2CFlags)]
 let sdl2LinkerSettings: [LinkerSetting] = sdl2Libs.isEmpty ? [] : [.unsafeFlags(sdl2Libs)]
+let gmpLibs = pkgConfigTokens(["--libs", "gmp"])
+let gmpLinkerSettings: [LinkerSetting] = gmpLibs.isEmpty ? [] : [.unsafeFlags(gmpLibs, .when(platforms: [.macOS]))]
 
 let package = Package(
     name: "FFmpegKit",
@@ -114,7 +116,7 @@ let package = Package(
                 .linkedLibrary("resolv"),
                 .linkedLibrary("xml2"),
                 .linkedLibrary("z"),
-            ]
+            ] + gmpLinkerSettings
         ),
         .executableTarget(
             name: "ffplay",
