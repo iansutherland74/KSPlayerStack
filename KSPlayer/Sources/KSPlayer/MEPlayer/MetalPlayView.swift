@@ -278,7 +278,15 @@ extension MetalPlayView {
                     metalView.metalLayer.edrMetadata = frame.edrMetadata
                 }
                 #endif
-                metalView.draw(pixelBuffer: renderPixelBuffer, display: options.display, size: size, colorAdjustment: options.videoColorAdjustment, dynamicRange: dynamicRange)
+                metalView.draw(
+                    pixelBuffer: renderPixelBuffer,
+                    display: options.display,
+                    size: size,
+                    colorAdjustment: options.videoColorAdjustment,
+                    dynamicRange: dynamicRange,
+                    panoramaStereoLayout: options.panoramaStereoLayout,
+                    panoramaFieldOfView: options.panoramaFieldOfView
+                )
             }
             renderSource?.setVideo(time: cmtime, position: frame.position)
         }
@@ -392,7 +400,15 @@ class MetalView: UIView {
         }
     }
 
-    func draw(pixelBuffer: PixelBufferProtocol, display: DisplayEnum, size: CGSize, colorAdjustment: VideoColorAdjustment, dynamicRange: DynamicRange?) {
+    func draw(
+        pixelBuffer: PixelBufferProtocol,
+        display: DisplayEnum,
+        size: CGSize,
+        colorAdjustment: VideoColorAdjustment,
+        dynamicRange: DynamicRange?,
+        panoramaStereoLayout: PanoramaStereoLayout,
+        panoramaFieldOfView: PanoramaFieldOfView
+    ) {
         metalLayer.drawableSize = size
         metalLayer.pixelFormat = KSOptions.colorPixelFormat(bitDepth: pixelBuffer.bitDepth)
         let colorspace = pixelBuffer.colorspace
@@ -418,7 +434,15 @@ class MetalView: UIView {
             KSLog("[video] CAMetalLayer not readyForMoreMediaData")
             return
         }
-        render.draw(pixelBuffer: pixelBuffer, display: display, drawable: drawable, colorAdjustment: colorAdjustment, dynamicRange: dynamicRange)
+        render.draw(
+            pixelBuffer: pixelBuffer,
+            display: display,
+            drawable: drawable,
+            colorAdjustment: colorAdjustment,
+            dynamicRange: dynamicRange,
+            panoramaStereoLayout: panoramaStereoLayout,
+            panoramaFieldOfView: panoramaFieldOfView
+        )
     }
 }
 

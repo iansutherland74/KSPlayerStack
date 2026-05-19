@@ -631,6 +631,7 @@ extension KSPlayerLayer {
             return KSAVPlayer.self
         }
         if options.display != .plane ||
+            options.panoramaMode != .disabled ||
             url.isBluRayInputCandidate ||
             url.isFFmpegOnlyInputScheme ||
             url.isMatroskaContainer ||
@@ -651,6 +652,9 @@ extension KSPlayerLayer {
             }
             if !options.videoColorAdjustment.isNeutral {
                 KSLog("[video] color adjustment is unavailable during wireless route playback")
+            }
+            if options.panoramaMode != .disabled {
+                KSLog("[video] panorama rendering is unavailable during wireless route playback")
             }
             if options.isOfflineSubtitleGenerationEnabled {
                 KSLog("offline subtitle generation is unavailable during wireless route playback")

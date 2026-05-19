@@ -92,7 +92,15 @@ class MetalRender {
     }
 
     @MainActor
-    func draw(pixelBuffer: PixelBufferProtocol, display: DisplayEnum = .plane, drawable: CAMetalDrawable, colorAdjustment: VideoColorAdjustment = .neutral, dynamicRange: DynamicRange? = nil) {
+    func draw(
+        pixelBuffer: PixelBufferProtocol,
+        display: DisplayEnum = .plane,
+        drawable: CAMetalDrawable,
+        colorAdjustment: VideoColorAdjustment = .neutral,
+        dynamicRange: DynamicRange? = nil,
+        panoramaStereoLayout: PanoramaStereoLayout = .mono,
+        panoramaFieldOfView: PanoramaFieldOfView = .degrees360
+    ) {
         let inputTextures = pixelBuffer.textures()
         renderPassDescriptor.colorAttachments[0].texture = drawable.texture
         guard !inputTextures.isEmpty, let commandBuffer = commandQueue?.makeCommandBuffer(), let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor) else {
@@ -108,7 +116,7 @@ class MetalRender {
         }
         setFragmentBuffer(pixelBuffer: pixelBuffer, encoder: encoder)
         setColorAdjustment(colorAdjustment, dynamicRange: dynamicRange, encoder: encoder)
-        display.set(encoder: encoder)
+        display.set(encoder: encoder, panoramaStereoLayout: panoramaStereoLayout, panoramaFieldOfView: panoramaFieldOfView)
         encoder.popDebugGroup()
         encoder.endEncoding()
         commandBuffer.present(drawable)

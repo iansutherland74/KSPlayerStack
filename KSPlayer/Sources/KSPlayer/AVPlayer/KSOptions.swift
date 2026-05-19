@@ -57,6 +57,41 @@ public enum VideoProjection: Equatable, Sendable {
     case unknown(String)
 }
 
+public enum PanoramaStereoLayout: Equatable, Hashable, Sendable {
+    case mono
+    case sideBySide
+    case topAndBottom
+}
+
+public enum PanoramaFieldOfView: Equatable, Hashable, Sendable {
+    case degrees180
+    case degrees360
+}
+
+public struct PanoramaVideoConfiguration: Equatable, Sendable {
+    public let projection: VideoProjection
+    public let stereoLayout: PanoramaStereoLayout
+    public let fieldOfView: PanoramaFieldOfView
+
+    public init(projection: VideoProjection, stereoLayout: PanoramaStereoLayout = .mono, fieldOfView: PanoramaFieldOfView = .degrees360) {
+        self.projection = projection
+        self.stereoLayout = stereoLayout
+        self.fieldOfView = fieldOfView
+    }
+
+    var isRenderableInSphere: Bool {
+        projection.isRenderableInSphere
+    }
+
+    func merging(_ metadataConfiguration: PanoramaVideoConfiguration) -> PanoramaVideoConfiguration {
+        PanoramaVideoConfiguration(
+            projection: projection,
+            stereoLayout: stereoLayout == .mono ? metadataConfiguration.stereoLayout : stereoLayout,
+            fieldOfView: metadataConfiguration.fieldOfView
+        )
+    }
+}
+
 public enum PanoramaMode: Equatable, Sendable {
     /// Preserve flat video rendering unless apps explicitly select `display = .vr` or `.vrBox`.
     case disabled
@@ -111,46 +146,177 @@ public enum AudioRouteSharingPolicyResolver {
 
 public enum PanoramaProjectionPolicy {
     public static func detectedProjection(metadata: [String: String]) -> VideoProjection? {
+        detectedConfiguration(metadata: metadata)?.projection
+    }
+
+    public static func detectedConfiguration(metadata: [String: String]) -> PanoramaVideoConfiguration? {
         let normalized = metadata.reduce(into: [String: String]()) { result, entry in
-            result[entry.key.lowercased()] = entry.value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            result[normalizedKey(entry.key)] = normalizedValue(entry.value)
         }
 
-        for key in ["projection", "spatial-media-projection", "spherical_projection", "spherical-projection"] {
+        let projection = detectedProjection(in: normalized)
+
+        guard let projection else {
+            return nil
+        }
+
+        return PanoramaVideoConfiguration(
+            projection: projection,
+            stereoLayout: detectedStereoLayout(in: normalized),
+            fieldOfView: detectedFieldOfView(in: normalized)
+        )
+    }
+
+    public static func detectedProjection(formatDescription: CMFormatDescription?) -> VideoProjection? {
+        detectedConfiguration(formatDescription: formatDescription)?.projection
+    }
+
+    public static func detectedConfiguration(formatDescription: CMFormatDescription?) -> PanoramaVideoConfiguration? {
+        guard let formatDescription,
+              let extensions = CMFormatDescriptionGetExtensions(formatDescription) as? [AnyHashable: Any]
+        else {
+            return nil
+        }
+        return detectedConfiguration(metadata: flattenedMetadata(extensions))
+    }
+
+    public static func resolvedProjection(mode: PanoramaMode, detectedProjection: VideoProjection?) -> VideoProjection? {
+        let detectedConfiguration = detectedProjection.map {
+            PanoramaVideoConfiguration(projection: $0)
+        }
+        return resolvedConfiguration(mode: mode, detectedConfiguration: detectedConfiguration)?.projection
+    }
+
+    public static func resolvedConfiguration(
+        mode: PanoramaMode,
+        detectedConfiguration: PanoramaVideoConfiguration?,
+        stereoLayout: PanoramaStereoLayout = .mono,
+        fieldOfView: PanoramaFieldOfView = .degrees360
+    ) -> PanoramaVideoConfiguration? {
+        switch mode {
+        case .disabled:
+            return nil
+        case .automatic:
+            return detectedConfiguration?.isRenderableInSphere == true ? detectedConfiguration : nil
+        case .equirectangular:
+            return PanoramaVideoConfiguration(
+                projection: .equirectangular,
+                stereoLayout: stereoLayout,
+                fieldOfView: fieldOfView
+            )
+        }
+    }
+
+    private static func detectedProjection(in normalized: [String: String]) -> VideoProjection? {
+        for key in ["projection", "projectiontype", "projectionformat", "projectionkind", "spatialmediaprojection", "sphericalprojection"] {
             if let projection = normalized[key].flatMap(projection(from:)) {
                 return projection
             }
         }
 
-        for key in ["spherical", "spherical_video", "360", "is_360"] {
-            if let value = normalized[key], ["1", "true", "yes", "equirectangular"].contains(value) {
+        for key in ["spherical", "sphericalvideo", "360", "is360", "vr180", "isvr180"] {
+            if let value = normalized[key], ["1", "true", "yes", "spherical", "equirectangular", "equirectangular180", "180", "360"].contains(tokenizedValue(value)) {
                 return .equirectangular
             }
         }
         return nil
     }
 
-    public static func resolvedProjection(mode: PanoramaMode, detectedProjection: VideoProjection?) -> VideoProjection? {
-        switch mode {
-        case .disabled:
+    private static func projection(from value: String) -> VideoProjection? {
+        let tokenizedValue = tokenizedValue(value)
+        if ["", "0", "false", "no", "none", "flat", "rectilinear"].contains(tokenizedValue) {
             return nil
-        case .automatic:
-            return detectedProjection?.isRenderableInSphere == true ? detectedProjection : nil
-        case .equirectangular:
+        }
+        if tokenizedValue.contains("tiled") {
+            return .equirectangularTiled
+        }
+        if tokenizedValue.contains("equirectangular") || tokenizedValue.contains("equirect") || tokenizedValue == "spherical" || tokenizedValue == "360" || tokenizedValue == "vr180" {
             return .equirectangular
+        }
+        if tokenizedValue.contains("cubemap") || tokenizedValue.contains("cube") {
+            return .cubemap
+        }
+        return tokenizedValue.isEmpty ? nil : .unknown(value)
+    }
+
+    private static func detectedStereoLayout(in normalized: [String: String]) -> PanoramaStereoLayout {
+        for key in ["stereomode", "stereolayout", "stereo3d", "st3d", "spatialstereolayout", "sphericalstereomode", "framepacking"] {
+            if let layout = normalized[key].flatMap(stereoLayout(from:)) {
+                return layout
+            }
+        }
+        return .mono
+    }
+
+    private static func stereoLayout(from value: String) -> PanoramaStereoLayout? {
+        let tokenizedValue = tokenizedValue(value)
+        if ["", "0", "false", "no", "none", "mono", "2d", "flat"].contains(tokenizedValue) {
+            return .mono
+        }
+        if ["sidebyside", "leftright", "rightleft", "sbs", "lr", "rl"].contains(tokenizedValue) {
+            return .sideBySide
+        }
+        if ["topbottom", "bottomtop", "overunder", "underover", "tb", "bt", "ou", "uo"].contains(tokenizedValue) {
+            return .topAndBottom
+        }
+        return nil
+    }
+
+    private static func detectedFieldOfView(in normalized: [String: String]) -> PanoramaFieldOfView {
+        for key in ["fieldofview", "fov", "horizontalfieldofview", "hfov", "panoramafieldofview", "meshfieldofview", "sphericaldegrees", "panoramadegrees", "projection", "projectiontype", "projectionformat"] {
+            if let fieldOfView = normalized[key].flatMap(fieldOfView(from:)) {
+                return fieldOfView
+            }
+        }
+        return .degrees360
+    }
+
+    private static func fieldOfView(from value: String) -> PanoramaFieldOfView? {
+        let tokenizedValue = tokenizedValue(value)
+        if tokenizedValue.contains("180") || tokenizedValue.contains("vr180") || tokenizedValue.contains("half") || tokenizedValue.contains("hemisphere") {
+            return .degrees180
+        }
+        if tokenizedValue.contains("360") || tokenizedValue.contains("full") {
+            return .degrees360
+        }
+        return nil
+    }
+
+    private static func flattenedMetadata(_ dictionary: [AnyHashable: Any]) -> [String: String] {
+        var metadata = [String: String]()
+        flatten(dictionary: dictionary, into: &metadata)
+        return metadata
+    }
+
+    private static func flatten(dictionary: [AnyHashable: Any], into metadata: inout [String: String]) {
+        for (key, value) in dictionary {
+            let key = String(describing: key)
+            if let dictionary = value as? [AnyHashable: Any] {
+                flatten(dictionary: dictionary, into: &metadata)
+            } else if let dictionary = value as? NSDictionary {
+                flatten(dictionary: dictionary.reduce(into: [AnyHashable: Any]()) { result, entry in
+                    if let key = entry.key as? AnyHashable {
+                        result[key] = entry.value
+                    }
+                }, into: &metadata)
+            } else if let value = value as? String {
+                metadata[key] = value
+            } else if let value = value as? NSNumber {
+                metadata[key] = value.stringValue
+            }
         }
     }
 
-    private static func projection(from value: String) -> VideoProjection? {
-        if value.contains("tiled") {
-            return .equirectangularTiled
-        }
-        if value.contains("equirectangular") || value.contains("equirect") {
-            return .equirectangular
-        }
-        if value.contains("cubemap") || value.contains("cube") {
-            return .cubemap
-        }
-        return value.isEmpty ? nil : .unknown(value)
+    private static func normalizedKey(_ key: String) -> String {
+        key.lowercased().filter { $0.isLetter || $0.isNumber }
+    }
+
+    private static func normalizedValue(_ value: String) -> String {
+        value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    }
+
+    private static func tokenizedValue(_ value: String) -> String {
+        normalizedValue(value).filter { $0.isLetter || $0.isNumber }
     }
 }
 
@@ -161,6 +327,33 @@ public extension VideoProjection {
             return true
         case .equirectangularTiled, .cubemap, .unknown:
             return false
+        }
+    }
+}
+
+enum PanoramaTextureEye {
+    case mono
+    case left
+    case right
+}
+
+extension PanoramaStereoLayout {
+    var isStereo: Bool {
+        self != .mono
+    }
+
+    func textureCoordinateBounds(for eye: PanoramaTextureEye) -> CGRect {
+        switch (self, eye) {
+        case (.sideBySide, .left):
+            return CGRect(x: 0, y: 0, width: 0.5, height: 1)
+        case (.sideBySide, .right):
+            return CGRect(x: 0.5, y: 0, width: 0.5, height: 1)
+        case (.topAndBottom, .left):
+            return CGRect(x: 0, y: 0, width: 1, height: 0.5)
+        case (.topAndBottom, .right):
+            return CGRect(x: 0, y: 0.5, width: 1, height: 0.5)
+        default:
+            return CGRect(x: 0, y: 0, width: 1, height: 1)
         }
     }
 }
@@ -283,7 +476,12 @@ open class KSOptions {
     public var externalSubtitleTranslationTargetLanguage = KSOptions.externalSubtitleTranslationTargetLanguage
     // video
     public var display = DisplayEnum.plane
+    /// Controls automatic or forced routing of equirectangular 360-degree video into the Metal sphere renderer.
     public var panoramaMode = KSOptions.panoramaMode
+    /// Selects the texture packing used by stereoscopic panorama videos when metadata is missing or forced rendering is used.
+    public var panoramaStereoLayout = KSOptions.panoramaStereoLayout
+    /// Selects whether equirectangular panorama content covers a front 180-degree hemisphere or a full 360-degree sphere.
+    public var panoramaFieldOfView = KSOptions.panoramaFieldOfView
     public var videoDelay = 0.0 // s
     public var deinterlaceMode = KSOptions.deinterlaceMode
     @available(*, deprecated, message: "Use deinterlaceMode instead.")
@@ -627,10 +825,18 @@ open class KSOptions {
     open func process(assetTrack: some MediaPlayerTrack) {
         if assetTrack.mediaType == .video {
             if display == .plane {
-                let detectedProjection = (assetTrack as? FFmpegAssetTrack)?.panoramaProjection
-                let projection = PanoramaProjectionPolicy.resolvedProjection(mode: panoramaMode, detectedProjection: detectedProjection)
-                if projection?.isRenderableInSphere == true {
-                    display = .vr
+                let detectedConfiguration = (assetTrack as? FFmpegAssetTrack)?.panoramaConfiguration
+                    ?? PanoramaProjectionPolicy.detectedConfiguration(formatDescription: assetTrack.formatDescription)
+                let configuration = PanoramaProjectionPolicy.resolvedConfiguration(
+                    mode: panoramaMode,
+                    detectedConfiguration: detectedConfiguration,
+                    stereoLayout: panoramaStereoLayout,
+                    fieldOfView: panoramaFieldOfView
+                )
+                if configuration?.isRenderableInSphere == true {
+                    panoramaStereoLayout = configuration?.stereoLayout ?? .mono
+                    panoramaFieldOfView = configuration?.fieldOfView ?? .degrees360
+                    display = panoramaStereoLayout.isStereo ? .vrBox : .vr
                 }
             }
             let decision = VideoDeinterlacePolicy.decision(
@@ -1244,6 +1450,8 @@ public extension KSOptions {
     nonisolated(unsafe) static var adaptiveBitrateSwitchingPolicy = KSAdaptiveBitrateSwitchingPolicy()
     nonisolated(unsafe) static var videoColorAdjustment = VideoColorAdjustment.neutral
     nonisolated(unsafe) static var panoramaMode = PanoramaMode.disabled
+    nonisolated(unsafe) static var panoramaStereoLayout = PanoramaStereoLayout.mono
+    nonisolated(unsafe) static var panoramaFieldOfView = PanoramaFieldOfView.degrees360
     nonisolated(unsafe) static var deinterlaceMode = VideoDeinterlaceMode.automatic
     nonisolated(unsafe) static var subtitleCaptionAppearancePolicy = SubtitleCaptionAppearancePolicy.never
     nonisolated(unsafe) static var isAssSubtitleImageRenderingEnabled = true

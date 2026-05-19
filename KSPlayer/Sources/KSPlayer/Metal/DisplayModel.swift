@@ -17,14 +17,14 @@ extension DisplayEnum {
     private static var vrDiaplay = VRDisplayModel()
     private static var vrBoxDiaplay = VRBoxDisplayModel()
 
-    func set(encoder: MTLRenderCommandEncoder) {
+    func set(encoder: MTLRenderCommandEncoder, panoramaStereoLayout: PanoramaStereoLayout, panoramaFieldOfView: PanoramaFieldOfView) {
         switch self {
         case .plane:
             DisplayEnum.planeDisplay.set(encoder: encoder)
         case .vr:
-            DisplayEnum.vrDiaplay.set(encoder: encoder)
+            DisplayEnum.vrDiaplay.set(encoder: encoder, panoramaStereoLayout: panoramaStereoLayout, panoramaFieldOfView: panoramaFieldOfView)
         case .vrBox:
-            DisplayEnum.vrBoxDiaplay.set(encoder: encoder)
+            DisplayEnum.vrBoxDiaplay.set(encoder: encoder, panoramaStereoLayout: panoramaStereoLayout, panoramaFieldOfView: panoramaFieldOfView)
         }
     }
 
@@ -121,6 +121,19 @@ private class PlaneDisplayModel {
 
 @MainActor
 private class SphereDisplayModel {
+    private struct SphereMeshKey: Hashable {
+        let fieldOfView: PanoramaFieldOfView
+        let stereoLayout: PanoramaStereoLayout
+        let eye: PanoramaTextureEye
+    }
+
+    private struct SphereMesh {
+        let indexCount: Int
+        let indexBuffer: MTLBuffer
+        let posBuffer: MTLBuffer?
+        let uvBuffer: MTLBuffer?
+    }
+
     private lazy var yuv = MetalRender.makePipelineState(fragmentFunction: "displayYUVTexture", isSphere: true)
     private lazy var yuvp010LE = MetalRender.makePipelineState(fragmentFunction: "displayYUVTexture", isSphere: true, bitDepth: 10)
     private lazy var nv12 = MetalRender.makePipelineState(fragmentFunction: "displayNV12Texture", isSphere: true)
@@ -129,20 +142,11 @@ private class SphereDisplayModel {
     private var fingerRotationX = Float(0)
     private var fingerRotationY = Float(0)
     fileprivate var modelViewMatrix = matrix_identity_float4x4
-    let indexCount: Int
     let indexType = MTLIndexType.uint16
     let primitiveType = MTLPrimitiveType.triangle
-    let indexBuffer: MTLBuffer
-    let posBuffer: MTLBuffer?
-    let uvBuffer: MTLBuffer?
+    private var meshes = [SphereMeshKey: SphereMesh]()
     @MainActor
     fileprivate init() {
-        let (indices, positions, uvs) = SphereDisplayModel.genSphere()
-        let device = MetalRender.device
-        indexCount = indices.count
-        indexBuffer = device.makeBuffer(bytes: indices, length: MemoryLayout<UInt16>.size * indexCount)!
-        posBuffer = device.makeBuffer(bytes: positions, length: MemoryLayout<simd_float4>.size * positions.count)
-        uvBuffer = device.makeBuffer(bytes: uvs, length: MemoryLayout<simd_float2>.size * uvs.count)
         #if canImport(UIKit) && canImport(CoreMotion)
         if KSOptions.enableSensor {
             MotionSensor.shared.start()
@@ -150,15 +154,22 @@ private class SphereDisplayModel {
         #endif
     }
 
-    func set(encoder: MTLRenderCommandEncoder) {
+    func set(
+        encoder: MTLRenderCommandEncoder,
+        panoramaStereoLayout: PanoramaStereoLayout,
+        panoramaFieldOfView: PanoramaFieldOfView,
+        eye: PanoramaTextureEye
+    ) -> SphereMesh {
+        let mesh = mesh(fieldOfView: panoramaFieldOfView, stereoLayout: panoramaStereoLayout, eye: eye)
         encoder.setFrontFacing(.clockwise)
-        encoder.setVertexBuffer(posBuffer, offset: 0, index: 0)
-        encoder.setVertexBuffer(uvBuffer, offset: 0, index: 1)
+        encoder.setVertexBuffer(mesh.posBuffer, offset: 0, index: 0)
+        encoder.setVertexBuffer(mesh.uvBuffer, offset: 0, index: 1)
         #if canImport(UIKit) && canImport(CoreMotion)
         if KSOptions.enableSensor, let matrix = MotionSensor.shared.matrix() {
             modelViewMatrix = matrix
         }
         #endif
+        return mesh
     }
 
     @MainActor
@@ -183,7 +194,28 @@ private class SphereDisplayModel {
         modelViewMatrix = matrix_identity_float4x4
     }
 
-    private static func genSphere() -> ([UInt16], [simd_float4], [simd_float2]) {
+    private func mesh(fieldOfView: PanoramaFieldOfView, stereoLayout: PanoramaStereoLayout, eye: PanoramaTextureEye) -> SphereMesh {
+        let key = SphereMeshKey(fieldOfView: fieldOfView, stereoLayout: stereoLayout, eye: eye)
+        if let mesh = meshes[key] {
+            return mesh
+        }
+        let (indices, positions, uvs) = SphereDisplayModel.genSphere(fieldOfView: fieldOfView, stereoLayout: stereoLayout, eye: eye)
+        let device = MetalRender.device
+        let mesh = SphereMesh(
+            indexCount: indices.count,
+            indexBuffer: device.makeBuffer(bytes: indices, length: MemoryLayout<UInt16>.size * indices.count)!,
+            posBuffer: device.makeBuffer(bytes: positions, length: MemoryLayout<simd_float4>.size * positions.count),
+            uvBuffer: device.makeBuffer(bytes: uvs, length: MemoryLayout<simd_float2>.size * uvs.count)
+        )
+        meshes[key] = mesh
+        return mesh
+    }
+
+    private static func genSphere(
+        fieldOfView: PanoramaFieldOfView,
+        stereoLayout: PanoramaStereoLayout,
+        eye: PanoramaTextureEye
+    ) -> ([UInt16], [simd_float4], [simd_float2]) {
         let slicesCount = UInt16(200)
         let parallelsCount = slicesCount / 2
         let indicesCount = Int(slicesCount) * Int(parallelsCount) * 6
@@ -192,17 +224,33 @@ private class SphereDisplayModel {
         var uvs = [simd_float2]()
         var runCount = 0
         let radius = Float(1.0)
-        let step = (2.0 * Float.pi) / Float(slicesCount)
+        let longitudeStart: Float
+        let longitudeSpan: Float
+        switch fieldOfView {
+        case .degrees180:
+            longitudeStart = Float.pi
+            longitudeSpan = Float.pi
+        case .degrees360:
+            longitudeStart = 0
+            longitudeSpan = 2.0 * Float.pi
+        }
+        let longitudeStep = longitudeSpan / Float(slicesCount)
+        let latitudeStep = Float.pi / Float(parallelsCount)
+        let textureBounds = stereoLayout.textureCoordinateBounds(for: eye)
         var i = UInt16(0)
         while i <= parallelsCount {
             var j = UInt16(0)
             while j <= slicesCount {
-                let vertex0 = radius * sinf(step * Float(i)) * cosf(step * Float(j))
-                let vertex1 = radius * cosf(step * Float(i))
-                let vertex2 = radius * sinf(step * Float(i)) * sinf(step * Float(j))
+                let latitude = latitudeStep * Float(i)
+                let longitude = longitudeStart + longitudeStep * Float(j)
+                let vertex0 = radius * sinf(latitude) * cosf(longitude)
+                let vertex1 = radius * cosf(latitude)
+                let vertex2 = radius * sinf(latitude) * sinf(longitude)
                 let vertex3 = Float(1.0)
-                let vertex4 = Float(j) / Float(slicesCount)
-                let vertex5 = Float(i) / Float(parallelsCount)
+                let textureX = CGFloat(Float(j) / Float(slicesCount))
+                let textureY = CGFloat(Float(i) / Float(parallelsCount))
+                let vertex4 = Float(textureBounds.minX + textureBounds.width * textureX)
+                let vertex5 = Float(textureBounds.minY + textureBounds.height * textureY)
                 positions.append([vertex0, vertex1, vertex2, vertex3])
                 uvs.append([vertex4, vertex5])
                 if i < parallelsCount, j < slicesCount {
@@ -260,12 +308,12 @@ private class VRDisplayModel: SphereDisplayModel {
         super.init()
     }
 
-    override func set(encoder: MTLRenderCommandEncoder) {
-        super.set(encoder: encoder)
+    func set(encoder: MTLRenderCommandEncoder, panoramaStereoLayout: PanoramaStereoLayout, panoramaFieldOfView: PanoramaFieldOfView) {
+        let mesh = super.set(encoder: encoder, panoramaStereoLayout: panoramaStereoLayout, panoramaFieldOfView: panoramaFieldOfView, eye: .mono)
         var matrix = modelViewProjectionMatrix * modelViewMatrix
         let matrixBuffer = MetalRender.device.makeBuffer(bytes: &matrix, length: MemoryLayout<simd_float4x4>.size)
         encoder.setVertexBuffer(matrixBuffer, offset: 0, index: 2)
-        encoder.drawIndexedPrimitives(type: primitiveType, indexCount: indexCount, indexType: indexType, indexBuffer: indexBuffer, indexBufferOffset: 0)
+        encoder.drawIndexedPrimitives(type: primitiveType, indexCount: mesh.indexCount, indexType: indexType, indexBuffer: mesh.indexBuffer, indexBufferOffset: 0)
     }
 }
 
@@ -283,17 +331,19 @@ private class VRBoxDisplayModel: SphereDisplayModel {
         super.init()
     }
 
-    override func set(encoder: MTLRenderCommandEncoder) {
-        super.set(encoder: encoder)
+    func set(encoder: MTLRenderCommandEncoder, panoramaStereoLayout: PanoramaStereoLayout, panoramaFieldOfView: PanoramaFieldOfView) {
         let layerSize = KSOptions.sceneSize
         let width = Double(layerSize.width / 2)
-        [(modelViewProjectionMatrixLeft, MTLViewport(originX: 0, originY: 0, width: width, height: Double(layerSize.height), znear: 0, zfar: 0)),
-         (modelViewProjectionMatrixRight, MTLViewport(originX: width, originY: 0, width: width, height: Double(layerSize.height), znear: 0, zfar: 0))].forEach { modelViewProjectionMatrix, viewport in
+        [
+            (modelViewProjectionMatrixLeft, PanoramaTextureEye.left, MTLViewport(originX: 0, originY: 0, width: width, height: Double(layerSize.height), znear: 0, zfar: 0)),
+            (modelViewProjectionMatrixRight, PanoramaTextureEye.right, MTLViewport(originX: width, originY: 0, width: width, height: Double(layerSize.height), znear: 0, zfar: 0)),
+        ].forEach { modelViewProjectionMatrix, eye, viewport in
+            let mesh = super.set(encoder: encoder, panoramaStereoLayout: panoramaStereoLayout, panoramaFieldOfView: panoramaFieldOfView, eye: eye)
             encoder.setViewport(viewport)
             var matrix = modelViewProjectionMatrix * modelViewMatrix
             let matrixBuffer = MetalRender.device.makeBuffer(bytes: &matrix, length: MemoryLayout<simd_float4x4>.size)
             encoder.setVertexBuffer(matrixBuffer, offset: 0, index: 2)
-            encoder.drawIndexedPrimitives(type: primitiveType, indexCount: indexCount, indexType: indexType, indexBuffer: indexBuffer, indexBufferOffset: 0)
+            encoder.drawIndexedPrimitives(type: primitiveType, indexCount: mesh.indexCount, indexType: indexType, indexBuffer: mesh.indexBuffer, indexBufferOffset: 0)
         }
     }
 }

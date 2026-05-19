@@ -107,6 +107,7 @@ public class FFmpegAssetTrack: MediaPlayerTrack, SubtitleKindProviding {
     public private(set) var hasHDR10PlusMetadata = false
     public let fieldOrder: FFmpegFieldOrder
     public let formatDescription: CMFormatDescription?
+    public private(set) var panoramaConfiguration: PanoramaVideoConfiguration?
     public private(set) var panoramaProjection: VideoProjection?
     var closedCaptionsTrack: FFmpegAssetTrack?
     let isConvertNALSize: Bool
@@ -199,8 +200,8 @@ public class FFmpegAssetTrack: MediaPlayerTrack, SubtitleKindProviding {
         } else {
             name = languageCode ?? codecName
         }
-        if mediaType == .video, panoramaProjection == nil {
-            panoramaProjection = PanoramaProjectionPolicy.detectedProjection(metadata: metadata)
+        if mediaType == .video, let metadataConfiguration = PanoramaProjectionPolicy.detectedConfiguration(metadata: metadata) {
+            setPanoramaConfiguration(panoramaConfiguration?.merging(metadataConfiguration) ?? metadataConfiguration)
         }
         updateAudioCodecMetadata(title: name)
         // AV_DISPOSITION_DEFAULT
@@ -256,6 +257,8 @@ public class FFmpegAssetTrack: MediaPlayerTrack, SubtitleKindProviding {
             mediaType = .video
             videoDecodeSupport = Self.videoDecodeSupport(codecID: codecpar.codec_id)
             var doviRecord: DOVIDecoderConfigurationRecord?
+            var sphericalProjection: VideoProjection?
+            var stereoLayout: PanoramaStereoLayout?
             if codecpar.nb_coded_side_data > 0, let sideDatas = codecpar.coded_side_data {
                 for i in 0 ..< codecpar.nb_coded_side_data {
                     let sideData = sideDatas[Int(i)]
@@ -274,9 +277,17 @@ public class FFmpegAssetTrack: MediaPlayerTrack, SubtitleKindProviding {
                             rotation = 0
                         }                        
                     } else if sideData.type == AV_PKT_DATA_SPHERICAL {
-                        panoramaProjection = Self.sphericalProjection(data: sideData.data, size: Int32(clamping: sideData.size))
+                        sphericalProjection = Self.sphericalProjection(data: sideData.data, size: Int32(clamping: sideData.size))
+                    } else if sideData.type == AV_PKT_DATA_STEREO3D {
+                        stereoLayout = Self.stereoLayout(data: sideData.data, size: Int32(clamping: sideData.size))
                     }
                 }
+            }
+            if let sphericalProjection {
+                setPanoramaConfiguration(PanoramaVideoConfiguration(
+                    projection: sphericalProjection,
+                    stereoLayout: stereoLayout ?? .mono
+                ))
             }
             let sar = codecpar.sample_aspect_ratio.size
             var extradataSize = Int32(0)
@@ -383,7 +394,7 @@ public class FFmpegAssetTrack: MediaPlayerTrack, SubtitleKindProviding {
         guard let data, size >= Int32(MemoryLayout<Int32>.size) else {
             return .equirectangular
         }
-        let rawProjection = data.withMemoryRebound(to: Int32.self, capacity: 1) { $0.pointee }
+        let rawProjection = UnsafeRawBufferPointer(start: data, count: Int(size)).loadUnaligned(as: Int32.self)
         switch rawProjection {
         case 0:
             return .equirectangular
@@ -394,6 +405,26 @@ public class FFmpegAssetTrack: MediaPlayerTrack, SubtitleKindProviding {
         default:
             return .unknown("ffmpeg-spherical-\(rawProjection)")
         }
+    }
+
+    private static func stereoLayout(data: UnsafeMutablePointer<UInt8>?, size: Int32) -> PanoramaStereoLayout? {
+        guard let data, size >= Int32(MemoryLayout<Int32>.size) else {
+            return nil
+        }
+        let rawStereoType = UnsafeRawBufferPointer(start: data, count: Int(size)).loadUnaligned(as: Int32.self)
+        switch rawStereoType {
+        case 1, 5:
+            return .sideBySide
+        case 2:
+            return .topAndBottom
+        default:
+            return nil
+        }
+    }
+
+    private func setPanoramaConfiguration(_ configuration: PanoramaVideoConfiguration?) {
+        panoramaConfiguration = configuration
+        panoramaProjection = configuration?.projection
     }
 
     func createContext(options: KSOptions) throws -> UnsafeMutablePointer<AVCodecContext> {

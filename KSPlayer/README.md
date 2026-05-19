@@ -76,9 +76,23 @@ To experience the powerful features of the LGPL version, you can download the ap
 
 ## Playback routing notes
 
-KSPlayer chooses between AVFoundation (`KSAVPlayer`) and FFmpeg/Metal (`KSMEPlayer`) by capability. Separate audio/video URLs, AirPlay-oriented wireless routes, and AVFoundation-supported containers stay on the native path so system Dolby Vision, Dolby Atmos, external playback, and route sharing can work where Apple supports them. Matroska/WebM containers (`.mkv`, `.mk3d`, `.mka`, `.mks`, `.webm`), Blu-ray sources, FFmpeg-only URL schemes, VR display, offline subtitle generation, color adjustment, and VideoToolbox upscaling use `KSMEPlayer`.
+KSPlayer chooses between AVFoundation (`KSAVPlayer`) and FFmpeg/Metal (`KSMEPlayer`) by capability. Separate audio/video URLs, AirPlay-oriented wireless routes, and AVFoundation-supported containers stay on the native path so system Dolby Vision, Dolby Atmos, external playback, and route sharing can work where Apple supports them. Matroska/WebM containers (`.mkv`, `.mk3d`, `.mka`, `.mks`, `.webm`), Blu-ray sources, FFmpeg-only URL schemes, VR display, 360° panorama mode, offline subtitle generation, color adjustment, and VideoToolbox upscaling use `KSMEPlayer`.
 
 For Dolby media, this means MP4/MOV/HLS Dolby Vision or Dolby Atmos content can remain native when AVFoundation supports the source and output route. MKV Dolby Vision/Atmos falls back to `KSMEPlayer`: Dolby Vision metadata and HDR fallback state are preserved for rendering diagnostics, while decoded FFmpeg audio is output as PCM unless the content is on a native Apple passthrough route. AC-4 tracks are labeled and preserved as Dolby metadata when demuxed, but FFmpeg 8.1 does not expose a public AC-4 decoder/parser, so KSPlayer marks AC-4 as unsupported on the FFmpeg path and leaves any native AC-4 playback to Apple's AVPlayer capabilities.
+
+## 360° panorama video
+
+Use `KSOptions.panoramaMode` to opt in to equirectangular 360° rendering:
+
+```swift
+let options = KSOptions()
+options.panoramaMode = .automatic
+playerView.set(url: url, options: options)
+```
+
+`.automatic` routes single-URL playback through `KSMEPlayer`, reads FFmpeg spherical side data plus common projection metadata, and switches recognized equirectangular video from flat `.plane` display to the Metal sphere renderer. `.equirectangular` forces sphere rendering when the source lacks usable metadata. Cubemap, tiled, unknown, missing, or explicitly flat metadata stays flat unless the app forces `.equirectangular`.
+
+Panorama rendering uses the existing VR display controls: drag gestures adjust view direction, and `KSOptions.enableSensor` controls device-motion look-around on platforms with UIKit and CoreMotion. Separate audio/video playback and wireless route playback stay on `KSAVPlayer`, so panorama rendering is not applied there.
 
 ## Video color adjustment
 
