@@ -74,6 +74,11 @@ public class KSMEPlayer: NSObject, @unchecked Sendable {
     public private(set) var isReadyToPlay = false
     public var allowsExternalPlayback: Bool = false
     public var usesExternalPlaybackWhileExternalScreenIsActive: Bool = false
+    var decodedVideoFrameOutput: KSVideoFrameOutput? {
+        didSet {
+            options.videoFrameOutput = decodedVideoFrameOutput
+        }
+    }
 
     public var playbackRate: Float = 1 {
         didSet {
@@ -115,7 +120,7 @@ public class KSMEPlayer: NSObject, @unchecked Sendable {
     }
 
     public required init(url: URL, options: KSOptions) {
-        KSOptions.setAudioSession(options: options)
+        KSOptions.setAudioSession(options: options, playbackPipeline: .decodedPCM)
         audioOutput = KSOptions.audioPlayerType.init()
         playerItem = MEPlayerItem(url: url, options: options)
         if options.videoDisable {
@@ -124,6 +129,7 @@ public class KSMEPlayer: NSObject, @unchecked Sendable {
             videoOutput = KSOptions.videoPlayerType.init(options: options)
         }
         self.options = options
+        decodedVideoFrameOutput = options.videoFrameOutput
         super.init()
         playerItem.delegate = self
         audioOutput.renderSource = playerItem
@@ -170,6 +176,7 @@ private extension KSMEPlayer {
         for track in tracks(mediaType: .audio) {
             (track as? FFmpegAssetTrack)?.audioDescriptor?.updateAudioFormat(options: options)
         }
+        updateAudioRouteDiagnosticForCurrentAudioTrack()
     }
 
     #if !os(macOS)
@@ -185,9 +192,23 @@ private extension KSMEPlayer {
         for track in tracks(mediaType: .audio) {
             (track as? FFmpegAssetTrack)?.audioDescriptor?.updateAudioFormat(options: options)
         }
+        updateAudioRouteDiagnosticForCurrentAudioTrack()
         audioOutput.flush()
     }
     #endif
+
+    func updateAudioRouteDiagnosticForCurrentAudioTrack() {
+        let audioTrack = tracks(mediaType: .audio).first { $0.isEnabled } as? FFmpegAssetTrack
+        KSOptions.updateAudioRouteDiagnostic(
+            options: options,
+            playbackPipeline: .decodedPCM,
+            sourceChannelCount: audioTrack?.audioDescriptor?.sourceChannelCount,
+            containsEncodedPassthroughCandidate: EncodedAudioPassthroughPolicyResolver.isEncodedPassthroughCandidate(metadata: audioTrack?.audioCodecMetadata),
+            allowsExternalPlayback: allowsExternalPlayback,
+            usesExternalPlaybackWhileExternalScreenIsActive: usesExternalPlaybackWhileExternalScreenIsActive,
+            isExternalPlaybackActive: isExternalPlaybackActive
+        )
+    }
 }
 
 extension KSMEPlayer: MEPlayerDelegate {
@@ -205,6 +226,7 @@ extension KSMEPlayer: MEPlayerDelegate {
             guard let self else { return }
             if let audioDescriptor {
                 audioDescriptor.updateAudioFormat(options: options)
+                updateAudioRouteDiagnosticForCurrentAudioTrack()
                 KSLog("[audio] audio type: \(audioOutput) prepare audioFormat )")
                 audioOutput.prepare(audioFormat: audioDescriptor.audioFormat)
             }
@@ -225,7 +247,7 @@ extension KSMEPlayer: MEPlayerDelegate {
     func sourceDidFinished() {
         Task { @MainActor [weak self] in
             guard let self else { return }
-            if self.options.isLoopPlay {
+            if self.playerItem.canRestartLoopPlayback {
                 self.loopCount += 1
                 self.delegate?.playBack(player: self, loopCount: self.loopCount)
                 self.audioOutput.play()
@@ -303,6 +325,14 @@ extension KSMEPlayer: @preconcurrency MediaPlayerProtocol {
     }
 
     public var subtitleDataSouce: SubtitleDataSouce? { self }
+    public var pictureInPictureSubtitleDiagnostic: PictureInPictureSubtitleDiagnostic {
+        PictureInPictureSubtitlePolicyResolver.diagnostic(
+            policy: options.pictureInPictureSubtitlePolicy,
+            usesNativeLegibleSelection: false,
+            supportsSampleBufferBurnIn: true
+        )
+    }
+
     public var playbackVolume: Float {
         get {
             audioOutput.volume
@@ -325,9 +355,12 @@ extension KSMEPlayer: @preconcurrency MediaPlayerProtocol {
 
     public func replace(url: URL, options: KSOptions) {
         KSLog("replaceUrl \(self)")
-        KSOptions.setAudioSession(options: options)
+        KSOptions.setAudioSession(options: options, playbackPipeline: .decodedPCM)
         shutdown()
         playerItem.delegate = nil
+        let inheritedVideoFrameOutput = decodedVideoFrameOutput ?? self.options.videoFrameOutput
+        options.videoFrameOutput = inheritedVideoFrameOutput
+        decodedVideoFrameOutput = inheritedVideoFrameOutput
         playerItem = MEPlayerItem(url: url, options: options)
         if options.videoDisable {
             videoOutput = nil
@@ -484,10 +517,24 @@ extension KSMEPlayer: @preconcurrency MediaPlayerProtocol {
     public func select(track: some MediaPlayerTrack) {
         let isSeek = playerItem.select(track: track)
         if isSeek {
+            updateAudioRouteDiagnosticForCurrentAudioTrack()
             audioOutput.flush()
         }
     }
+
+    func setPictureInPictureActive(_ active: Bool) {
+        (videoOutput as? PictureInPictureSubtitleBurnInRendering)?.isPictureInPictureActive = active
+        if !active {
+            setPictureInPictureSubtitleSnapshot(nil)
+        }
+    }
+
+    func setPictureInPictureSubtitleSnapshot(_ snapshot: PictureInPictureSubtitleSnapshot?) {
+        (videoOutput as? PictureInPictureSubtitleBurnInRendering)?.pictureInPictureSubtitleSnapshot = snapshot
+    }
 }
+
+extension KSMEPlayer: DecodedVideoFrameOutputConfigurable {}
 
 @available(tvOS 14.0, *)
 extension KSMEPlayer: AVPictureInPictureSampleBufferPlaybackDelegate {
@@ -587,6 +634,10 @@ extension KSMEPlayer: AVPlaybackCoordinatorPlaybackControlDelegate {
 extension KSMEPlayer: DisplayLayerDelegate {
     public func change(displayLayer: AVSampleBufferDisplayLayer) {
         if #available(iOS 15.0, tvOS 15.0, macOS 12.0, *) {
+            if pipController?.isPictureInPictureActive == true {
+                pipController?.stop(restoreUserInterface: false)
+                KSLog("[pip] stopped sample-buffer Picture in Picture because the display layer changed")
+            }
             let contentSource = AVPictureInPictureController.ContentSource(sampleBufferDisplayLayer: displayLayer, playbackDelegate: self)
             _pipController = KSPictureInPictureController(contentSource: contentSource)
             // 更改contentSource会直接crash
@@ -596,11 +647,53 @@ extension KSMEPlayer: DisplayLayerDelegate {
 }
 
 public extension KSMEPlayer {
-    func startRecord(url: URL) {
-        playerItem.startRecord(url: url)
+    func startRecord(url: URL, progress: (@Sendable (StreamRecordingProgress) -> Void)? = nil) {
+        playerItem.startRecord(url: url, progress: progress)
     }
 
-    func stoptRecord() {
+    func stopRecord() {
         playerItem.stopRecord()
+    }
+
+    @available(*, deprecated, renamed: "stopRecord()")
+    func stoptRecord() {
+        stopRecord()
+    }
+}
+
+public struct StreamRecordingSupportDiagnostic: Equatable, Sendable {
+    public let isSupported: Bool
+    public let message: String
+
+    public init(isSupported: Bool, message: String) {
+        self.isSupported = isSupported
+        self.message = message
+    }
+}
+
+enum StreamRecordingSourcePolicy {
+    static func diagnostic(playerType: MediaPlayerProtocol.Type, audioURL: URL?) -> StreamRecordingSupportDiagnostic {
+        if let audioURL {
+            return StreamRecordingSupportDiagnostic(
+                isSupported: false,
+                message: "Live stream recording does not merge separate audio sources. The active audio URL is \(audioURL.ksRedactedAbsoluteString)."
+            )
+        }
+        if playerType == KSMEPlayer.self {
+            return StreamRecordingSupportDiagnostic(
+                isSupported: true,
+                message: "KSMEPlayer can stream-copy active demuxed audio/video and compatible embedded subtitle streams to a temporary file, then finalize on stop."
+            )
+        }
+        return StreamRecordingSupportDiagnostic(
+            isSupported: false,
+            message: "Live stream recording is KSMEPlayer-only; AVPlayer/native playback does not expose packets for KSPlayer stream-copy recording."
+        )
+    }
+}
+
+public extension KSPlayerLayer {
+    var streamRecordingSupportDiagnostic: StreamRecordingSupportDiagnostic {
+        StreamRecordingSourcePolicy.diagnostic(playerType: type(of: player), audioURL: audioURL)
     }
 }

@@ -196,10 +196,26 @@ class APPModel: ObservableObject {
 //        KSOptions.firstPlayerType = KSMEPlayer.self
         KSOptions.secondPlayerType = KSMEPlayer.self
         _ = Defaults.shared
-        KSOptions.subtitleDataSouces = [DirectorySubtitleDataSouce(), ShooterSubtitleDataSouce(), AssrtSubtitleDataSouce(token: "5IzWrb2J099vmA96ECQXwdRSe9xdoBUv"), OpenSubtitleDataSouce(apiKey: "0D0gt8nV6SFHVVejdxAMpvOT0wByfKE5")]
+        KSOptions.subtitleDataSouces = [DirectorySubtitleDataSouce()]
+        KSOptions.onlineSubtitleProviders = Self.onlineSubtitleProvidersFromEnvironment()
         if let activeM3UURL {
             addM3U(url: activeM3UURL)
         }
+    }
+
+    private static func onlineSubtitleProvidersFromEnvironment() -> [any OnlineSubtitleProvider] {
+        let environment = ProcessInfo.processInfo.environment
+        var providers: [any OnlineSubtitleProvider] = [ShooterOnlineSubtitleProvider()]
+        if let token = environment.nonEmptyValue(forKey: "KSPLAYER_ASSRT_TOKEN") {
+            providers.append(AssrtOnlineSubtitleProvider(token: token))
+        }
+        if let apiKey = environment.nonEmptyValue(forKey: "KSPLAYER_OPENSUBTITLES_API_KEY") {
+            providers.append(OpenSubtitlesOnlineSubtitleProvider(
+                apiKey: apiKey,
+                token: environment.nonEmptyValue(forKey: "KSPLAYER_OPENSUBTITLES_TOKEN")
+            ))
+        }
+        return providers
     }
 
     func addM3U(url: URL, name: String? = nil) {
@@ -249,5 +265,12 @@ struct KSVideoPlayerView_Previews: PreviewProvider {
         ContentView()
             .environmentObject(APPModel())
             .environment(\.managedObjectContext, PersistenceController.preview.container.viewContext)
+    }
+}
+
+private extension Dictionary where Key == String, Value == String {
+    func nonEmptyValue(forKey key: String) -> String? {
+        let value = self[key]?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return value?.isEmpty == false ? value : nil
     }
 }

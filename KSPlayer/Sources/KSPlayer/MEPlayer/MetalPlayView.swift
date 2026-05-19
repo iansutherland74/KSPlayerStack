@@ -25,7 +25,12 @@ public protocol VideoOutput: FrameOutput {
     func readNextFrame()
 }
 
-public final class MetalPlayView: UIView, @preconcurrency VideoOutput {
+protocol PictureInPictureSubtitleBurnInRendering: AnyObject {
+    var isPictureInPictureActive: Bool { get set }
+    var pictureInPictureSubtitleSnapshot: PictureInPictureSubtitleSnapshot? { get set }
+}
+
+public final class MetalPlayView: UIView, @preconcurrency VideoOutput, @preconcurrency PictureInPictureSubtitleBurnInRendering {
     private struct UpscalingSourceKey: Equatable {
         let width: Int
         let height: Int
@@ -51,9 +56,10 @@ public final class MetalPlayView: UIView, @preconcurrency VideoOutput {
     }
 
     private var isDovi: Bool = false
+    private var currentVideoDynamicRange: DynamicRange?
     private var formatDescription: CMFormatDescription? {
         didSet {
-            options.updateVideo(refreshRate: fps, isDovi: isDovi, formatDescription: formatDescription)
+            updateDisplayCriteria()
         }
     }
 
@@ -61,7 +67,7 @@ public final class MetalPlayView: UIView, @preconcurrency VideoOutput {
         didSet {
             if fps != oldValue {
                 updateDisplayLinkFrameRate()
-                options.updateVideo(refreshRate: fps, isDovi: isDovi, formatDescription: formatDescription)
+                updateDisplayCriteria()
             }
         }
     }
@@ -93,6 +99,8 @@ public final class MetalPlayView: UIView, @preconcurrency VideoOutput {
     private let videoUpscaler = VideoUpscaler()
     private var sourceUpscalingKey: UpscalingSourceKey?
     private var loggedHighPerformanceMessages = Set<String>()
+    var isPictureInPictureActive = false
+    var pictureInPictureSubtitleSnapshot: PictureInPictureSubtitleSnapshot?
     public weak var displayLayerDelegate: DisplayLayerDelegate?
     public init(options: KSOptions) {
         self.options = options
@@ -216,7 +224,9 @@ extension MetalPlayView {
                 if let dar = options.customizeDar(sar: sourcePixelBuffer.aspectRatio, par: sourcePar) {
                     cvPixelBuffer.aspectRatio = CGSize(width: dar.width, height: dar.height * sourcePar.width / sourcePar.height)
                 }
-                let sourceDynamicRange = videoDynamicRange(pixelBuffer: sourcePixelBuffer, isDovi: isDovi)
+                let sourceDynamicRange = videoDynamicRange(pixelBuffer: sourcePixelBuffer, frame: frame)
+                currentVideoDynamicRange = sourceDynamicRange
+                updateDisplayCriteria()
                 resetUpscalerIfSourceChanged(sourcePixelBuffer, dynamicRange: sourceDynamicRange)
                 let upscalingSkipReason = HighPerformanceVideoPlaybackPolicy.upscalingSkipReason(
                     mode: options.videoUpscaling,
@@ -247,28 +257,57 @@ extension MetalPlayView {
             }
             let par = renderPixelBuffer.size
             let sar = renderPixelBuffer.aspectRatio
-            let dynamicRange = videoDynamicRange(pixelBuffer: renderPixelBuffer, isDovi: isDovi)
-            if let pixelBuffer = renderPixelBuffer.cvPixelBuffer, options.isUseDisplayLayer(dynamicRange: dynamicRange) {
+            let dynamicRange = videoDynamicRange(pixelBuffer: renderPixelBuffer, frame: frame)
+            currentVideoDynamicRange = dynamicRange
+            updateDisplayCriteria()
+            let hdr10PlusMetadata = frame.edrMetaData?.hdr10PlusMetadata
+            let hasHDR10PlusMetadata = frame.edrMetaData?.hasHDR10PlusMetadata == true || hdr10PlusMetadata != nil
+            let usesDisplayLayer = renderPixelBuffer.cvPixelBuffer != nil && options.isUseDisplayLayer(
+                dynamicRange: dynamicRange,
+                hasHDR10PlusMetadata: hasHDR10PlusMetadata
+            )
+            if let diagnostic = options.hdr10PlusPlaybackDiagnostic(
+                hasHDR10PlusMetadata: hasHDR10PlusMetadata,
+                usesDisplayLayer: usesDisplayLayer,
+                metadata: hdr10PlusMetadata
+            ) {
+                logHighPerformanceOnce("[video] \(diagnostic.description)")
+            }
+            let hdr10PlusToneMapping = options.hdr10PlusMetalToneMappingUniform(
+                metadata: hdr10PlusMetadata,
+                dynamicRange: dynamicRange
+            )
+            let depthMap = video2DTo3DDepthMap(pixelBuffer: renderPixelBuffer, time: cmtime, dynamicRange: dynamicRange)
+            let video2DTo3D = options.video2DTo3DRenderConfiguration(hasDepthMap: depthMap != nil)
+            if let pixelBuffer = renderPixelBuffer.cvPixelBuffer, usesDisplayLayer {
                 if displayView.isHidden {
                     displayView.isHidden = false
                     metalView.isHidden = true
                     metalView.clear()
                 }
-                checkFormatDescription(pixelBuffer: pixelBuffer)
-                set(pixelBuffer: pixelBuffer, time: cmtime)
+                let displayPixelBuffer = pictureInPictureSubtitlePixelBuffer(
+                    source: pixelBuffer,
+                    dynamicRange: dynamicRange
+                )
+                checkFormatDescription(pixelBuffer: displayPixelBuffer)
+                set(pixelBuffer: displayPixelBuffer, time: cmtime)
             } else {
+                updatePictureInPictureSubtitleDiagnosticForCurrentFrame(
+                    reason: usesDisplayLayer ? nil : "the current KSMEPlayer frame is rendered through Metal and is not emitted as a sample buffer for PiP"
+                )
                 if !displayView.isHidden {
                     displayView.isHidden = true
                     metalView.isHidden = false
                     displayView.displayLayer.flushAndRemoveImage()
                 }
-                let size: CGSize
+                var size: CGSize
                 if options.display == .plane {
                     if let dar = options.customizeDar(sar: sar, par: par) {
                         size = CGSize(width: par.width, height: par.width * dar.height / dar.width)
                     } else {
                         size = CGSize(width: par.width, height: par.height * sar.height / sar.width)
                     }
+                    size = video2DTo3D.drawableSize(for: size)
                 } else {
                     size = KSOptions.sceneSize
                 }
@@ -284,11 +323,40 @@ extension MetalPlayView {
                     size: size,
                     colorAdjustment: options.videoColorAdjustment,
                     dynamicRange: dynamicRange,
+                    hdr10PlusToneMapping: hdr10PlusToneMapping,
+                    video2DTo3D: video2DTo3D,
+                    depthMap: depthMap,
+                    stereoscopicVideoLayout: options.stereoscopicVideoLayout,
+                    stereoscopicVideoEye: options.stereoscopicVideoEye,
                     panoramaStereoLayout: options.panoramaStereoLayout,
                     panoramaFieldOfView: options.panoramaFieldOfView
                 )
             }
             renderSource?.setVideo(time: cmtime, position: frame.position)
+        }
+    }
+
+    private func video2DTo3DDepthMap(pixelBuffer: PixelBufferProtocol, time: CMTime, dynamicRange: DynamicRange?) -> VideoDepthMap? {
+        guard Video2DTo3DPolicy.isSupportedPlatform,
+              options.video2DTo3DMode == .depthMapPreferred,
+              options.display == .plane,
+              options.stereoscopicVideoLayout == .mono,
+              let provider = options.videoDepthEstimationProvider,
+              let cvPixelBuffer = pixelBuffer.cvPixelBuffer
+        else {
+            return nil
+        }
+        let request = VideoDepthEstimationRequest(
+            pixelBuffer: cvPixelBuffer,
+            presentationTime: time,
+            naturalSize: pixelBuffer.size,
+            dynamicRange: dynamicRange
+        )
+        do {
+            return try provider.makeDepthMap(request: request)
+        } catch {
+            logHighPerformanceOnce("[video] 2D-to-3D depth provider \(provider.providerID) failed: \(error.localizedDescription). Falling back to pseudo-stereo.")
+            return nil
         }
     }
 
@@ -304,9 +372,16 @@ extension MetalPlayView {
         sourceUpscalingKey = sourceKey
     }
 
-    private func videoDynamicRange(pixelBuffer: PixelBufferProtocol, isDovi: Bool) -> DynamicRange? {
-        if isDovi {
-            return .dolbyVision
+    private func updateDisplayCriteria() {
+        options.updateVideo(
+            refreshRate: fps,
+            dynamicRange: currentVideoDynamicRange ?? formatDescription?.dynamicRange
+        )
+    }
+
+    private func videoDynamicRange(pixelBuffer: PixelBufferProtocol, frame: VideoVTBFrame) -> DynamicRange? {
+        if frame.isDovi, let fallbackDynamicRange = frame.dolbyVisionFallbackDynamicRange {
+            return fallbackDynamicRange
         }
         if let dynamicRange = pixelBuffer.formatDescription?.dynamicRange {
             return dynamicRange
@@ -361,6 +436,42 @@ extension MetalPlayView {
         }
     }
 
+    private func pictureInPictureSubtitlePixelBuffer(source pixelBuffer: CVPixelBuffer, dynamicRange: DynamicRange?) -> CVPixelBuffer {
+        guard isPictureInPictureActive, options.pictureInPictureSubtitlePolicy == .burnIn else {
+            return pixelBuffer
+        }
+        guard let snapshot = pictureInPictureSubtitleSnapshot, !snapshot.isEmpty else {
+            updatePictureInPictureSubtitleDiagnosticForCurrentFrame(reason: nil)
+            return pixelBuffer
+        }
+        guard dynamicRange == nil || dynamicRange == .sdr else {
+            updatePictureInPictureSubtitleDiagnosticForCurrentFrame(reason: PictureInPictureSubtitleComposer.unsupportedDynamicRangeReason)
+            return pixelBuffer
+        }
+        guard let compositedPixelBuffer = PictureInPictureSubtitleComposer.compositedPixelBuffer(source: pixelBuffer, snapshot: snapshot) else {
+            updatePictureInPictureSubtitleDiagnosticForCurrentFrame(reason: PictureInPictureSubtitleComposer.unsupportedPixelBufferReason)
+            return pixelBuffer
+        }
+        updatePictureInPictureSubtitleDiagnosticForCurrentFrame(reason: nil)
+        return compositedPixelBuffer
+    }
+
+    private func updatePictureInPictureSubtitleDiagnosticForCurrentFrame(reason: String?) {
+        guard isPictureInPictureActive, options.pictureInPictureSubtitlePolicy == .burnIn else {
+            return
+        }
+        let diagnostic = PictureInPictureSubtitlePolicyResolver.diagnostic(
+            policy: options.pictureInPictureSubtitlePolicy,
+            usesNativeLegibleSelection: false,
+            supportsSampleBufferBurnIn: reason == nil,
+            burnInUnavailableReason: reason
+        )
+        if options.pictureInPictureSubtitleDiagnostic != diagnostic {
+            options.pictureInPictureSubtitleDiagnostic = diagnostic
+            KSLog("[pip] subtitle policy: \(diagnostic.description)")
+        }
+    }
+
     private func resetUpscalingState() {
         sourceUpscalingKey = nil
         videoUpscaler.reset()
@@ -370,6 +481,7 @@ extension MetalPlayView {
 
 class MetalView: UIView {
     private let render = MetalRender()
+    private var neutralDepthTexture: MTLTexture?
     #if canImport(UIKit)
     override public class var layerClass: AnyClass { CAMetalLayer.self }
     #endif
@@ -406,6 +518,11 @@ class MetalView: UIView {
         size: CGSize,
         colorAdjustment: VideoColorAdjustment,
         dynamicRange: DynamicRange?,
+        hdr10PlusToneMapping: HDR10PlusMetalToneMappingUniform?,
+        video2DTo3D: Video2DTo3DRenderConfiguration,
+        depthMap: VideoDepthMap?,
+        stereoscopicVideoLayout: StereoscopicVideoLayout,
+        stereoscopicVideoEye: StereoscopicVideoEye,
         panoramaStereoLayout: PanoramaStereoLayout,
         panoramaFieldOfView: PanoramaFieldOfView
     ) {
@@ -440,9 +557,51 @@ class MetalView: UIView {
             drawable: drawable,
             colorAdjustment: colorAdjustment,
             dynamicRange: dynamicRange,
+            hdr10PlusToneMapping: hdr10PlusToneMapping,
+            video2DTo3D: video2DTo3D,
+            depthTexture: makeDepthTexture(depthMap: depthMap),
+            stereoscopicVideoLayout: stereoscopicVideoLayout,
+            stereoscopicVideoEye: stereoscopicVideoEye,
             panoramaStereoLayout: panoramaStereoLayout,
             panoramaFieldOfView: panoramaFieldOfView
         )
+    }
+
+    private func makeDepthTexture(depthMap: VideoDepthMap?) -> MTLTexture? {
+        guard let depthMap else {
+            if let neutralDepthTexture {
+                return neutralDepthTexture
+            }
+            neutralDepthTexture = makeDepthTexture(width: 1, height: 1, values: [0.5], label: "neutralDepth")
+            return neutralDepthTexture
+        }
+        return makeDepthTexture(
+            width: depthMap.width,
+            height: depthMap.height,
+            values: depthMap.normalizedDisparity,
+            label: "videoDepth"
+        )
+    }
+
+    private func makeDepthTexture(width: Int, height: Int, values: [Float], label: String) -> MTLTexture? {
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .r32Float, width: width, height: height, mipmapped: false)
+        descriptor.usage = [.shaderRead]
+        guard let texture = MetalRender.device.makeTexture(descriptor: descriptor) else {
+            return nil
+        }
+        texture.label = label
+        values.withUnsafeBytes { rawBuffer in
+            guard let baseAddress = rawBuffer.baseAddress else {
+                return
+            }
+            texture.replace(
+                region: MTLRegionMake2D(0, 0, width, height),
+                mipmapLevel: 0,
+                withBytes: baseAddress,
+                bytesPerRow: width * MemoryLayout<Float>.stride
+            )
+        }
+        return texture
     }
 }
 
@@ -481,6 +640,7 @@ class AVSampleBufferDisplayView: UIView {
         var sampleBuffer: CMSampleBuffer?
         CMSampleBufferCreateReadyWithImageBuffer(allocator: kCFAllocatorDefault, imageBuffer: imageBuffer, formatDescription: formatDescription, sampleTiming: [timing], sampleBufferOut: &sampleBuffer)
         if let sampleBuffer {
+            propagateVideoColorAttachments(from: imageBuffer, to: sampleBuffer)
             if let attachmentsArray = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: true) as? [NSMutableDictionary], let dic = attachmentsArray.first {
                 dic[kCMSampleAttachmentKey_DisplayImmediately] = true
             }
@@ -502,6 +662,21 @@ class AVSampleBufferDisplayView: UIView {
                 //                    if let error = displayLayer.error as NSError?, error.code == -11847 {
                 //                        displayLayer.stopRequestingMediaData()
                 //                    }
+            }
+        }
+    }
+
+    private func propagateVideoColorAttachments(from imageBuffer: CVPixelBuffer, to sampleBuffer: CMSampleBuffer) {
+        let keys: [CFString] = [
+            kCVImageBufferColorPrimariesKey,
+            kCVImageBufferTransferFunctionKey,
+            kCVImageBufferYCbCrMatrixKey,
+            kCVImageBufferCGColorSpaceKey,
+            kCVImageBufferGammaLevelKey,
+        ]
+        for key in keys {
+            if let value = CVBufferCopyAttachment(imageBuffer, key, nil) {
+                CMSetAttachment(sampleBuffer, key: key, value: value, attachmentMode: kCMAttachmentMode_ShouldPropagate)
             }
         }
     }

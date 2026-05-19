@@ -7,6 +7,21 @@
 
 import AVKit
 
+enum PictureInPictureStartPolicy {
+    static func unavailableReason(isSystemSupported: Bool, hasController: Bool, isPossible: Bool) -> String? {
+        guard isSystemSupported else {
+            return "system Picture in Picture support is unavailable"
+        }
+        guard hasController else {
+            return "player does not expose a Picture in Picture controller"
+        }
+        guard isPossible else {
+            return "Picture in Picture is not possible for the current player state"
+        }
+        return nil
+    }
+}
+
 @available(tvOS 14.0, *)
 public class KSPictureInPictureController: AVPictureInPictureController {
     nonisolated(unsafe) private static var pipController: KSPictureInPictureController?
@@ -21,45 +36,73 @@ public class KSPictureInPictureController: AVPictureInPictureController {
     func stop(restoreUserInterface: Bool) {
         stopPictureInPicture()
         delegate = nil
+        if KSPictureInPictureController.pipController === self {
+            KSPictureInPictureController.pipController = nil
+        }
+        let restoreViewController = viewController
+        let restoreOriginalViewController = originalViewController
+        let restorePresentingViewController = presentingViewController
+        #if canImport(UIKit)
+        let restoreNavigationController = navigationController
+        #endif
+        defer {
+            originalViewController = nil
+            viewController = nil
+            presentingViewController = nil
+            #if canImport(UIKit)
+            navigationController = nil
+            #endif
+            view = nil
+        }
         guard KSOptions.isPipPopViewController else {
             return
         }
-        KSPictureInPictureController.pipController = nil
         if restoreUserInterface {
             #if canImport(UIKit)
-            runOnMainThread { [weak self] in
-                guard let self, let viewController, let originalViewController else { return }
-                if let nav = viewController as? UINavigationController,
-                   nav.viewControllers.isEmpty || (nav.viewControllers.count == 1 && nav.viewControllers[0] != originalViewController)
+            runOnMainThread {
+                guard let restoreViewController, let restoreOriginalViewController else { return }
+                if let nav = restoreViewController as? UINavigationController,
+                   nav.viewControllers.isEmpty || (nav.viewControllers.count == 1 && nav.viewControllers[0] != restoreOriginalViewController)
                 {
-                    nav.viewControllers = [originalViewController]
+                    nav.viewControllers = [restoreOriginalViewController]
                 }
-                if let navigationController {
-                    var viewControllers = navigationController.viewControllers
-                    if viewControllers.count > 1, let last = viewControllers.last, type(of: last) == type(of: viewController) {
-                        viewControllers[viewControllers.count - 1] = viewController
-                        navigationController.viewControllers = viewControllers
+                if let restoreNavigationController {
+                    var viewControllers = restoreNavigationController.viewControllers
+                    if viewControllers.count > 1, let last = viewControllers.last, type(of: last) == type(of: restoreViewController) {
+                        viewControllers[viewControllers.count - 1] = restoreViewController
+                        restoreNavigationController.viewControllers = viewControllers
                     }
-                    if viewControllers.firstIndex(of: viewController) == nil {
+                    if viewControllers.firstIndex(of: restoreViewController) == nil {
                         // 新的swiftUI push之后。view会变成是emptyView。所以页面就空白了。
-                        navigationController.pushViewController(viewController, animated: true)
+                        restoreNavigationController.pushViewController(restoreViewController, animated: true)
                     }
                 } else {
-                    presentingViewController?.present(originalViewController, animated: true)
+                    restorePresentingViewController?.present(restoreOriginalViewController, animated: true)
                 }
             }
             #endif
             view?.player.isMuted = false
             view?.play()
         }
-
-        originalViewController = nil
-        view = nil
     }
 
-    func start(view: KSPlayerLayer) {
-        startPictureInPicture()
+    @discardableResult
+    func start(view: KSPlayerLayer) -> Bool {
         delegate = view
+        if let reason = PictureInPictureStartPolicy.unavailableReason(
+            isSystemSupported: AVPictureInPictureController.isPictureInPictureSupported(),
+            hasController: true,
+            isPossible: isPictureInPicturePossible
+        ) {
+            KSLog("[pip] start skipped: \(reason)")
+            delegate = nil
+            return false
+        }
+        self.view = view
+        guard !isPictureInPictureActive else {
+            return true
+        }
+        startPictureInPicture()
         guard KSOptions.isPipPopViewController else {
             #if canImport(UIKit)
             // 直接退到后台
@@ -67,9 +110,9 @@ public class KSPictureInPictureController: AVPictureInPictureController {
                 UIControl().sendAction(#selector(URLSessionTask.suspend), to: UIApplication.shared, for: nil)
             }
             #endif
-            return
+            KSPictureInPictureController.pipController = self
+            return true
         }
-        self.view = view
         #if canImport(UIKit)
         runOnMainThread { [weak self] in
             guard let self, let viewController = view.player.view?.viewController else { return }
@@ -102,6 +145,7 @@ public class KSPictureInPictureController: AVPictureInPictureController {
         }
         #endif
         KSPictureInPictureController.pipController = self
+        return true
     }
 
     static func mute() {

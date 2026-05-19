@@ -25,13 +25,30 @@ public struct OnlineSubtitleSearchRequest: Sendable, Equatable {
         tmdbID: Int? = nil,
         userAgent: String? = nil
     ) {
-        self.query = query
-        self.languages = languages
+        let normalizedQuery = query?.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.query = normalizedQuery?.isEmpty == false ? normalizedQuery : nil
+        self.languages = Self.normalizedLanguages(languages)
         self.fileURL = fileURL
-        self.movieHash = movieHash
+        let normalizedMovieHash = movieHash?.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.movieHash = normalizedMovieHash?.isEmpty == false ? normalizedMovieHash : nil
         self.imdbID = imdbID
         self.tmdbID = tmdbID
         self.userAgent = userAgent
+    }
+
+    private static func normalizedLanguages(_ languages: [String]) -> [String] {
+        var seen = Set<String>()
+        return languages.compactMap { language in
+            let normalized = language.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !normalized.isEmpty else {
+                return nil
+            }
+            let key = normalized.lowercased()
+            guard seen.insert(key).inserted else {
+                return nil
+            }
+            return normalized
+        }
     }
 }
 
@@ -72,6 +89,12 @@ public protocol OnlineSubtitleProvider: Sendable {
     func searchSubtitles(request: OnlineSubtitleSearchRequest) async throws -> [OnlineSubtitleSearchResult]
 }
 
+public enum OnlineSubtitleProviderError: Error, Sendable, Equatable {
+    case invalidHTTPResponse
+    case httpStatus(Int)
+    case rateLimited(retryAfter: TimeInterval?)
+}
+
 public final class OnlineSubtitleDataSouce: FileURLSubtitleDataSouce, SearchSubtitleDataSouce {
     public var infos = [any SubtitleInfo]()
     private let providers: [any OnlineSubtitleProvider]
@@ -80,7 +103,8 @@ public final class OnlineSubtitleDataSouce: FileURLSubtitleDataSouce, SearchSubt
 
     public init(providers: [any OnlineSubtitleProvider], languages: [String] = [], userAgent: String? = nil) {
         self.providers = providers
-        defaultLanguages = languages
+        let normalizedLanguages = Self.normalizedLanguages(languages)
+        defaultLanguages = normalizedLanguages.isEmpty ? Self.normalizedLanguages(KSOptions.onlineSubtitleLanguages) : normalizedLanguages
         self.userAgent = userAgent
     }
 
@@ -103,11 +127,24 @@ public final class OnlineSubtitleDataSouce: FileURLSubtitleDataSouce, SearchSubt
 
     public func searchSubtitles(request: OnlineSubtitleSearchRequest) async throws -> [OnlineSubtitleSearchResult] {
         var results = [OnlineSubtitleSearchResult]()
+        var firstError: Error?
         for provider in providers {
             try Task.checkCancellation()
-            results.append(contentsOf: try await provider.searchSubtitles(request: request))
+            do {
+                results.append(contentsOf: try await provider.searchSubtitles(request: request))
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                if firstError == nil {
+                    firstError = error
+                }
+            }
         }
-        return results
+        let uniqueResults = Self.rankedUniqueResults(results, request: request)
+        if uniqueResults.isEmpty, let firstError {
+            throw firstError
+        }
+        return uniqueResults
     }
 
     private func updateInfos(request: OnlineSubtitleSearchRequest) async throws {
@@ -115,9 +152,73 @@ public final class OnlineSubtitleDataSouce: FileURLSubtitleDataSouce, SearchSubt
             let name = result.name.isEmpty ? result.downloadURL.lastPathComponent : result.name
             let info = URLSubtitleInfo(subtitleID: "\(result.providerID):\(result.subtitleID)", name: name, url: result.downloadURL, userAgent: request.userAgent)
             info.delay = result.delay
-            info.comment = result.comment
+            info.comment = Self.comment(for: result)
             return info
         }
+    }
+
+    private static func normalizedLanguages(_ languages: [String]) -> [String] {
+        OnlineSubtitleSearchRequest(query: nil, languages: languages).languages
+    }
+
+    private static func rankedUniqueResults(_ results: [OnlineSubtitleSearchResult], request: OnlineSubtitleSearchRequest) -> [OnlineSubtitleSearchResult] {
+        var seenKeys = Set<String>()
+        var rankedResults = [(result: OnlineSubtitleSearchResult, index: Int)]()
+        for (index, originalResult) in results.enumerated() {
+            var result = originalResult
+            let providerID = result.providerID.trimmingCharacters(in: .whitespacesAndNewlines)
+            let subtitleID = result.subtitleID.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !providerID.isEmpty else {
+                continue
+            }
+            result.providerID = providerID
+            result.subtitleID = subtitleID.isEmpty ? result.downloadURL.absoluteString : subtitleID
+            result.name = result.name.trimmingCharacters(in: .whitespacesAndNewlines)
+            let idKey = "\(result.providerID.lowercased()):\(result.subtitleID.lowercased())"
+            let urlKey = "url:\(result.downloadURL.absoluteString.lowercased())"
+            guard seenKeys.insert(idKey).inserted, seenKeys.insert(urlKey).inserted else {
+                continue
+            }
+            rankedResults.append((result, index))
+        }
+        return rankedResults.sorted { left, right in
+            let leftScore = score(left.result, request: request)
+            let rightScore = score(right.result, request: request)
+            if leftScore == rightScore {
+                return left.index < right.index
+            }
+            return leftScore > rightScore
+        }.map(\.result)
+    }
+
+    private static func score(_ result: OnlineSubtitleSearchResult, request: OnlineSubtitleSearchRequest) -> Int {
+        let name = result.name.isEmpty ? result.downloadURL.lastPathComponent : result.name
+        let lowercasedName = name.lowercased()
+        var score = 0
+        if let query = request.query?.lowercased(), !query.isEmpty, lowercasedName.contains(query) {
+            score += 20
+        }
+        if let fileURL = request.fileURL {
+            let baseName = fileURL.deletingPathExtension().lastPathComponent.lowercased()
+            if !baseName.isEmpty, lowercasedName.contains(baseName) {
+                score += 40
+            }
+        }
+        if let language = result.language?.lowercased(), request.languages.map({ $0.lowercased() }).contains(language) {
+            score += 30
+        }
+        if let format = result.format?.lowercased(), ["srt", "ass", "ssa", "vtt"].contains(format) {
+            score += 10
+        }
+        return score
+    }
+
+    private static func comment(for result: OnlineSubtitleSearchResult) -> String? {
+        let metadata = [result.language, result.format, result.comment].compactMap { value -> String? in
+            let normalized = value?.trimmingCharacters(in: .whitespacesAndNewlines)
+            return normalized?.isEmpty == false ? normalized : nil
+        }
+        return metadata.isEmpty ? nil : metadata.joined(separator: " - ")
     }
 }
 
@@ -129,15 +230,15 @@ public final class ShooterOnlineSubtitleProvider: OnlineSubtitleProvider, @unche
 
     public func searchSubtitles(request: OnlineSubtitleSearchRequest) async throws -> [OnlineSubtitleSearchResult] {
         let fileHash = request.movieHash ?? request.fileURL?.shooterFilehash
-        guard let urlRequest = Self.makeSearchRequest(fileURL: request.fileURL, fileHash: fileHash) else {
+        guard let urlRequest = Self.makeSearchRequest(fileURL: request.fileURL, fileHash: fileHash, userAgent: request.userAgent) else {
             return []
         }
-        let (data, _) = try await URLSession.shared.data(for: urlRequest)
+        let data = try await OnlineSubtitleHTTPClient.data(for: urlRequest)
         return try Self.decodeSearchResults(data: data)
     }
 
-    public static func makeSearchRequest(fileURL: URL?, fileHash: String?) -> URLRequest? {
-        guard let fileHash, !fileHash.isEmpty,
+    public static func makeSearchRequest(fileURL: URL?, fileHash: String?, userAgent: String? = nil) -> URLRequest? {
+        guard let fileHash = fileHash?.trimmingCharacters(in: .whitespacesAndNewlines), !fileHash.isEmpty,
               let searchApi = URL(string: "https://www.shooter.cn/api/subapi.php")?
               .add(queryItems: ["format": "json", "pathinfo": fileURL?.lastPathComponent ?? "", "filehash": fileHash])
         else {
@@ -145,6 +246,7 @@ public final class ShooterOnlineSubtitleProvider: OnlineSubtitleProvider, @unche
         }
         var request = URLRequest(url: searchApi)
         request.httpMethod = "POST"
+        request.applyOnlineSubtitleUserAgent(userAgent)
         return request
     }
 
@@ -161,7 +263,8 @@ public final class ShooterOnlineSubtitleProvider: OnlineSubtitleProvider, @unche
                 guard let link = file["Link"], let url = URL(string: link) else {
                     return nil
                 }
-                return OnlineSubtitleSearchResult(providerID: "shooter", subtitleID: link, name: url.lastPathComponent, downloadURL: url, delay: delay)
+                let name = url.lastPathComponent
+                return OnlineSubtitleSearchResult(providerID: "shooter", subtitleID: link, name: name, downloadURL: url, format: name.subtitleFormat, delay: delay)
             }
         }
     }
@@ -178,40 +281,42 @@ public final class AssrtOnlineSubtitleProvider: OnlineSubtitleProvider, @uncheck
 
     public func searchSubtitles(request: OnlineSubtitleSearchRequest) async throws -> [OnlineSubtitleSearchResult] {
         guard let query = request.query,
-              let searchRequest = Self.makeSearchRequest(query: query, token: token)
+              let searchRequest = Self.makeSearchRequest(query: query, token: token, userAgent: request.userAgent)
         else {
             return []
         }
-        let (data, _) = try await URLSession.shared.data(for: searchRequest)
+        let data = try await OnlineSubtitleHTTPClient.data(for: searchRequest)
         let ids = try Self.decodeSearchIDs(data: data)
         var results = [OnlineSubtitleSearchResult]()
         for id in ids {
             try Task.checkCancellation()
-            guard let detailRequest = Self.makeDetailRequest(id: id, token: token) else {
+            guard let detailRequest = Self.makeDetailRequest(id: id, token: token, userAgent: request.userAgent) else {
                 continue
             }
-            let (detailData, _) = try await URLSession.shared.data(for: detailRequest)
+            let detailData = try await OnlineSubtitleHTTPClient.data(for: detailRequest)
             results.append(contentsOf: try Self.decodeDetailResults(data: detailData))
         }
         return results
     }
 
-    public static func makeSearchRequest(query: String, token: String) -> URLRequest? {
-        guard !query.isEmpty,
-              let searchApi = URL(string: "https://api.assrt.net/v1/sub/search")?.add(queryItems: ["q": query])
+    public static func makeSearchRequest(query: String, token: String, userAgent: String? = nil) -> URLRequest? {
+        let normalizedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedQuery.isEmpty,
+              let searchApi = URL(string: "https://api.assrt.net/v1/sub/search")?.add(queryItems: ["q": normalizedQuery])
         else {
             return nil
         }
-        return authorizedPostRequest(url: searchApi, token: token)
+        return authorizedPostRequest(url: searchApi, token: token, userAgent: userAgent)
     }
 
-    public static func makeDetailRequest(id: String, token: String) -> URLRequest? {
-        guard !id.isEmpty,
-              let detailApi = URL(string: "https://api.assrt.net/v1/sub/detail")?.add(queryItems: ["id": id])
+    public static func makeDetailRequest(id: String, token: String, userAgent: String? = nil) -> URLRequest? {
+        let normalizedID = id.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedID.isEmpty,
+              let detailApi = URL(string: "https://api.assrt.net/v1/sub/detail")?.add(queryItems: ["id": normalizedID])
         else {
             return nil
         }
-        return authorizedPostRequest(url: detailApi, token: token)
+        return authorizedPostRequest(url: detailApi, token: token, userAgent: userAgent)
     }
 
     public static func decodeSearchIDs(data: Data) throws -> [String] {
@@ -244,7 +349,7 @@ public final class AssrtOnlineSubtitleProvider: OnlineSubtitleProvider, @uncheck
                 guard let urlString = file["url"], let filename = file["f"], let url = URL(string: urlString) else {
                     return nil
                 }
-                return OnlineSubtitleSearchResult(providerID: "assrt", subtitleID: urlString, name: filename, downloadURL: url)
+                return OnlineSubtitleSearchResult(providerID: "assrt", subtitleID: urlString, name: filename, downloadURL: url, format: filename.subtitleFormat)
             }
         }
         guard let urlString = subtitle["url"] as? String,
@@ -253,13 +358,18 @@ public final class AssrtOnlineSubtitleProvider: OnlineSubtitleProvider, @uncheck
         else {
             return []
         }
-        return [OnlineSubtitleSearchResult(providerID: "assrt", subtitleID: urlString, name: filename, downloadURL: url)]
+        return [OnlineSubtitleSearchResult(providerID: "assrt", subtitleID: urlString, name: filename, downloadURL: url, format: filename.subtitleFormat)]
     }
 
-    private static func authorizedPostRequest(url: URL, token: String) -> URLRequest {
+    private static func authorizedPostRequest(url: URL, token: String, userAgent: String?) -> URLRequest? {
+        let normalizedToken = token.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedToken.isEmpty else {
+            return nil
+        }
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
-        request.addValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.addValue("Bearer \(normalizedToken)", forHTTPHeaderField: "Authorization")
+        request.applyOnlineSubtitleUserAgent(userAgent)
         return request
     }
 }
@@ -276,18 +386,18 @@ public final class OpenSubtitlesOnlineSubtitleProvider: OnlineSubtitleProvider, 
     }
 
     public func searchSubtitles(request: OnlineSubtitleSearchRequest) async throws -> [OnlineSubtitleSearchResult] {
-        guard let searchRequest = Self.makeSearchRequest(request: request, apiKey: apiKey, token: token) else {
+        guard let searchRequest = Self.makeSearchRequest(request: request, apiKey: apiKey, token: token, userAgent: request.userAgent) else {
             return []
         }
-        let (data, _) = try await URLSession.shared.data(for: searchRequest)
+        let data = try await OnlineSubtitleHTTPClient.data(for: searchRequest)
         let files = try Self.decodeSearchFiles(data: data)
         var results = [OnlineSubtitleSearchResult]()
         for file in files {
             try Task.checkCancellation()
-            guard let downloadRequest = Self.makeDownloadRequest(fileID: file.fileID, apiKey: apiKey, token: token) else {
+            guard let downloadRequest = Self.makeDownloadRequest(fileID: file.fileID, apiKey: apiKey, token: token, userAgent: request.userAgent) else {
                 continue
             }
-            let (downloadData, _) = try await URLSession.shared.data(for: downloadRequest)
+            let downloadData = try await OnlineSubtitleHTTPClient.data(for: downloadRequest)
             if let result = try Self.decodeDownloadResult(data: downloadData, fallbackFileID: file.fileID, fallbackName: file.fileName) {
                 results.append(result)
             }
@@ -295,7 +405,7 @@ public final class OpenSubtitlesOnlineSubtitleProvider: OnlineSubtitleProvider, 
         return results
     }
 
-    public static func makeSearchRequest(request: OnlineSubtitleSearchRequest, apiKey: String, token: String? = nil) -> URLRequest? {
+    public static func makeSearchRequest(request: OnlineSubtitleSearchRequest, apiKey: String, token: String? = nil, userAgent: String? = nil) -> URLRequest? {
         var queryItems = [String: String]()
         if let query = request.query, !query.isEmpty {
             queryItems["query"] = query
@@ -312,21 +422,23 @@ public final class OpenSubtitlesOnlineSubtitleProvider: OnlineSubtitleProvider, 
         if !request.languages.isEmpty {
             queryItems["languages"] = request.languages.joined(separator: ",")
         }
-        guard !queryItems.isEmpty,
+        guard !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !queryItems.isEmpty,
               let searchApi = URL(string: "https://api.opensubtitles.com/api/v1/subtitles")?.add(queryItems: queryItems)
         else {
             return nil
         }
-        return apiRequest(url: searchApi, apiKey: apiKey, token: token)
+        return apiRequest(url: searchApi, apiKey: apiKey, token: token, userAgent: userAgent)
     }
 
-    public static func makeDownloadRequest(fileID: Int, apiKey: String, token: String? = nil) -> URLRequest? {
+    public static func makeDownloadRequest(fileID: Int, apiKey: String, token: String? = nil, userAgent: String? = nil) -> URLRequest? {
         guard fileID > 0,
+              !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               let downloadApi = URL(string: "https://api.opensubtitles.com/api/v1/download")
         else {
             return nil
         }
-        var request = apiRequest(url: downloadApi, apiKey: apiKey, token: token)
+        var request = apiRequest(url: downloadApi, apiKey: apiKey, token: token, userAgent: userAgent)
         request.httpMethod = "POST"
         request.addValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try? JSONSerialization.data(withJSONObject: ["file_id": fileID])
@@ -362,15 +474,100 @@ public final class OpenSubtitlesOnlineSubtitleProvider: OnlineSubtitleProvider, 
             return nil
         }
         let fileName = json["file_name"] as? String ?? fallbackName
-        return OnlineSubtitleSearchResult(providerID: "opensubtitles", subtitleID: String(fallbackFileID), name: fileName, downloadURL: url)
+        return OnlineSubtitleSearchResult(providerID: "opensubtitles", subtitleID: String(fallbackFileID), name: fileName, downloadURL: url, format: fileName.subtitleFormat)
     }
 
-    private static func apiRequest(url: URL, apiKey: String, token: String?) -> URLRequest {
+    private static func apiRequest(url: URL, apiKey: String, token: String?, userAgent: String?) -> URLRequest {
         var request = URLRequest(url: url)
-        request.addValue(apiKey, forHTTPHeaderField: "Api-Key")
-        if let token {
+        request.addValue(apiKey.trimmingCharacters(in: .whitespacesAndNewlines), forHTTPHeaderField: "Api-Key")
+        if let token = token?.trimmingCharacters(in: .whitespacesAndNewlines), !token.isEmpty {
             request.addValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         }
+        request.applyOnlineSubtitleUserAgent(userAgent)
         return request
+    }
+}
+
+private enum OnlineSubtitleHTTPClient {
+    private static let retryableStatusCodes: Set<Int> = [408, 429, 500, 502, 503, 504]
+
+    static func data(for request: URLRequest, retries: Int = 1) async throws -> Data {
+        var attempt = 0
+        while true {
+            try Task.checkCancellation()
+            do {
+                let (data, response) = try await URLSession.shared.data(for: request)
+                guard let httpResponse = response as? HTTPURLResponse else {
+                    throw OnlineSubtitleProviderError.invalidHTTPResponse
+                }
+                guard (200..<300).contains(httpResponse.statusCode) else {
+                    if attempt < retries, retryableStatusCodes.contains(httpResponse.statusCode) {
+                        attempt += 1
+                        try await waitBeforeRetry(httpResponse: httpResponse)
+                        continue
+                    }
+                    if httpResponse.statusCode == 429 {
+                        throw OnlineSubtitleProviderError.rateLimited(retryAfter: retryAfter(from: httpResponse))
+                    }
+                    throw OnlineSubtitleProviderError.httpStatus(httpResponse.statusCode)
+                }
+                return data
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch let error as OnlineSubtitleProviderError {
+                throw error
+            } catch {
+                if attempt < retries {
+                    attempt += 1
+                    try await waitBeforeRetry(httpResponse: nil)
+                    continue
+                }
+                throw error
+            }
+        }
+    }
+
+    private static func waitBeforeRetry(httpResponse: HTTPURLResponse?) async throws {
+        let delay = min(retryAfter(from: httpResponse) ?? 0.25, 2)
+        try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+    }
+
+    private static func retryAfter(from response: HTTPURLResponse?) -> TimeInterval? {
+        guard let value = response?.value(forHTTPHeaderField: "Retry-After") else {
+            return nil
+        }
+        if let seconds = TimeInterval(value) {
+            return seconds
+        }
+        if let date = HTTPDateFormatter.formatter.date(from: value) {
+            return max(0, date.timeIntervalSinceNow)
+        }
+        return nil
+    }
+}
+
+private enum HTTPDateFormatter {
+    static let formatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter.dateFormat = "EEE',' dd MMM yyyy HH':'mm':'ss z"
+        return formatter
+    }()
+}
+
+private extension URLRequest {
+    mutating func applyOnlineSubtitleUserAgent(_ userAgent: String?) {
+        let normalized = userAgent?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let normalized, !normalized.isEmpty {
+            addValue(normalized, forHTTPHeaderField: "User-Agent")
+        }
+    }
+}
+
+private extension String {
+    var subtitleFormat: String? {
+        let pathExtension = (self as NSString).pathExtension.trimmingCharacters(in: .whitespacesAndNewlines)
+        return pathExtension.isEmpty ? nil : pathExtension.lowercased()
     }
 }

@@ -64,6 +64,116 @@ public enum FFmpegVideoDecodeSupport: Equatable, CustomStringConvertible {
     }
 }
 
+enum FFmpegClosedCaptionFormat: Equatable {
+    case cea608
+    case cea708
+    case cea608And708
+    case unknown
+
+    var containsCEA608: Bool {
+        switch self {
+        case .cea608, .cea608And708, .unknown:
+            return true
+        case .cea708:
+            return false
+        }
+    }
+
+    var displayName: String? {
+        switch self {
+        case .cea608:
+            return "CEA-608"
+        case .cea708:
+            return "CEA-708"
+        case .cea608And708:
+            return "CEA-608/708"
+        case .unknown:
+            return nil
+        }
+    }
+}
+
+enum FFmpegClosedCaptionRouting {
+    static func format(codecID: AVCodecID) -> FFmpegClosedCaptionFormat? {
+        if codecID == AV_CODEC_ID_EIA_608 {
+            return .cea608
+        }
+        guard let descriptor = avcodec_descriptor_get(codecID) else {
+            return nil
+        }
+        let name = String(cString: descriptor.pointee.name).lowercased()
+        if name.contains("708") {
+            return .cea708
+        }
+        if name.contains("608") {
+            return .cea608
+        }
+        return nil
+    }
+
+    static func format(a53CCSideData data: UnsafeMutablePointer<UInt8>?, size: Int) -> FFmpegClosedCaptionFormat {
+        guard let data, size >= 3 else {
+            return .unknown
+        }
+        var hasCEA608 = false
+        var hasCEA708 = false
+        var offset = 0
+        while offset + 2 < size {
+            let marker = data[offset]
+            let isValid = marker & 0x04 != 0
+            if isValid {
+                switch marker & 0x03 {
+                case 0, 1:
+                    hasCEA608 = true
+                case 2, 3:
+                    hasCEA708 = true
+                default:
+                    break
+                }
+            }
+            offset += 3
+        }
+        switch (hasCEA608, hasCEA708) {
+        case (true, true):
+            return .cea608And708
+        case (true, false):
+            return .cea608
+        case (false, true):
+            return .cea708
+        case (false, false):
+            return .unknown
+        }
+    }
+
+    static func eia608Payload(a53CCSideData data: UnsafeMutablePointer<UInt8>?, size: Int) -> Data? {
+        guard let data, size > 0 else {
+            return nil
+        }
+        guard size >= 3 else {
+            return Data(bytes: data, count: size)
+        }
+        var payload = Data()
+        var sawValidCaptionTriplet = false
+        var offset = 0
+        while offset + 2 < size {
+            let marker = data[offset]
+            let isValid = marker & 0x04 != 0
+            if isValid {
+                sawValidCaptionTriplet = true
+                let type = marker & 0x03
+                if type == 0 || type == 1 {
+                    payload.append(data.advanced(by: offset), count: 3)
+                }
+            }
+            offset += 3
+        }
+        if !sawValidCaptionTriplet {
+            return Data(bytes: data, count: size)
+        }
+        return payload.isEmpty ? nil : payload
+    }
+}
+
 public class FFmpegAssetTrack: MediaPlayerTrack, SubtitleKindProviding {
     public private(set) var trackID: Int32 = 0
     public let codecName: String
@@ -77,6 +187,7 @@ public class FFmpegAssetTrack: MediaPlayerTrack, SubtitleKindProviding {
     public let formatName: String?
     public let bitDepth: Int32
     private var stream: UnsafeMutablePointer<AVStream>?
+    private var streamlessIsEnabled = false
     var startTime = CMTime.zero
     var codecpar: AVCodecParameters
     var timebase: Timebase = .defaultValue
@@ -100,13 +211,26 @@ public class FFmpegAssetTrack: MediaPlayerTrack, SubtitleKindProviding {
     public var delay: TimeInterval = 0
     var subtitle: SyncPlayerItemTrack<SubtitleFrame>?
     var embeddedFontDirectoryURL: URL?
+    private var closedCaptionFormat: FFmpegClosedCaptionFormat = .unknown
+    private var hasLoggedUnsupportedCEA708ClosedCaptions = false
     // video
     public private(set) var videoDecodeSupport: FFmpegVideoDecodeSupport = .supported
     public private(set) var rotation: Int16 = 0
     public var dovi: DOVIDecoderConfigurationRecord?
+    private let dolbyVisionDiagnosticsLock = NSLock()
+    private var _dolbyVisionPlaybackDiagnostic: DolbyVisionPlaybackDiagnostic?
+    public var dolbyVisionPlaybackDiagnostic: DolbyVisionPlaybackDiagnostic? {
+        dolbyVisionDiagnosticsLock.lock()
+        let diagnostic = _dolbyVisionPlaybackDiagnostic
+        dolbyVisionDiagnosticsLock.unlock()
+        return diagnostic
+    }
+
     public private(set) var hasHDR10PlusMetadata = false
+    public private(set) var hdr10PlusMetadata: HDR10PlusMetadata?
     public let fieldOrder: FFmpegFieldOrder
     public let formatDescription: CMFormatDescription?
+    public private(set) var stereoscopicVideoLayout: StereoscopicVideoLayout?
     public private(set) var panoramaConfiguration: PanoramaVideoConfiguration?
     public private(set) var panoramaProjection: VideoProjection?
     var closedCaptionsTrack: FFmpegAssetTrack?
@@ -203,6 +327,9 @@ public class FFmpegAssetTrack: MediaPlayerTrack, SubtitleKindProviding {
         if mediaType == .video, let metadataConfiguration = PanoramaProjectionPolicy.detectedConfiguration(metadata: metadata) {
             setPanoramaConfiguration(panoramaConfiguration?.merging(metadataConfiguration) ?? metadataConfiguration)
         }
+        if mediaType == .video, stereoscopicVideoLayout == nil {
+            stereoscopicVideoLayout = StereoscopicVideoPolicy.detectedLayout(metadata: metadata)
+        }
         updateAudioCodecMetadata(title: name)
         // AV_DISPOSITION_DEFAULT
         if mediaType == .subtitle {
@@ -258,7 +385,7 @@ public class FFmpegAssetTrack: MediaPlayerTrack, SubtitleKindProviding {
             videoDecodeSupport = Self.videoDecodeSupport(codecID: codecpar.codec_id)
             var doviRecord: DOVIDecoderConfigurationRecord?
             var sphericalProjection: VideoProjection?
-            var stereoLayout: PanoramaStereoLayout?
+            var stereoLayout: StereoscopicVideoLayout?
             if codecpar.nb_coded_side_data > 0, let sideDatas = codecpar.coded_side_data {
                 for i in 0 ..< codecpar.nb_coded_side_data {
                     let sideData = sideDatas[Int(i)]
@@ -266,6 +393,7 @@ public class FFmpegAssetTrack: MediaPlayerTrack, SubtitleKindProviding {
                         doviRecord = sideData.data.withMemoryRebound(to: DOVIDecoderConfigurationRecord.self, capacity: 1) { $0 }.pointee
                     } else if sideData.type == AV_PKT_DATA_DYNAMIC_HDR10_PLUS {
                         hasHDR10PlusMetadata = true
+                        hdr10PlusMetadata = Self.hdr10PlusMetadata(data: sideData.data, size: sideData.size, width: codecpar.width, height: codecpar.height)
                     } else if sideData.type == AV_PKT_DATA_DISPLAYMATRIX {
                         let matrix = sideData.data.withMemoryRebound(to: Int32.self, capacity: 1) { $0 }
                         let rawRotation = -av_display_rotation_get(matrix)
@@ -283,11 +411,13 @@ public class FFmpegAssetTrack: MediaPlayerTrack, SubtitleKindProviding {
                     }
                 }
             }
+            stereoscopicVideoLayout = stereoLayout
             if let sphericalProjection {
-                setPanoramaConfiguration(PanoramaVideoConfiguration(
+                panoramaConfiguration = PanoramaVideoConfiguration(
                     projection: sphericalProjection,
                     stereoLayout: stereoLayout ?? .mono
-                ))
+                )
+                panoramaProjection = sphericalProjection
             }
             let sar = codecpar.sample_aspect_ratio.size
             var extradataSize = Int32(0)
@@ -325,6 +455,7 @@ public class FFmpegAssetTrack: MediaPlayerTrack, SubtitleKindProviding {
                 isConvertNALSize = false
             }
             dovi = doviRecord
+            _dolbyVisionPlaybackDiagnostic = doviRecord.map { DolbyVisionPlaybackDiagnostic(configuration: $0) }
             let format = AVPixelFormat(rawValue: codecpar.format)
             bitDepth = format.bitDepth
             let fullRange = codecpar.color_range == AVCOL_RANGE_JPEG
@@ -336,6 +467,12 @@ public class FFmpegAssetTrack: MediaPlayerTrack, SubtitleKindProviding {
                 kCMFormatDescriptionExtension_FullRangeVideo: fullRange,
                 codecType.rawValue == kCMVideoCodecType_HEVC ? "EnableHardwareAcceleratedVideoDecoder" : "RequireHardwareAcceleratedVideoDecoder": true,
             ]
+            if let fieldCount = fieldOrder.coreMediaFieldCount {
+                dic[kCMFormatDescriptionExtension_FieldCount] = fieldCount
+            }
+            if let fieldDetail = fieldOrder.coreMediaFieldDetail {
+                dic[kCMFormatDescriptionExtension_FieldDetail] = fieldDetail
+            }
             // kCMFormatDescriptionExtension_BitsPerComponent
             if let atomsData, let atomName = codecType.rawValue.sampleDescriptionExtensionAtomName {
                 dic[kCMFormatDescriptionExtension_SampleDescriptionExtensionAtoms] = [atomName: atomsData]
@@ -407,7 +544,7 @@ public class FFmpegAssetTrack: MediaPlayerTrack, SubtitleKindProviding {
         }
     }
 
-    private static func stereoLayout(data: UnsafeMutablePointer<UInt8>?, size: Int32) -> PanoramaStereoLayout? {
+    private static func stereoLayout(data: UnsafeMutablePointer<UInt8>?, size: Int32) -> StereoscopicVideoLayout? {
         guard let data, size >= Int32(MemoryLayout<Int32>.size) else {
             return nil
         }
@@ -431,28 +568,411 @@ public class FFmpegAssetTrack: MediaPlayerTrack, SubtitleKindProviding {
         try codecpar.createContext(options: options)
     }
 
-    func configureAsClosedCaptionsTrack(source: FFmpegAssetTrack) {
+    func configureAsClosedCaptionsTrack(source: FFmpegAssetTrack, format: FFmpegClosedCaptionFormat = .unknown) {
         trackID = -(source.trackID + 1)
-        name = NSLocalizedString("Closed Captions", comment: "Closed caption track name")
+        updateClosedCaptionFormat(format)
         startTime = source.startTime
         timebase = source.timebase
+        streamlessIsEnabled = false
+    }
+
+    func updateClosedCaptionFormat(_ format: FFmpegClosedCaptionFormat) {
+        if format == .unknown, closedCaptionFormat != .unknown {
+            return
+        }
+        closedCaptionFormat = format
+        let baseName = NSLocalizedString("Closed Captions", comment: "Closed caption track name")
+        if let displayName = format.displayName {
+            name = "\(baseName) (\(displayName))"
+        } else {
+            name = baseName
+        }
+    }
+
+    func recordUnsupportedClosedCaptionFormat(_ format: FFmpegClosedCaptionFormat) {
+        guard format == .cea708, !hasLoggedUnsupportedCEA708ClosedCaptions else {
+            return
+        }
+        hasLoggedUnsupportedCEA708ClosedCaptions = true
+        KSLog("[subtitle] CEA-708 captions detected in A53 side data; FFmpeg EIA-608 decoder routing is skipped because KSPlayer does not have a CEA-708 decoder for this path")
     }
 
     func markHDR10PlusMetadataDetected() {
         hasHDR10PlusMetadata = true
     }
 
+    func markHDR10PlusMetadataDetected(_ metadata: HDR10PlusMetadata?) {
+        hasHDR10PlusMetadata = true
+        if let metadata {
+            hdr10PlusMetadata = metadata
+        }
+    }
+
+    func recordDolbyVisionPacket(
+        _ packet: Packet,
+        compositorAvailability: DolbyVisionFELCompositorAvailability = .unavailable(
+            reason: DolbyVisionPlaybackDiagnostic.missingOpenFELCompositorReason
+        ),
+        playbackPolicy: DolbyVisionFELPlaybackPolicy = .allowBaseLayerFallback
+    ) {
+        guard let dovi,
+              dovi.dv_profile == 7,
+              let corePacket = packet.corePacket?.pointee,
+              let data = corePacket.data,
+              corePacket.size > 0
+        else {
+            return
+        }
+        let split = DolbyVisionHEVCSampleInspector.split(
+            data: UnsafePointer(data),
+            size: Int(corePacket.size),
+            nalLengthSize: isConvertNALSize ? 3 : 4
+        )
+        let diagnostics = split.diagnostics
+        guard diagnostics.hasDolbyVisionSignals else {
+            return
+        }
+        mergeDolbyVisionDiagnostic { current in
+            current.merging(
+                observedRPUNALUnitCount: diagnostics.rpuNALUnitCount,
+                observedEnhancementLayerNALUnitCount: diagnostics.enhancementLayerNALUnitCount,
+                observedEnhancementLayerVCLNALUnitCount: diagnostics.enhancementLayerVCLNALUnitCount,
+                largestEnhancementLayerVCLPayloadSize: diagnostics.largestEnhancementLayerVCLPayloadSize,
+                rawRPUData: diagnostics.rawRPUData,
+                felCompositionState: DolbyVisionFELCompositionPlanner.state(
+                    configuration: dovi,
+                    split: split,
+                    enhancementLayerKind: current.enhancementLayerKind,
+                    compositorAvailability: compositorAvailability,
+                    playbackPolicy: playbackPolicy
+                ),
+                felPlaybackPolicy: playbackPolicy
+            )
+        }
+    }
+
+    func recordDolbyVisionRPUBuffer(_ data: Data) {
+        mergeDolbyVisionDiagnostic { current in
+            current.merging(rawRPUData: data, hasFrameRPUBuffer: true)
+        }
+    }
+
+    func recordDolbyVisionFrameMetadata(
+        enhancementLayerKind: DolbyVisionProfile7EnhancementLayerKind?,
+        playbackPolicy: DolbyVisionFELPlaybackPolicy = .allowBaseLayerFallback
+    ) {
+        mergeDolbyVisionDiagnostic { current in
+            current.merging(
+                hasFrameDOVIMetadata: true,
+                enhancementLayerKind: enhancementLayerKind,
+                felPlaybackPolicy: playbackPolicy
+            )
+        }
+    }
+
+    private func updateDolbyVisionDiagnostic(configuration: DOVIDecoderConfigurationRecord?) {
+        dolbyVisionDiagnosticsLock.lock()
+        _dolbyVisionPlaybackDiagnostic = configuration.map { DolbyVisionPlaybackDiagnostic(configuration: $0) }
+        dolbyVisionDiagnosticsLock.unlock()
+    }
+
+    private func mergeDolbyVisionDiagnostic(_ update: (DolbyVisionPlaybackDiagnostic) -> DolbyVisionPlaybackDiagnostic) {
+        dolbyVisionDiagnosticsLock.lock()
+        guard let current = _dolbyVisionPlaybackDiagnostic ?? dovi.map({ DolbyVisionPlaybackDiagnostic(configuration: $0) }) else {
+            dolbyVisionDiagnosticsLock.unlock()
+            return
+        }
+        _dolbyVisionPlaybackDiagnostic = update(current)
+        dolbyVisionDiagnosticsLock.unlock()
+    }
+
     public var isEnabled: Bool {
         get {
-            stream?.pointee.discard == AVDISCARD_DEFAULT
+            guard let stream else {
+                return streamlessIsEnabled
+            }
+            return stream.pointee.discard == AVDISCARD_DEFAULT
         }
         set {
+            guard let stream else {
+                streamlessIsEnabled = newValue
+                return
+            }
             var discard = newValue ? AVDISCARD_DEFAULT : AVDISCARD_ALL
             if mediaType == .subtitle, !isImageSubtitle {
                 discard = AVDISCARD_DEFAULT
             }
-            stream?.pointee.discard = discard
+            stream.pointee.discard = discard
         }
+    }
+}
+
+extension FFmpegAssetTrack {
+    static func hdr10PlusMetadata(data: UnsafeMutablePointer<UInt8>?, size: Int, width: Int32, height: Int32) -> HDR10PlusMetadata? {
+        guard let data, size >= MemoryLayout<AVDynamicHDRPlus>.stride else {
+            return nil
+        }
+        let rawSideData = Data(bytes: data, count: size)
+        return data.withMemoryRebound(to: AVDynamicHDRPlus.self, capacity: 1) {
+            HDR10PlusMetadata(dynamicHDRPlus: $0.pointee, width: width, height: height, rawSideData: rawSideData)
+        }
+    }
+}
+
+struct DolbyVisionHEVCSampleDiagnostics: Equatable {
+    var rpuNALUnitCount = 0
+    var enhancementLayerNALUnitCount = 0
+    var enhancementLayerVCLNALUnitCount = 0
+    var largestEnhancementLayerVCLPayloadSize = 0
+    var rawRPUData: Data?
+    var hasBaseLayerVCLNALUnits = false
+    var baseLayerSampleSize = 0
+    var enhancementLayerSampleSize = 0
+
+    var hasDolbyVisionSignals: Bool {
+        rpuNALUnitCount > 0 || enhancementLayerNALUnitCount > 0 || enhancementLayerVCLNALUnitCount > 0 || rawRPUData != nil
+    }
+
+    var hasSeparatedFELInputs: Bool {
+        hasBaseLayerVCLNALUnits && enhancementLayerVCLNALUnitCount > 0 && (rpuNALUnitCount > 0 || rawRPUData != nil)
+    }
+}
+
+struct DolbyVisionHEVCNALUnit: Equatable {
+    let type: UInt8
+    let layerID: UInt8
+    let data: Data
+
+    var isVCL: Bool {
+        type <= 31
+    }
+
+    var isRPU: Bool {
+        type == 62
+    }
+
+    var payloadSize: Int {
+        max(data.count - 2, 0)
+    }
+
+    init?(data: UnsafePointer<UInt8>, size: Int) {
+        guard size >= 2 else {
+            return nil
+        }
+        type = (data[0] >> 1) & 0x3f
+        layerID = ((data[0] & 0x01) << 5) | ((data[1] >> 3) & 0x1f)
+        self.data = Data(bytes: data, count: size)
+    }
+}
+
+struct DolbyVisionHEVCSampleSplit: Equatable {
+    enum Storage: Equatable {
+        case annexB
+        case lengthPrefixed(Int)
+    }
+
+    let storage: Storage
+    private(set) var baseLayerSample = Data()
+    private(set) var enhancementLayerSample = Data()
+    private(set) var rpuNALUnits = [Data]()
+    private(set) var diagnostics = DolbyVisionHEVCSampleDiagnostics()
+
+    var hasEnhancementLayerSample: Bool {
+        !enhancementLayerSample.isEmpty
+    }
+
+    var hasDecodableBaseLayerSample: Bool {
+        diagnostics.hasBaseLayerVCLNALUnits && !baseLayerSample.isEmpty
+    }
+
+    var hasSeparatedFELInputs: Bool {
+        diagnostics.hasSeparatedFELInputs
+    }
+
+    mutating func append(_ nalUnit: DolbyVisionHEVCNALUnit) {
+        if nalUnit.isRPU {
+            diagnostics.rpuNALUnitCount += 1
+            diagnostics.rawRPUData = nalUnit.data
+            rpuNALUnits.append(nalUnit.data)
+            return
+        }
+
+        if nalUnit.layerID > 0 {
+            diagnostics.enhancementLayerNALUnitCount += 1
+            if nalUnit.isVCL {
+                diagnostics.enhancementLayerVCLNALUnitCount += 1
+                diagnostics.largestEnhancementLayerVCLPayloadSize = max(
+                    diagnostics.largestEnhancementLayerVCLPayloadSize,
+                    nalUnit.payloadSize
+                )
+            }
+            Self.append(nalUnit.data, to: &enhancementLayerSample, storage: storage)
+            diagnostics.enhancementLayerSampleSize = enhancementLayerSample.count
+        } else {
+            if nalUnit.isVCL {
+                diagnostics.hasBaseLayerVCLNALUnits = true
+            }
+            Self.append(nalUnit.data, to: &baseLayerSample, storage: storage)
+            diagnostics.baseLayerSampleSize = baseLayerSample.count
+        }
+    }
+
+    private static func append(_ nalUnit: Data, to sample: inout Data, storage: Storage) {
+        switch storage {
+        case .annexB:
+            sample.append(contentsOf: [0x00, 0x00, 0x00, 0x01])
+        case let .lengthPrefixed(nalLengthSize):
+            var length = UInt32(nalUnit.count).bigEndian
+            withUnsafeBytes(of: &length) { bytes in
+                sample.append(contentsOf: bytes.suffix(nalLengthSize))
+            }
+        }
+        sample.append(nalUnit)
+    }
+}
+
+enum DolbyVisionFELCompositionPlanner {
+    static func state(
+        configuration: DOVIDecoderConfigurationRecord?,
+        split: DolbyVisionHEVCSampleSplit,
+        enhancementLayerKind: DolbyVisionProfile7EnhancementLayerKind,
+        compositorAvailability: DolbyVisionFELCompositorAvailability = .unavailable(
+            reason: DolbyVisionPlaybackDiagnostic.missingOpenFELCompositorReason
+        ),
+        playbackPolicy: DolbyVisionFELPlaybackPolicy = .allowBaseLayerFallback
+    ) -> DolbyVisionFELCompositionState {
+        guard configuration?.dv_profile == 7, configuration?.el_present_flag != 0 else {
+            return .notRequired
+        }
+        if enhancementLayerKind == .minimumEnhancementLayer {
+            return .notRequired
+        }
+        if case let .available(backend) = compositorAvailability, split.hasSeparatedFELInputs {
+            return .available(backend: backend)
+        }
+        if playbackPolicy == .requireFullComposition, split.hasSeparatedFELInputs {
+            return .requiredUnavailable(reason: DolbyVisionPlaybackDiagnostic.requiredFELCompositorReason)
+        }
+        if enhancementLayerKind == .fullEnhancementLayer {
+            return .unavailable(reason: DolbyVisionPlaybackDiagnostic.missingOpenFELCompositorReason)
+        }
+        if split.hasSeparatedFELInputs {
+            return .separatedInputsAvailable
+        }
+        return .awaitingMetadata
+    }
+}
+
+struct DolbyVisionFELFrameSample: Equatable {
+    let timestamp: Int64
+    let duration: Int64
+    let baseLayerSample: Data
+    let enhancementLayerSample: Data
+    let rpuNALUnits: [Data]
+}
+
+struct DolbyVisionFELFrameAlignmentQueue: Equatable {
+    private var pendingEnhancementSamples = [Int64: DolbyVisionHEVCSampleSplit]()
+
+    mutating func enqueueEnhancement(timestamp: Int64, split: DolbyVisionHEVCSampleSplit) {
+        guard split.hasEnhancementLayerSample || !split.rpuNALUnits.isEmpty else {
+            return
+        }
+        pendingEnhancementSamples[timestamp] = split
+    }
+
+    mutating func alignBase(
+        timestamp: Int64,
+        duration: Int64,
+        split: DolbyVisionHEVCSampleSplit
+    ) -> DolbyVisionFELFrameSample? {
+        guard split.hasDecodableBaseLayerSample else {
+            return nil
+        }
+        let enhancement = pendingEnhancementSamples.removeValue(forKey: timestamp) ?? split
+        guard enhancement.hasEnhancementLayerSample || !enhancement.rpuNALUnits.isEmpty else {
+            return nil
+        }
+        return DolbyVisionFELFrameSample(
+            timestamp: timestamp,
+            duration: duration,
+            baseLayerSample: split.baseLayerSample,
+            enhancementLayerSample: enhancement.enhancementLayerSample,
+            rpuNALUnits: split.rpuNALUnits + enhancement.rpuNALUnits
+        )
+    }
+}
+
+enum DolbyVisionHEVCSampleInspector {
+    static func inspect(data: UnsafePointer<UInt8>, size: Int, nalLengthSize: Int = 4) -> DolbyVisionHEVCSampleDiagnostics {
+        split(data: data, size: size, nalLengthSize: nalLengthSize).diagnostics
+    }
+
+    static func split(data: UnsafePointer<UInt8>, size: Int, nalLengthSize: Int = 4) -> DolbyVisionHEVCSampleSplit {
+        guard size > 0 else {
+            return DolbyVisionHEVCSampleSplit(storage: .lengthPrefixed(nalLengthSize))
+        }
+        if VideoToolboxSampleData.isAnnexB(data: data, size: size) {
+            return splitAnnexB(data: data, size: size)
+        }
+        return splitLengthPrefixed(data: data, size: size, nalLengthSize: nalLengthSize)
+    }
+
+    private static func splitAnnexB(data: UnsafePointer<UInt8>, size: Int) -> DolbyVisionHEVCSampleSplit {
+        var split = DolbyVisionHEVCSampleSplit(storage: .annexB)
+        var current = findStartCode(in: data, size: size, from: 0)
+        while let startCode = current {
+            let nalStart = startCode.offset + startCode.length
+            current = findStartCode(in: data, size: size, from: nalStart)
+            var nalEnd = current?.offset ?? size
+            while nalEnd > nalStart, data[nalEnd - 1] == 0 {
+                nalEnd -= 1
+            }
+            if nalEnd > nalStart, let nalUnit = DolbyVisionHEVCNALUnit(data: data.advanced(by: nalStart), size: nalEnd - nalStart) {
+                split.append(nalUnit)
+            }
+        }
+        return split
+    }
+
+    private static func splitLengthPrefixed(data: UnsafePointer<UInt8>, size: Int, nalLengthSize: Int) -> DolbyVisionHEVCSampleSplit {
+        let nalLengthSize = min(max(nalLengthSize, 1), 4)
+        var split = DolbyVisionHEVCSampleSplit(storage: .lengthPrefixed(nalLengthSize))
+        var offset = 0
+        while offset + nalLengthSize <= size {
+            var nalSize = 0
+            for i in 0 ..< nalLengthSize {
+                nalSize = (nalSize << 8) | Int(data[offset + i])
+            }
+            offset += nalLengthSize
+            guard nalSize > 0, offset + nalSize <= size else {
+                return split
+            }
+            if let nalUnit = DolbyVisionHEVCNALUnit(data: data.advanced(by: offset), size: nalSize) {
+                split.append(nalUnit)
+            }
+            offset += nalSize
+        }
+        return split
+    }
+
+    private static func findStartCode(in data: UnsafePointer<UInt8>, size: Int, from offset: Int) -> (offset: Int, length: Int)? {
+        guard size >= 3, offset < size else {
+            return nil
+        }
+        var index = offset
+        while index + 3 <= size {
+            if data[index] == 0, data[index + 1] == 0 {
+                if data[index + 2] == 1 {
+                    return (index, 3)
+                }
+                if index + 4 <= size, data[index + 2] == 0, data[index + 3] == 1 {
+                    return (index, 4)
+                }
+            }
+            index += 1
+        }
+        return nil
     }
 }
 
@@ -461,13 +981,13 @@ extension AVChannelLayout {
         guard let tag = layoutTag, let layout = AVAudioChannelLayout(layoutTag: tag) else {
             return body(0, nil)
         }
-        return body(MemoryLayout<AudioChannelLayout>.size, layout.layout)
+        return body(Int(layout.layout.byteSize), layout.layout)
     }
 }
 
 extension FFmpegAssetTrack {
     static func subtitleKind(codecID: AVCodecID, isImageSubtitle: Bool) -> SubtitleKind {
-        if codecID == AV_CODEC_ID_EIA_608 {
+        if FFmpegClosedCaptionRouting.format(codecID: codecID) != nil {
             return .closedCaption
         }
         if isImageSubtitle {
@@ -594,9 +1114,179 @@ extension FFmpegAssetTrack {
 
     var dynamicRangeLabel: String? {
         if hasHDR10PlusMetadata {
-            return "HDR10+"
+            return HDR10PlusPlaybackDiagnostic.metadataOnlyDynamicRangeDescription
         }
         let range = dynamicRange
         return range == .sdr ? nil : range?.description
+    }
+}
+
+extension HDR10PlusMetadata {
+    init?(dynamicHDRPlus metadata: AVDynamicHDRPlus, width: Int32, height: Int32, rawSideData: Data?) {
+        let windows = Self.windows(from: metadata, width: width, height: height)
+        guard !windows.isEmpty else {
+            return nil
+        }
+        self.init(
+            applicationVersion: metadata.application_version,
+            targetedSystemDisplayMaximumLuminance: Self.float(metadata.targeted_system_display_maximum_luminance),
+            processingWindows: windows,
+            targetedSystemDisplayActualPeakLuminance: Self.luminanceGrid(
+                flag: metadata.targeted_system_display_actual_peak_luminance_flag,
+                rows: metadata.num_rows_targeted_system_display_actual_peak_luminance,
+                columns: metadata.num_cols_targeted_system_display_actual_peak_luminance,
+                grid: metadata.targeted_system_display_actual_peak_luminance
+            ),
+            masteringDisplayActualPeakLuminance: Self.luminanceGrid(
+                flag: metadata.mastering_display_actual_peak_luminance_flag,
+                rows: metadata.num_rows_mastering_display_actual_peak_luminance,
+                columns: metadata.num_cols_mastering_display_actual_peak_luminance,
+                grid: metadata.mastering_display_actual_peak_luminance
+            ),
+            rawSideData: rawSideData
+        )
+    }
+
+    private static func windows(from metadata: AVDynamicHDRPlus, width: Int32, height: Int32) -> [ProcessingWindow] {
+        let params = [metadata.params.0, metadata.params.1, metadata.params.2]
+        let windowCount = min(max(Int(metadata.num_windows), 0), params.count)
+        return params.prefix(windowCount).enumerated().map { index, params in
+            window(from: params, index: index, width: width, height: height)
+        }
+    }
+
+    private static func window(from params: AVHDRPlusColorTransformParams, index: Int, width: Int32, height: Int32) -> ProcessingWindow {
+        let percentiles = distributionMaxRGB(from: params)
+        let toneMapping: ToneMapping?
+        if params.tone_mapping_flag != 0,
+           let kneePointX = float(params.knee_point_x),
+           let kneePointY = float(params.knee_point_y)
+        {
+            toneMapping = ToneMapping(
+                kneePointX: kneePointX,
+                kneePointY: kneePointY,
+                bezierCurveAnchors: bezierCurveAnchors(from: params)
+            )
+        } else {
+            toneMapping = nil
+        }
+        return ProcessingWindow(
+            bounds: index == 0 ? .fullFrame : bounds(from: params),
+            selector: index == 0 ? nil : selector(from: params, width: width, height: height),
+            overlapProcessOption: OverlapProcessOption(rawValue: UInt8(params.overlap_process_option.rawValue)) ?? .weightedAveraging,
+            maxSCL: [
+                float(params.maxscl.0),
+                float(params.maxscl.1),
+                float(params.maxscl.2),
+            ].compactMap { $0 },
+            averageMaxRGB: float(params.average_maxrgb),
+            distributionMaxRGB: percentiles,
+            fractionBrightPixels: float(params.fraction_bright_pixels),
+            toneMapping: toneMapping,
+            colorSaturationWeight: params.color_saturation_mapping_flag != 0 ? float(params.color_saturation_weight) : nil
+        )
+    }
+
+    private static func selector(from params: AVHDRPlusColorTransformParams, width: Int32, height: Int32) -> PixelSelector? {
+        let normalizedWidth = max(Float(width - 1), 1)
+        let normalizedHeight = max(Float(height - 1), 1)
+        let externalMajor = Float(params.semimajor_axis_external_ellipse) / normalizedWidth
+        let externalMinor = Float(params.semiminor_axis_external_ellipse) / normalizedHeight
+        guard externalMajor > 0, externalMinor > 0 else {
+            return nil
+        }
+        let internalMajor = Float(params.semimajor_axis_internal_ellipse) / normalizedWidth
+        let internalMinor = externalMinor * min(max(internalMajor / max(externalMajor, 0.0001), 0.0001), 1)
+        return PixelSelector(
+            centerX: Float(params.center_of_ellipse_x) / normalizedWidth,
+            centerY: Float(params.center_of_ellipse_y) / normalizedHeight,
+            rotationRadians: Float(params.rotation_angle) * .pi / 180,
+            semimajorAxisInternal: internalMajor,
+            semimajorAxisExternal: externalMajor,
+            semiminorAxisInternal: internalMinor,
+            semiminorAxisExternal: externalMinor
+        )
+    }
+
+    private static func bounds(from params: AVHDRPlusColorTransformParams) -> WindowBounds {
+        WindowBounds(
+            minX: float(params.window_upper_left_corner_x) ?? 0,
+            minY: float(params.window_upper_left_corner_y) ?? 0,
+            maxX: float(params.window_lower_right_corner_x) ?? 1,
+            maxY: float(params.window_lower_right_corner_y) ?? 1
+        )
+    }
+
+    private static func distributionMaxRGB(from params: AVHDRPlusColorTransformParams) -> [Percentile] {
+        let values = [
+            params.distribution_maxrgb.0,
+            params.distribution_maxrgb.1,
+            params.distribution_maxrgb.2,
+            params.distribution_maxrgb.3,
+            params.distribution_maxrgb.4,
+            params.distribution_maxrgb.5,
+            params.distribution_maxrgb.6,
+            params.distribution_maxrgb.7,
+            params.distribution_maxrgb.8,
+            params.distribution_maxrgb.9,
+            params.distribution_maxrgb.10,
+            params.distribution_maxrgb.11,
+            params.distribution_maxrgb.12,
+            params.distribution_maxrgb.13,
+            params.distribution_maxrgb.14,
+        ]
+        let count = min(max(Int(params.num_distribution_maxrgb_percentiles), 0), values.count)
+        return values.prefix(count).compactMap { value in
+            guard let percentile = float(value.percentile) else {
+                return nil
+            }
+            return Percentile(percentage: value.percentage, percentile: percentile)
+        }
+    }
+
+    private static func bezierCurveAnchors(from params: AVHDRPlusColorTransformParams) -> [Float] {
+        let values = [
+            params.bezier_curve_anchors.0,
+            params.bezier_curve_anchors.1,
+            params.bezier_curve_anchors.2,
+            params.bezier_curve_anchors.3,
+            params.bezier_curve_anchors.4,
+            params.bezier_curve_anchors.5,
+            params.bezier_curve_anchors.6,
+            params.bezier_curve_anchors.7,
+            params.bezier_curve_anchors.8,
+            params.bezier_curve_anchors.9,
+            params.bezier_curve_anchors.10,
+            params.bezier_curve_anchors.11,
+            params.bezier_curve_anchors.12,
+            params.bezier_curve_anchors.13,
+            params.bezier_curve_anchors.14,
+        ]
+        let count = min(max(Int(params.num_bezier_curve_anchors), 0), values.count)
+        return values.prefix(count).compactMap(float)
+    }
+
+    private static func luminanceGrid<Grid>(flag: UInt8, rows: UInt8, columns: UInt8, grid: Grid) -> LuminanceGrid? {
+        guard flag != 0 else {
+            return nil
+        }
+        let rowCount = min(max(Int(rows), 0), 25)
+        let columnCount = min(max(Int(columns), 0), 25)
+        let requestedCount = rowCount * columnCount
+        guard requestedCount > 0 else {
+            return nil
+        }
+        let values = withUnsafeBytes(of: grid) { rawBuffer -> [Float] in
+            let rationals = rawBuffer.bindMemory(to: AVRational.self)
+            return rationals.prefix(min(requestedCount, rationals.count)).compactMap(float)
+        }
+        return LuminanceGrid(rows: rowCount, columns: columnCount, values: values)
+    }
+
+    private static func float(_ rational: AVRational) -> Float? {
+        guard rational.den != 0 else {
+            return nil
+        }
+        return Float(rational.num) / Float(rational.den)
     }
 }

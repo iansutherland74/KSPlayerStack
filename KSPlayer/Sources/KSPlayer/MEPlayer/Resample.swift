@@ -75,16 +75,29 @@ class VideoSwresample: FrameChange {
     private let dstFormat: AVPixelFormat?
     private let fps: Float
     private let isDovi: Bool
-    init(dstWidth: Int32? = nil, dstHeight: Int32? = nil, dstFormat: AVPixelFormat? = nil, fps: Float = 60, isDovi: Bool) {
+    private let dolbyVisionFallbackDynamicRange: DynamicRange?
+    init(
+        dstWidth: Int32? = nil,
+        dstHeight: Int32? = nil,
+        dstFormat: AVPixelFormat? = nil,
+        fps: Float = 60,
+        isDovi: Bool,
+        dolbyVisionFallbackDynamicRange: DynamicRange? = nil
+    ) {
         self.dstWidth = dstWidth
         self.dstHeight = dstHeight
         self.dstFormat = dstFormat
         self.fps = fps
         self.isDovi = isDovi
+        self.dolbyVisionFallbackDynamicRange = dolbyVisionFallbackDynamicRange
     }
 
     func change(avframe: UnsafeMutablePointer<AVFrame>) throws -> MEFrame {
-        let frame = VideoVTBFrame(fps: fps, isDovi: isDovi)
+        let frame = VideoVTBFrame(
+            fps: fps,
+            isDovi: isDovi,
+            dolbyVisionFallbackDynamicRange: dolbyVisionFallbackDynamicRange
+        )
         if avframe.pointee.format == AV_PIX_FMT_VIDEOTOOLBOX.rawValue {
             frame.corePixelBuffer = unsafeBitCast(avframe.pointee.data.3, to: CVPixelBuffer.self)
         } else {
@@ -278,6 +291,12 @@ public class AudioDescriptor: Equatable {
     fileprivate(set) var channel: AVChannelLayout
     fileprivate let sampleFormat: AVSampleFormat
     fileprivate var outChannel: AVChannelLayout
+    public var sourceChannelCount: AVAudioChannelCount {
+        AVAudioChannelCount(channel.nb_channels)
+    }
+    public var outputChannelCount: AVAudioChannelCount {
+        audioFormat.channelCount
+    }
 
     private convenience init() {
         self.init(sampleFormat: AV_SAMPLE_FMT_FLT, sampleRate: 48000, channel: AVChannelLayout.defaultValue)

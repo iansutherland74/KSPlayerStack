@@ -19,6 +19,7 @@ let package = Package(
         .target(
             name: "KSPlayer",
             dependencies: [
+                "KSPlayerONNXRuntimeSupport",
                 .product(name: "FFmpegKit", package: "FFmpegKit"),
                 .product(name: "Libavcodec", package: "FFmpegKit"),
                 .product(name: "Libavfilter", package: "FFmpegKit"),
@@ -36,6 +37,13 @@ let package = Package(
         ),
         .target(
             name: "DisplayCriteria"
+        ),
+        .target(
+            name: "KSPlayerONNXRuntimeSupport",
+            publicHeadersPath: "include",
+            linkerSettings: [
+                .linkedLibrary("dl", .when(platforms: [.linux])),
+            ]
         ),
         .testTarget(
             name: "KSPlayerTests",

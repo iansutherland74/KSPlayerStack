@@ -151,11 +151,13 @@ class VideoPlayerViewTest: XCTestCase {
 
     func testFFmpegOnlyURLSchemesAreRecognized() throws {
         XCTAssertTrue(try XCTUnwrap(URL(string: "smb://server/share/movie.mkv")).isFFmpegOnlyInputScheme)
+        XCTAssertTrue(try XCTUnwrap(URL(string: "smb2://server/share/movie.mkv")).isFFmpegOnlyInputScheme)
         XCTAssertTrue(try XCTUnwrap(URL(string: "nfs://server/export/movie.mkv")).isFFmpegOnlyInputScheme)
         XCTAssertTrue(try XCTUnwrap(URL(string: "srt://example.com:9000")).isFFmpegOnlyInputScheme)
         XCTAssertTrue(try XCTUnwrap(URL(string: "rtsp://camera.local/live")).isFFmpegOnlyInputScheme)
         XCTAssertTrue(try XCTUnwrap(URL(string: "rtmp://example.com/live/stream")).isFFmpegOnlyInputScheme)
         XCTAssertTrue(try XCTUnwrap(URL(string: "upnp://device/item")).isFFmpegOnlyInputScheme)
+        XCTAssertTrue(try XCTUnwrap(URL(string: "dlna://device/item")).isFFmpegOnlyInputScheme)
         XCTAssertFalse(try XCTUnwrap(URL(string: "http://example.com/movie.mkv")).isFFmpegOnlyInputScheme)
     }
 
@@ -180,10 +182,12 @@ class VideoPlayerViewTest: XCTestCase {
         let options = KSOptions()
 
         XCTAssertTrue(KSPlayerLayer.preferredPlayerType(for: try XCTUnwrap(URL(string: "smb://server/share/movie.mkv")), options: options) == KSMEPlayer.self)
+        XCTAssertTrue(KSPlayerLayer.preferredPlayerType(for: try XCTUnwrap(URL(string: "smb2://server/share/movie.mkv")), options: options) == KSMEPlayer.self)
         XCTAssertTrue(KSPlayerLayer.preferredPlayerType(for: try XCTUnwrap(URL(string: "nfs://server/export/movie.mkv")), options: options) == KSMEPlayer.self)
         XCTAssertTrue(KSPlayerLayer.preferredPlayerType(for: try XCTUnwrap(URL(string: "srt://example.com:9000")), options: options) == KSMEPlayer.self)
         XCTAssertTrue(KSPlayerLayer.preferredPlayerType(for: try XCTUnwrap(URL(string: "rtsp://camera.local/live")), options: options) == KSMEPlayer.self)
         XCTAssertTrue(KSPlayerLayer.preferredPlayerType(for: try XCTUnwrap(URL(string: "upnp://device/item")), options: options) == KSMEPlayer.self)
+        XCTAssertTrue(KSPlayerLayer.preferredPlayerType(for: try XCTUnwrap(URL(string: "dlna://device/item")), options: options) == KSMEPlayer.self)
         XCTAssertTrue(KSPlayerLayer.preferredPlayerType(for: try XCTUnwrap(URL(string: "https://example.com/movie.mkv")), options: options) == KSMEPlayer.self)
         XCTAssertTrue(KSPlayerLayer.preferredPlayerType(for: try XCTUnwrap(URL(string: "https://example.com/movie.mp4")), options: options) == KSAVPlayer.self)
     }
@@ -282,7 +286,7 @@ class VideoPlayerViewTest: XCTestCase {
 
         options.prepareFormatContextOptions(for: try XCTUnwrap(URL(string: "smb://server/share/movie.mkv")))
 
-        XCTAssertEqual(options.formatContextOptions["protocol_whitelist"] as? String, "file,http,https,tcp,smb")
+        XCTAssertEqual(options.formatContextOptions["protocol_whitelist"] as? String, "file,http,https,tcp,smb,smb2")
     }
 
     func testFFmpegOnlyProtocolWhitelistIncludesTransportDependencies() throws {
@@ -291,7 +295,37 @@ class VideoPlayerViewTest: XCTestCase {
 
         options.prepareFormatContextOptions(for: try XCTUnwrap(URL(string: "rtsp://camera.local/live")))
 
-        XCTAssertEqual(options.formatContextOptions["protocol_whitelist"] as? String, "file,http,https,rtsp,tcp,udp")
+        XCTAssertEqual(options.formatContextOptions["protocol_whitelist"] as? String, "file,http,https,rtsp,rtp,tcp,udp,tls")
+    }
+
+    func testSMB2ProtocolWhitelistIncludesSMBCompatibility() throws {
+        let options = KSOptions()
+        options.formatContextOptions["protocol_whitelist"] = "file,http,https,tcp"
+
+        options.prepareFormatContextOptions(for: try XCTUnwrap(URL(string: "smb2://server/share/movie.mkv")))
+
+        XCTAssertEqual(options.formatContextOptions["protocol_whitelist"] as? String, "file,http,https,tcp,smb2,smb")
+    }
+
+    func testUPnPAndDLNAProtocolWhitelistIncludesNestedTransports() throws {
+        let upnpOptions = KSOptions()
+        upnpOptions.formatContextOptions["protocol_whitelist"] = "file"
+        let dlnaOptions = KSOptions()
+        dlnaOptions.formatContextOptions["protocol_whitelist"] = "file"
+
+        upnpOptions.prepareFormatContextOptions(for: try XCTUnwrap(URL(string: "upnp://device/item")))
+        dlnaOptions.prepareFormatContextOptions(for: try XCTUnwrap(URL(string: "dlna://device/item")))
+
+        XCTAssertEqual(upnpOptions.formatContextOptions["protocol_whitelist"] as? String, "file,upnp,dlna,http,https,tcp,udp,tls")
+        XCTAssertEqual(dlnaOptions.formatContextOptions["protocol_whitelist"] as? String, "file,dlna,upnp,http,https,tcp,udp,tls")
+    }
+
+    func testDiagnosticURLRedactionHidesCredentialsAndQueryValues() throws {
+        let url = try XCTUnwrap(URL(string: "smb://user:secret@server/share/movie.mkv?token=abc&empty"))
+
+        XCTAssertEqual(url.ksRedactedAbsoluteString, "smb://redacted:redacted@server/share/movie.mkv?token=redacted&empty")
+        XCTAssertFalse(VideoExportError.unsupportedSource(url).localizedDescription.contains("secret"))
+        XCTAssertFalse(VideoExportError.unsupportedSource(url).localizedDescription.contains("abc"))
     }
 
     func testHeadersPassThroughToAVAndFFmpegOptions() {
@@ -325,8 +359,13 @@ class VideoPlayerViewTest: XCTestCase {
         XCTAssertEqual(options.probesize, Int64(32 * 1024))
         XCTAssertEqual(options.maxAnalyzeDuration, Int64(100 * 1000))
         XCTAssertEqual(options.formatContextOptions["max_delay"] as? Int, 100 * 1000)
+        XCTAssertEqual(options.formatContextOptions["rw_timeout"] as? Int, 2 * 1000 * 1000)
+        XCTAssertEqual(options.formatContextOptions["timeout"] as? Int, 2 * 1000 * 1000)
         XCTAssertEqual(options.formatContextOptions["fflags"] as? String, "nobuffer")
         XCTAssertEqual(options.formatContextOptions["avioflags"] as? String, "direct")
+        XCTAssertEqual(options.decoderOptions["flags"] as? String, "low_delay")
+        XCTAssertEqual(options.preferredAudioIOBufferDuration, 0.005)
+        XCTAssertFalse(options.videoAdaptable)
     }
 
     func testLowLatencyLiveProfilePreservesExplicitProbeAndFormatOptions() {
@@ -345,6 +384,50 @@ class VideoPlayerViewTest: XCTestCase {
         XCTAssertEqual(options.formatContextOptions["fflags"] as? String, "genpts+nobuffer")
     }
 
+    func testLowLatencyLiveProfileAppliesProtocolOptionsForRTSP() throws {
+        let options = KSOptions()
+        options.applyLowLatencyLiveProfile(.lan)
+        options.prepareFormatContextOptions(for: try XCTUnwrap(URL(string: "rtsp://camera.local/live")))
+
+        XCTAssertEqual(options.formatContextOptions["rtsp_transport"] as? String, "udp")
+        XCTAssertEqual(options.formatContextOptions["stimeout"] as? Int, 2 * 1000 * 1000)
+        XCTAssertEqual(options.formatContextOptions["reorder_queue_size"] as? Int, 0)
+    }
+
+    func testLowLatencyLiveProfilePreservesExplicitRTSPTransport() throws {
+        let options = KSOptions()
+        options.formatContextOptions["rtsp_transport"] = "tcp"
+        options.applyLowLatencyLiveProfile(.lan)
+        options.prepareFormatContextOptions(for: try XCTUnwrap(URL(string: "rtsp://camera.local/live")))
+
+        XCTAssertEqual(options.formatContextOptions["rtsp_transport"] as? String, "tcp")
+    }
+
+    func testLowLatencyLiveProfileCapsAudioAndPacketQueues() {
+        let options = KSOptions()
+        options.applyLowLatencyLiveProfile(.lan)
+
+        XCTAssertEqual(options.audioFrameMaxCount(fps: 48, channelCount: 2), 4)
+        XCTAssertEqual(options.asyncPacketQueueMaxCount(mediaType: .audio, frameCapacity: 4), 4)
+        XCTAssertEqual(options.asyncPacketQueueMaxCount(mediaType: .video, frameCapacity: 4), 8)
+        XCTAssertEqual(options.videoFrameMaxCount(fps: 120, naturalSize: CGSize(width: 3840, height: 2160), isLive: true), 6)
+    }
+
+    func testLowLatencyLiveClockPolicyDropsLateFramesEarlier() {
+        XCTAssertEqual(
+            LowLatencyLivePlaybackPolicy.clockProcessType(profile: .lan, diff: -0.04, fps: 60, frameCount: 2),
+            .dropNextFrame
+        )
+        XCTAssertEqual(
+            LowLatencyLivePlaybackPolicy.clockProcessType(profile: .lan, diff: -0.3, fps: 60, frameCount: 4),
+            .flush
+        )
+        XCTAssertEqual(
+            LowLatencyLivePlaybackPolicy.clockProcessType(profile: .lan, diff: -0.6, fps: 60, frameCount: 1),
+            .dropGOPPacket
+        )
+    }
+
     func testLowLatencyLive4KDiagnosticsFocusOnDecodeConstraints() {
         let fourK = CGSize(width: 3840, height: 2160)
 
@@ -361,6 +444,86 @@ class VideoPlayerViewTest: XCTestCase {
         )
     }
 
+    func testLowLatencyLiveDiagnosticAggregatorKeepsRollingWindow() throws {
+        var aggregator = LowLatencyLiveDiagnosticAggregator()
+        var metrics: LowLatencyLiveRollingMetrics?
+
+        for index in 1 ... 65 {
+            metrics = aggregator.record(
+                bufferedDuration: Double(index) / 100,
+                packetCount: index,
+                frameCount: index * 2,
+                audioVideoSyncDiff: Double(index) / -1000,
+                displayFPS: 60,
+                videoReadToDecodeDuration: Double(index) / 1000,
+                videoDecodeToRenderDuration: Double(index) / 2000,
+                videoReadToRenderDuration: Double(index) / 500,
+                audioLatencyEstimate: 0.015
+            )
+        }
+
+        let unwrappedMetrics = try XCTUnwrap(metrics)
+        XCTAssertEqual(unwrappedMetrics.bufferedDuration.sampleCount, 60)
+        XCTAssertEqual(unwrappedMetrics.bufferedDuration.latest ?? -1, 0.65, accuracy: 0.0001)
+        XCTAssertEqual(unwrappedMetrics.bufferedDuration.average ?? -1, 0.355, accuracy: 0.0001)
+        XCTAssertEqual(unwrappedMetrics.bufferedDuration.maximum ?? -1, 0.65, accuracy: 0.0001)
+        XCTAssertEqual(unwrappedMetrics.packetCount.latest ?? -1, 65)
+        XCTAssertEqual(unwrappedMetrics.frameCount.maximum ?? -1, 130)
+        XCTAssertEqual(unwrappedMetrics.absoluteAudioVideoSyncDiff.maximum ?? -1, 0.065, accuracy: 0.0001)
+        XCTAssertEqual(unwrappedMetrics.videoReadToRenderDuration.latest ?? -1, 0.13, accuracy: 0.0001)
+        XCTAssertEqual(unwrappedMetrics.audioLatencyEstimate.average ?? -1, 0.015, accuracy: 0.0001)
+    }
+
+    func testLowLatencyLiveAudioLatencyEstimateUsesQueueAndIOBuffer() throws {
+        XCTAssertEqual(
+            try XCTUnwrap(LowLatencyLivePlaybackPolicy.audioLatencyEstimate(profile: .lan, audioFrameCount: 3, audioFPS: 60, preferredAudioIOBufferDuration: 0.005)),
+            0.055,
+            accuracy: 0.0001
+        )
+        XCTAssertEqual(
+            try XCTUnwrap(LowLatencyLivePlaybackPolicy.audioLatencyEstimate(profile: .lan, audioFrameCount: 0, audioFPS: 0, preferredAudioIOBufferDuration: 0.005)),
+            0.005,
+            accuracy: 0.0001
+        )
+        XCTAssertNil(
+            LowLatencyLivePlaybackPolicy.audioLatencyEstimate(profile: .lan, audioFrameCount: 0, audioFPS: 0, preferredAudioIOBufferDuration: nil)
+        )
+    }
+
+    func testLowLatencyLiveSourceRecommendationsRequireExternalValidation() {
+        let recommendations = KSLowLatencyLiveProfile.lan.sourceRecommendations
+
+        XCTAssertEqual(recommendations.profile, .lan)
+        XCTAssertEqual(recommendations.encoder.maximumBFrameCount, 0)
+        XCTAssertLessThanOrEqual(recommendations.encoder.maximumGOPDuration, 0.5)
+        XCTAssertTrue(recommendations.encoder.disablesLookahead)
+        XCTAssertEqual(recommendations.rtsp.rtpReorderQueueSize, 0)
+        XCTAssertEqual(recommendations.rtp.rtpReorderQueueSize, 0)
+        XCTAssertTrue(recommendations.validationChecklist.contains { $0.contains("glass-to-glass") })
+        XCTAssertTrue(recommendations.caveats.contains { $0.contains("not a latency guarantee") })
+        XCTAssertTrue(recommendations.caveats.contains { $0.contains("actual camera") })
+    }
+
+    private func makeVideoFormatDescription(fieldCount: Int?, fieldDetail: CFString?) -> CMFormatDescription? {
+        let extensions = NSMutableDictionary()
+        if let fieldCount {
+            extensions[kCMFormatDescriptionExtension_FieldCount] = fieldCount
+        }
+        if let fieldDetail {
+            extensions[kCMFormatDescriptionExtension_FieldDetail] = fieldDetail
+        }
+        var formatDescription: CMFormatDescription?
+        _ = CMVideoFormatDescriptionCreate(
+            allocator: kCFAllocatorDefault,
+            codecType: kCMVideoCodecType_H264,
+            width: 1920,
+            height: 1080,
+            extensions: extensions,
+            formatDescriptionOut: &formatDescription
+        )
+        return formatDescription
+    }
+
     func testDeinterlacePolicyDetectsFieldOrder() {
         XCTAssertEqual(VideoDeinterlacePolicy.detectedInterlacingType(fieldOrder: .tt), .tff)
         XCTAssertEqual(VideoDeinterlacePolicy.detectedInterlacingType(fieldOrder: .tb), .tff)
@@ -368,6 +531,21 @@ class VideoPlayerViewTest: XCTestCase {
         XCTAssertEqual(VideoDeinterlacePolicy.detectedInterlacingType(fieldOrder: .bt), .bff)
         XCTAssertEqual(VideoDeinterlacePolicy.detectedInterlacingType(fieldOrder: .progressive), .progressive)
         XCTAssertNil(VideoDeinterlacePolicy.detectedInterlacingType(fieldOrder: .unknown))
+        XCTAssertEqual(FFmpegFieldOrder.unknown.description, "unknown")
+    }
+
+    func testDeinterlacePolicyDetectsCoreMediaFieldOrder() {
+        let topFirst = makeVideoFormatDescription(fieldCount: 2, fieldDetail: kCMFormatDescriptionFieldDetail_TemporalTopFirst)
+        let bottomFirst = makeVideoFormatDescription(fieldCount: 2, fieldDetail: kCMFormatDescriptionFieldDetail_TemporalBottomFirst)
+        let progressive = makeVideoFormatDescription(fieldCount: 1, fieldDetail: nil)
+        let unknown = makeVideoFormatDescription(fieldCount: 2, fieldDetail: nil)
+
+        XCTAssertEqual(FFmpegFieldOrder.detected(formatDescription: topFirst), .tt)
+        XCTAssertEqual(VideoDeinterlacePolicy.detectedInterlacingType(formatDescription: topFirst), .tff)
+        XCTAssertEqual(FFmpegFieldOrder.detected(formatDescription: bottomFirst), .bb)
+        XCTAssertEqual(VideoDeinterlacePolicy.detectedInterlacingType(formatDescription: bottomFirst), .bff)
+        XCTAssertEqual(FFmpegFieldOrder.detected(formatDescription: progressive), .progressive)
+        XCTAssertNil(VideoDeinterlacePolicy.detectedInterlacingType(formatDescription: unknown))
     }
 
     func testDeinterlacePolicyDetectsFrameFlags() {
@@ -398,6 +576,37 @@ class VideoPlayerViewTest: XCTestCase {
         XCTAssertEqual(interlaced.detectedInterlacingType, .tff)
         XCTAssertEqual(interlaced.filters, ["idet", "yadif=mode=1:parity=-1:deint=1"])
         XCTAssertTrue(interlaced.doublesFrameRate)
+    }
+
+    func testDeinterlacePolicyUsesFormatDescriptionWhenFieldOrderIsUnknown() {
+        let topFirst = makeVideoFormatDescription(fieldCount: 2, fieldDetail: kCMFormatDescriptionFieldDetail_TemporalTopFirst)
+        let decision = VideoDeinterlacePolicy.decision(
+            mode: .automatic,
+            fieldOrder: .unknown,
+            formatDescription: topFirst,
+            fps: 29.97,
+            naturalSize: CGSize(width: 1920, height: 1080),
+            yadifMode: 1,
+            addIdet: false
+        )
+
+        XCTAssertEqual(decision.detectedInterlacingType, .tff)
+        XCTAssertEqual(decision.filters, ["yadif=mode=1:parity=-1:deint=1"])
+    }
+
+    func testDeinterlaceProcessClearsManagedFilterForReplacementTrack() {
+        let options = KSOptions()
+        let interlaced = TestMediaPlayerTrack(mediaType: .video, trackID: 1, name: "Interlaced", languageCode: nil, fieldOrder: .tt)
+        interlaced.nominalFrameRate = 29.97
+        options.process(assetTrack: interlaced)
+        XCTAssertTrue(options.videoFilters.contains { $0.hasPrefix("yadif") })
+
+        let progressive = TestMediaPlayerTrack(mediaType: .video, trackID: 2, name: "Progressive", languageCode: nil, fieldOrder: .progressive)
+        progressive.nominalFrameRate = 29.97
+        options.process(assetTrack: progressive)
+
+        XCTAssertFalse(options.videoFilters.contains { $0.hasPrefix("yadif") })
+        XCTAssertEqual(options.videoInterlacingType, .progressive)
     }
 
     func testDeinterlacePolicySkipsHighWorkloadAutomaticUnlessForced() {
@@ -554,6 +763,29 @@ class VideoPlayerViewTest: XCTestCase {
         XCTAssertFalse(VideoExportSourcePolicy.isDirectHTTPMediaURL(URL(string: "https://example.com/live/master.m3u8")!))
         XCTAssertTrue(VideoExportSourcePolicy.isDirectHTTPMediaURL(URL(string: "https://example.com/video/movie.mp4?token=1")!))
         XCTAssertFalse(VideoExportSourcePolicy.isDirectHTTPMediaURL(URL(string: "smb://server/video/movie.mp4")!))
+        XCTAssertFalse(VideoExportSourcePolicy.isDirectHTTPMediaURL(URL(string: "smb2://server/video/movie.mp4")!))
+        XCTAssertFalse(VideoExportSourcePolicy.isDirectHTTPMediaURL(URL(string: "dlna://device/video/movie.mp4")!))
+    }
+
+    func testVideoExportSourceDiagnosticsExplainRejectedPolicies() {
+        let separateAudio = VideoExportSourcePolicy.diagnostic(
+            for: URL(string: "https://example.com/movie.mp4")!,
+            audioURL: URL(string: "https://example.com/audio.m4a?token=secret")!
+        )
+        XCTAssertFalse(separateAudio.isSupported)
+        XCTAssertTrue(separateAudio.message.contains("separate audio"))
+        XCTAssertFalse(separateAudio.message.contains("secret"))
+
+        let livePlaylist = VideoExportSourcePolicy.diagnostic(for: URL(string: "https://example.com/live/master.m3u8")!)
+        XCTAssertFalse(livePlaylist.isSupported)
+        XCTAssertTrue(livePlaylist.message.contains("KSMEPlayer stream recording"))
+
+        let bluRay = VideoExportSourcePolicy.diagnostic(for: URL(string: "https://example.com/disc.iso")!)
+        XCTAssertFalse(bluRay.isSupported)
+        XCTAssertTrue(bluRay.message.contains("Blu-ray"))
+
+        let directFile = VideoExportSourcePolicy.diagnostic(for: URL(fileURLWithPath: "/tmp/movie.mov"))
+        XCTAssertTrue(directFile.isSupported)
     }
 
     func testVideoExportDefaultDestinationSanitizesRemoteName() {
@@ -597,6 +829,108 @@ class VideoPlayerViewTest: XCTestCase {
         XCTAssertNil(VideoExportProgressPolicy.clampedFraction(completed: 1, duration: 0))
     }
 
+    func testStreamRecordingPathPolicyRejectsUnsafeDestinations() throws {
+        let temporaryDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: temporaryDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
+
+        let source = temporaryDirectory.appendingPathComponent("source.mov")
+        let existingDestination = temporaryDirectory.appendingPathComponent("recording.mov")
+        let nestedDestination = temporaryDirectory.appendingPathComponent("nested/recording.mov")
+        FileManager.default.createFile(atPath: source.path, contents: Data())
+        FileManager.default.createFile(atPath: existingDestination.path, contents: Data())
+
+        XCTAssertThrowsError(try MEPlayerStreamRecordingPathPolicy.prepareDestination(source, sourceURL: source)) { error in
+            XCTAssertEqual(error as? MEPlayerStreamRecordingError, .sourceAndDestinationMatch(source))
+        }
+        XCTAssertThrowsError(try MEPlayerStreamRecordingPathPolicy.prepareDestination(existingDestination, sourceURL: source)) { error in
+            XCTAssertEqual(error as? MEPlayerStreamRecordingError, .destinationExists(existingDestination))
+        }
+        XCTAssertThrowsError(try MEPlayerStreamRecordingPathPolicy.prepareDestination(temporaryDirectory, sourceURL: source)) { error in
+            XCTAssertEqual(error as? MEPlayerStreamRecordingError, .unsafeDestination(temporaryDirectory))
+        }
+        XCTAssertNoThrow(try MEPlayerStreamRecordingPathPolicy.prepareDestination(nestedDestination, sourceURL: source))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: nestedDestination.deletingLastPathComponent().path))
+    }
+
+    func testStreamRecordingTemporaryDestinationIsSiblingHiddenFile() throws {
+        let destination = URL(fileURLWithPath: "/tmp/recording.mov")
+        let uuid = UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
+
+        let temporaryDestination = MEPlayerStreamRecordingPathPolicy.temporaryDestination(for: destination, uuid: uuid)
+
+        XCTAssertEqual(temporaryDestination.deletingLastPathComponent(), destination.deletingLastPathComponent())
+        XCTAssertEqual(temporaryDestination.pathExtension, "mov")
+        XCTAssertTrue(temporaryDestination.lastPathComponent.hasPrefix(".recording.recording."))
+        XCTAssertNotEqual(temporaryDestination, destination)
+        XCTAssertNoThrow(try MEPlayerStreamRecordingPathPolicy.prepareTemporaryDestination(temporaryDestination, finalDestination: destination))
+    }
+
+    func testStreamRecordingTrackPolicyUsesCurrentPlaybackStreams() {
+        XCTAssertTrue(MEPlayerStreamRecordingTrackPolicy.isQuickTimeContainer(formatName: "mov,mp4,m4a"))
+        XCTAssertTrue(MEPlayerStreamRecordingTrackPolicy.shouldCreateStream(mediaKind: .video, isEnabledPlaybackTrack: true, isQuickTimeContainer: true, isMovTextSubtitle: false, hasRecordedAudio: false, hasRecordedVideo: false))
+        XCTAssertFalse(MEPlayerStreamRecordingTrackPolicy.shouldCreateStream(mediaKind: .video, isEnabledPlaybackTrack: false, isQuickTimeContainer: true, isMovTextSubtitle: false, hasRecordedAudio: false, hasRecordedVideo: false))
+        XCTAssertFalse(MEPlayerStreamRecordingTrackPolicy.shouldCreateStream(mediaKind: .video, isEnabledPlaybackTrack: true, isQuickTimeContainer: true, isMovTextSubtitle: false, hasRecordedAudio: false, hasRecordedVideo: true))
+        XCTAssertTrue(MEPlayerStreamRecordingTrackPolicy.shouldCreateStream(mediaKind: .audio, isEnabledPlaybackTrack: true, isQuickTimeContainer: true, isMovTextSubtitle: false, hasRecordedAudio: false, hasRecordedVideo: false))
+        XCTAssertFalse(MEPlayerStreamRecordingTrackPolicy.shouldCreateStream(mediaKind: .subtitle, isEnabledPlaybackTrack: false, isQuickTimeContainer: true, isMovTextSubtitle: false, hasRecordedAudio: false, hasRecordedVideo: false))
+        XCTAssertTrue(MEPlayerStreamRecordingTrackPolicy.shouldCreateStream(mediaKind: .subtitle, isEnabledPlaybackTrack: false, isQuickTimeContainer: true, isMovTextSubtitle: true, hasRecordedAudio: false, hasRecordedVideo: false))
+        XCTAssertTrue(MEPlayerStreamRecordingTrackPolicy.shouldCreateStream(mediaKind: .subtitle, isEnabledPlaybackTrack: false, isQuickTimeContainer: false, isMovTextSubtitle: false, hasRecordedAudio: false, hasRecordedVideo: false))
+        XCTAssertFalse(MEPlayerStreamRecordingTrackPolicy.shouldCreateStream(mediaKind: .other, isEnabledPlaybackTrack: true, isQuickTimeContainer: false, isMovTextSubtitle: false, hasRecordedAudio: false, hasRecordedVideo: false))
+    }
+
+    func testStreamRecordingProgressCarriesCountersAndStreams() {
+        let destination = URL(fileURLWithPath: "/tmp/final.mov")
+        let temporary = URL(fileURLWithPath: "/tmp/.final.recording.tmp.mov")
+        let stream = StreamRecordingStreamDiagnostic(inputIndex: 0, outputIndex: 0, mediaType: "video", codecName: "h264", action: .recorded)
+
+        let progress = StreamRecordingProgress(
+            phase: .recording,
+            destinationURL: destination,
+            temporaryURL: temporary,
+            duration: 2.5,
+            bytesWritten: 1024,
+            packetsWritten: 12,
+            packetsSkipped: 3,
+            droppedVideoFrameCount: 1,
+            droppedVideoPacketCount: 2,
+            streams: [stream],
+            message: "recording"
+        )
+
+        XCTAssertEqual(progress.phase, .recording)
+        XCTAssertEqual(progress.destinationURL, destination)
+        XCTAssertEqual(progress.temporaryURL, temporary)
+        XCTAssertEqual(progress.duration, 2.5)
+        XCTAssertEqual(progress.bytesWritten, 1024)
+        XCTAssertEqual(progress.packetsWritten, 12)
+        XCTAssertEqual(progress.packetsSkipped, 3)
+        XCTAssertEqual(progress.droppedVideoFrameCount, 1)
+        XCTAssertEqual(progress.droppedVideoPacketCount, 2)
+        XCTAssertEqual(progress.streams, [stream])
+    }
+
+    func testStreamRecordingSubtitlePolicyExplainsExternalOverlayLimitation() {
+        let diagnostic = MEPlayerStreamRecordingTrackPolicy.externalSubtitlePolicyDiagnostic(isTextSubtitle: true, isMuxerSupported: true)
+
+        XCTAssertTrue(diagnostic.contains("External text subtitles"))
+        XCTAssertTrue(diagnostic.contains("overlay subtitles"))
+    }
+
+    func testStreamRecordingSourcePolicyExplainsAVPlayerAndSeparateAudioLimitations() {
+        let avPlayer = StreamRecordingSourcePolicy.diagnostic(playerType: KSAVPlayer.self, audioURL: nil)
+        XCTAssertFalse(avPlayer.isSupported)
+        XCTAssertTrue(avPlayer.message.contains("KSMEPlayer-only"))
+
+        let separateAudio = StreamRecordingSourcePolicy.diagnostic(playerType: KSMEPlayer.self, audioURL: URL(string: "https://example.com/audio.m4a?token=secret")!)
+        XCTAssertFalse(separateAudio.isSupported)
+        XCTAssertTrue(separateAudio.message.contains("separate audio"))
+        XCTAssertFalse(separateAudio.message.contains("secret"))
+
+        let mePlayer = StreamRecordingSourcePolicy.diagnostic(playerType: KSMEPlayer.self, audioURL: nil)
+        XCTAssertTrue(mePlayer.isSupported)
+        XCTAssertTrue(mePlayer.message.contains("temporary file"))
+    }
+
     func testAVPlayerSeekableRangeResolverUnionsFiniteRanges() {
         let ranges = [
             CMTimeRange(start: CMTime(seconds: 120, preferredTimescale: 600), duration: CMTime(seconds: 30, preferredTimescale: 600)),
@@ -615,6 +949,9 @@ class VideoPlayerViewTest: XCTestCase {
         XCTAssertEqual(SeamlessLoopPlaybackPolicy.avPlayerActionAtItemEnd(isLoopPlay: true, isSeamlessLoopEnabled: true), .none)
         XCTAssertEqual(SeamlessLoopPlaybackPolicy.avPlayerActionAtItemEnd(isLoopPlay: true, isSeamlessLoopEnabled: false), .pause)
         XCTAssertEqual(SeamlessLoopPlaybackPolicy.avPlayerActionAtItemEnd(isLoopPlay: false, isSeamlessLoopEnabled: true), .pause)
+        XCTAssertFalse(SeamlessLoopPlaybackPolicy.shouldManuallyRestartAVPlayer(isLoopPlay: true, isSeamlessLoopEnabled: true))
+        XCTAssertTrue(SeamlessLoopPlaybackPolicy.shouldManuallyRestartAVPlayer(isLoopPlay: true, isSeamlessLoopEnabled: false))
+        XCTAssertFalse(SeamlessLoopPlaybackPolicy.shouldManuallyRestartAVPlayer(isLoopPlay: false, isSeamlessLoopEnabled: false))
     }
 
     func testSeamlessLoopPolicyUsesExactSeekForLoopRestartOnly() {
@@ -629,6 +966,14 @@ class VideoPlayerViewTest: XCTestCase {
         XCTAssertFalse(SeamlessLoopPlaybackPolicy.shouldUseMEPlayerPacketQueue(isLoopPlay: true, isSeamlessLoopEnabled: false, usesAsyncPacketQueue: true, tracksAlreadyLooping: false))
         XCTAssertFalse(SeamlessLoopPlaybackPolicy.shouldUseMEPlayerPacketQueue(isLoopPlay: true, isSeamlessLoopEnabled: true, usesAsyncPacketQueue: false, tracksAlreadyLooping: false))
         XCTAssertFalse(SeamlessLoopPlaybackPolicy.shouldUseMEPlayerPacketQueue(isLoopPlay: true, isSeamlessLoopEnabled: true, usesAsyncPacketQueue: true, tracksAlreadyLooping: true))
+        XCTAssertFalse(SeamlessLoopPlaybackPolicy.shouldUseMEPlayerPacketQueue(isLoopPlay: true, isSeamlessLoopEnabled: true, usesAsyncPacketQueue: true, tracksAlreadyLooping: false, canSeekToStart: false))
+    }
+
+    func testSeamlessLoopPolicyRequiresFiniteSeekableMEPlayerSource() {
+        XCTAssertTrue(SeamlessLoopPlaybackPolicy.canRestartMEPlayerLoop(isLoopPlay: true, duration: 3, isSeekable: true))
+        XCTAssertFalse(SeamlessLoopPlaybackPolicy.canRestartMEPlayerLoop(isLoopPlay: false, duration: 3, isSeekable: true))
+        XCTAssertFalse(SeamlessLoopPlaybackPolicy.canRestartMEPlayerLoop(isLoopPlay: true, duration: 0, isSeekable: true))
+        XCTAssertFalse(SeamlessLoopPlaybackPolicy.canRestartMEPlayerLoop(isLoopPlay: true, duration: 3, isSeekable: false))
     }
 
     func testSeamlessLoopOptionIsOptInByDefault() {
@@ -825,6 +1170,110 @@ class VideoPlayerViewTest: XCTestCase {
         ), .stay)
     }
 
+    func testAdaptiveBitratePolicyUpgradesToHighestSustainableBandwidth() {
+        let policy = KSAdaptiveBitrateSwitchingPolicy(
+            minimumSwitchInterval: 20,
+            upgradeBufferThreshold: 10,
+            upgradeObservationDuration: 30,
+            upgradeThroughputSafetyFactor: 1.25
+        )
+
+        XCTAssertEqual(policy.targetDefinitionRank(
+            definitionRank: 0,
+            definitionBandwidths: [1_000_000, 2_000_000, 4_000_000],
+            bufferAhead: 12,
+            rebufferCount: 0,
+            stableBufferDuration: 31,
+            secondsSinceLastSwitch: 21,
+            estimatedThroughput: 5_100_000,
+            isLive: false,
+            isAdaptiveStreamingManifest: false
+        ), 2)
+    }
+
+    func testAdaptiveBitratePolicyBlocksUpgradeWhenThroughputIsBelowSafetyMargin() {
+        let policy = KSAdaptiveBitrateSwitchingPolicy(
+            minimumSwitchInterval: 20,
+            upgradeBufferThreshold: 10,
+            upgradeObservationDuration: 30,
+            upgradeThroughputSafetyFactor: 1.25
+        )
+
+        XCTAssertNil(policy.targetDefinitionRank(
+            definitionRank: 0,
+            definitionBandwidths: [1_000_000, 2_000_000, 4_000_000],
+            bufferAhead: 12,
+            rebufferCount: 0,
+            stableBufferDuration: 31,
+            secondsSinceLastSwitch: 21,
+            estimatedThroughput: 2_400_000,
+            isLive: false,
+            isAdaptiveStreamingManifest: false
+        ))
+    }
+
+    func testAdaptiveBitratePolicyDowngradesToSustainableBandwidth() {
+        let policy = KSAdaptiveBitrateSwitchingPolicy(
+            minimumSwitchInterval: 20,
+            upgradeThroughputSafetyFactor: 1.25,
+            downgradeThroughputSafetyFactor: 0.9
+        )
+
+        XCTAssertEqual(policy.targetDefinitionRank(
+            definitionRank: 3,
+            definitionBandwidths: [1_000_000, 2_000_000, 4_000_000, 8_000_000],
+            bufferAhead: 8,
+            rebufferCount: 0,
+            stableBufferDuration: 0,
+            secondsSinceLastSwitch: 21,
+            estimatedThroughput: 3_000_000,
+            isLive: false,
+            isAdaptiveStreamingManifest: false
+        ), 1)
+    }
+
+    func testAdaptiveBitratePolicyUsesLowLatencyLiveBufferThreshold() {
+        let policy = KSAdaptiveBitrateSwitchingPolicy(
+            minimumSwitchInterval: 20,
+            downgradeBufferThreshold: 2,
+            lowLatencyLiveDowngradeBufferThreshold: 0.2
+        )
+
+        XCTAssertNil(policy.targetDefinitionRank(
+            definitionRank: 1,
+            definitionBandwidths: [1_000_000, 2_000_000],
+            bufferAhead: 0.5,
+            rebufferCount: 0,
+            stableBufferDuration: 0,
+            secondsSinceLastSwitch: 21,
+            estimatedThroughput: nil,
+            isLive: true,
+            isLowLatencyLive: true,
+            isAdaptiveStreamingManifest: false
+        ))
+        XCTAssertEqual(policy.targetDefinitionRank(
+            definitionRank: 1,
+            definitionBandwidths: [1_000_000, 2_000_000],
+            bufferAhead: 0.1,
+            rebufferCount: 0,
+            stableBufferDuration: 0,
+            secondsSinceLastSwitch: 21,
+            estimatedThroughput: nil,
+            isLive: true,
+            isLowLatencyLive: true,
+            isAdaptiveStreamingManifest: false
+        ), 0)
+    }
+
+    func testAdaptiveBitrateThroughputEstimatorUsesEWMASamples() {
+        var estimator = KSAdaptiveBitrateThroughputEstimator()
+
+        XCTAssertNil(estimator.sample(bytesRead: 0, at: 0, minimumInterval: 1))
+        XCTAssertNil(estimator.sample(bytesRead: 62_500, at: 0.5, minimumInterval: 1))
+        XCTAssertEqual(estimator.sample(bytesRead: 125_000, at: 1, minimumInterval: 1), 1_000_000)
+        XCTAssertEqual(estimator.sample(bytesRead: 375_000, at: 2, minimumInterval: 1), 1_300_000)
+    }
+
     func testResumeStateClampsFiniteVodTime() {
         let state = KSPlayerResumeState(
             url: URL(fileURLWithPath: "/tmp/movie.mp4"),
@@ -928,15 +1377,24 @@ private final class TestMediaPlayerTrack: MediaPlayerTrack {
     let isImageSubtitle = false
     let rotation: Int16 = 0
     let dovi: DOVIDecoderConfigurationRecord? = nil
-    let fieldOrder = FFmpegFieldOrder.unknown
-    let formatDescription: CMFormatDescription? = nil
+    let fieldOrder: FFmpegFieldOrder
+    let formatDescription: CMFormatDescription?
     var description: String { name }
 
-    init(mediaType: AVMediaType, trackID: Int32, name: String, languageCode: String?) {
+    init(
+        mediaType: AVMediaType,
+        trackID: Int32,
+        name: String,
+        languageCode: String?,
+        fieldOrder: FFmpegFieldOrder = .unknown,
+        formatDescription: CMFormatDescription? = nil
+    ) {
         self.mediaType = mediaType
         self.trackID = trackID
         self.name = name
         self.languageCode = languageCode
+        self.fieldOrder = fieldOrder
+        self.formatDescription = formatDescription
     }
 }
 

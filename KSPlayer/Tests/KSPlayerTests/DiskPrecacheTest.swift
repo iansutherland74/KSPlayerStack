@@ -34,6 +34,8 @@ final class DiskPrecacheTest: XCTestCase {
         XCTAssertTrue(KSDiskPrecache.isSupportedRemoteMediaURL(try XCTUnwrap(URL(string: "http://example.com/movie"))))
         XCTAssertFalse(KSDiskPrecache.isSupportedRemoteMediaURL(try XCTUnwrap(URL(string: "https://example.com/live.m3u8"))))
         XCTAssertFalse(KSDiskPrecache.isSupportedRemoteMediaURL(try XCTUnwrap(URL(string: "rtsp://example.com/movie.mp4"))))
+        XCTAssertFalse(KSDiskPrecache.isSupportedRemoteMediaURL(try XCTUnwrap(URL(string: "smb2://server/share/movie.mp4"))))
+        XCTAssertFalse(KSDiskPrecache.isSupportedRemoteMediaURL(try XCTUnwrap(URL(string: "dlna://device/item/movie.mp4"))))
         XCTAssertFalse(KSDiskPrecache.isSupportedRemoteMediaURL(URL(fileURLWithPath: "/tmp/movie.mp4")))
     }
 

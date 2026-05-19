@@ -452,12 +452,14 @@ public final class VideoVTBFrame: MEFrame {
     public var size: Int32 = 0
     public let fps: Float
     public let isDovi: Bool
+    let dolbyVisionFallbackDynamicRange: DynamicRange?
     public var interlacingType: VideoInterlacingType?
     public var edrMetaData: EDRMetaData? = nil
     var corePixelBuffer: PixelBufferProtocol?
-    init(fps: Float, isDovi: Bool) {
+    init(fps: Float, isDovi: Bool, dolbyVisionFallbackDynamicRange: DynamicRange? = nil) {
         self.fps = fps
         self.isDovi = isDovi
+        self.dolbyVisionFallbackDynamicRange = dolbyVisionFallbackDynamicRange
     }
 }
 
@@ -492,8 +494,10 @@ public struct EDRMetaData {
     var displayData: MasteringDisplayMetadata?
     var contentData: ContentLightMetadata?
     var ambientViewingEnvironment: AmbientViewingEnvironment?
-    /// Diagnostics only: HDR10+ dynamic tone mapping is left to system decode/display paths.
+    /// True when FFmpeg reported HDR10+ side data even if parsing failed.
     var hasHDR10PlusMetadata = false
+    /// Parsed runtime copy of FFmpeg's HDR10+ dynamic side data. The Metal renderer preserves it for policy decisions.
+    var hdr10PlusMetadata: HDR10PlusMetadata?
 }
 
 public struct MasteringDisplayMetadata {

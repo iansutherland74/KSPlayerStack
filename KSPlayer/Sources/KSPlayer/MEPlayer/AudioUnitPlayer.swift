@@ -83,7 +83,7 @@ public final class AudioUnitPlayer: AudioOutput {
                              kAudioUnitProperty_AudioChannelLayout,
                              kAudioUnitScope_Input, 0,
                              channelLayout,
-                             UInt32(MemoryLayout<AudioChannelLayout>.size))
+                             channelLayout?.byteSize ?? UInt32(MemoryLayout<AudioChannelLayout>.size))
         var inputCallbackStruct = renderCallbackStruct()
         AudioUnitSetProperty(audioUnitForOutput,
                              kAudioUnitProperty_SetRenderCallback,

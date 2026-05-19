@@ -90,6 +90,12 @@ extension UnsafePointer<AudioChannelLayout> {
     var channelDescriptions: [AudioChannelDescription] {
         UnsafeMutablePointer(mutating: self).channelDescriptions
     }
+
+    var byteSize: UInt32 {
+        let headerSize = MemoryLayout<AudioChannelLayout>.offset(of: \.mChannelDescriptions) ?? MemoryLayout<AudioChannelLayout>.size
+        let descriptionsSize = Int(pointee.mNumberChannelDescriptions) * MemoryLayout<AudioChannelDescription>.stride
+        return UInt32(headerSize + descriptionsSize)
+    }
 }
 
 extension UnsafeMutablePointer<AudioChannelLayout> {

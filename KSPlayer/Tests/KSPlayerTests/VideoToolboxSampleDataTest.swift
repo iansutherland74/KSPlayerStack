@@ -1,5 +1,6 @@
 @testable import KSPlayer
 import CoreMedia
+import VideoToolbox
 import XCTest
 
 final class VideoToolboxSampleDataTest: XCTestCase {
@@ -142,5 +143,35 @@ final class VideoToolboxSampleDataTest: XCTestCase {
         XCTAssertTrue(VideoToolboxHardwareDecodePolicy.knownHardwareCodecTypes.contains(kCMVideoCodecType_VP9))
         XCTAssertTrue(VideoToolboxHardwareDecodePolicy.knownHardwareCodecTypes.contains(kCMVideoCodecType_AV1))
         XCTAssertTrue(VideoToolboxHardwareDecodePolicy.knownHardwareCodecTypes.contains(kCMVideoCodecType_AppleProRes422))
+    }
+
+    func testVideoToolboxPolicyBuildsDecoderSpecifications() throws {
+        let h264Spec = try XCTUnwrap(
+            VideoToolboxHardwareDecodePolicy.decoderSpecification(codecType: kCMVideoCodecType_H264)
+        ) as NSDictionary
+        XCTAssertEqual(
+            h264Spec[kVTVideoDecoderSpecification_RequireHardwareAcceleratedVideoDecoder as String] as? Bool,
+            true
+        )
+        XCTAssertNil(h264Spec[kVTVideoDecoderSpecification_EnableHardwareAcceleratedVideoDecoder as String])
+
+        let hevcSpec = try XCTUnwrap(
+            VideoToolboxHardwareDecodePolicy.decoderSpecification(codecType: kCMVideoCodecType_HEVC)
+        ) as NSDictionary
+        XCTAssertEqual(
+            hevcSpec[kVTVideoDecoderSpecification_EnableHardwareAcceleratedVideoDecoder as String] as? Bool,
+            true
+        )
+        XCTAssertNil(hevcSpec[kVTVideoDecoderSpecification_RequireHardwareAcceleratedVideoDecoder as String])
+
+        let dolbyVisionSpec = try XCTUnwrap(
+            VideoToolboxHardwareDecodePolicy.decoderSpecification(codecType: kCMVideoCodecType_DolbyVisionHEVC)
+        ) as NSDictionary
+        XCTAssertEqual(
+            dolbyVisionSpec[kVTVideoDecoderSpecification_EnableHardwareAcceleratedVideoDecoder as String] as? Bool,
+            true
+        )
+
+        XCTAssertNil(VideoToolboxHardwareDecodePolicy.decoderSpecification(codecType: "zzzz".fourCharCode))
     }
 }

@@ -17,12 +17,31 @@ extension DisplayEnum {
     private static var vrDiaplay = VRDisplayModel()
     private static var vrBoxDiaplay = VRBoxDisplayModel()
 
-    func set(encoder: MTLRenderCommandEncoder, panoramaStereoLayout: PanoramaStereoLayout, panoramaFieldOfView: PanoramaFieldOfView) {
+    func set(
+        encoder: MTLRenderCommandEncoder,
+        drawableSize: CGSize,
+        video2DTo3D: Video2DTo3DRenderConfiguration,
+        stereoscopicVideoLayout: StereoscopicVideoLayout,
+        stereoscopicVideoEye: StereoscopicVideoEye,
+        panoramaStereoLayout: PanoramaStereoLayout,
+        panoramaFieldOfView: PanoramaFieldOfView
+    ) {
         switch self {
         case .plane:
-            DisplayEnum.planeDisplay.set(encoder: encoder)
+            DisplayEnum.planeDisplay.set(
+                encoder: encoder,
+                drawableSize: drawableSize,
+                video2DTo3D: video2DTo3D,
+                stereoscopicVideoLayout: stereoscopicVideoLayout,
+                stereoscopicVideoEye: stereoscopicVideoEye
+            )
         case .vr:
-            DisplayEnum.vrDiaplay.set(encoder: encoder, panoramaStereoLayout: panoramaStereoLayout, panoramaFieldOfView: panoramaFieldOfView)
+            DisplayEnum.vrDiaplay.set(
+                encoder: encoder,
+                panoramaStereoLayout: panoramaStereoLayout,
+                panoramaFieldOfView: panoramaFieldOfView,
+                eye: PanoramaTextureEye(stereoscopicVideoEye)
+            )
         case .vrBox:
             DisplayEnum.vrBoxDiaplay.set(encoder: encoder, panoramaStereoLayout: panoramaStereoLayout, panoramaFieldOfView: panoramaFieldOfView)
         }
@@ -52,6 +71,17 @@ extension DisplayEnum {
 }
 
 private class PlaneDisplayModel {
+    private struct PlaneMeshKey: Hashable {
+        let stereoLayout: StereoscopicVideoLayout
+        let eye: StereoscopicVideoEye
+    }
+
+    private struct PlaneMesh {
+        let indexBuffer: MTLBuffer
+        let posBuffer: MTLBuffer?
+        let uvBuffer: MTLBuffer?
+    }
+
     private lazy var yuv = MetalRender.makePipelineState(fragmentFunction: "displayYUVTexture")
     private lazy var yuvp010LE = MetalRender.makePipelineState(fragmentFunction: "displayYUVTexture", bitDepth: 10)
     private lazy var nv12 = MetalRender.makePipelineState(fragmentFunction: "displayNV12Texture")
@@ -60,20 +90,14 @@ private class PlaneDisplayModel {
     let indexCount: Int
     let indexType = MTLIndexType.uint16
     let primitiveType = MTLPrimitiveType.triangleStrip
-    let indexBuffer: MTLBuffer
-    let posBuffer: MTLBuffer?
-    let uvBuffer: MTLBuffer?
+    private var meshes = [PlaneMeshKey: PlaneMesh]()
 
     fileprivate init() {
-        let (indices, positions, uvs) = PlaneDisplayModel.genSphere()
-        let device = MetalRender.device
+        let (indices, _, _) = PlaneDisplayModel.genPlane(stereoLayout: .mono, eye: .left)
         indexCount = indices.count
-        indexBuffer = device.makeBuffer(bytes: indices, length: MemoryLayout<UInt16>.size * indexCount)!
-        posBuffer = device.makeBuffer(bytes: positions, length: MemoryLayout<simd_float4>.size * positions.count)
-        uvBuffer = device.makeBuffer(bytes: uvs, length: MemoryLayout<simd_float2>.size * uvs.count)
     }
 
-    private static func genSphere() -> ([UInt16], [simd_float4], [simd_float2]) {
+    private static func genPlane(stereoLayout: StereoscopicVideoLayout, eye: StereoscopicVideoEye) -> ([UInt16], [simd_float4], [simd_float2]) {
         let indices: [UInt16] = [0, 1, 2, 3]
         let positions: [simd_float4] = [
             [-1.0, -1.0, 0.0, 1.0],
@@ -81,20 +105,104 @@ private class PlaneDisplayModel {
             [1.0, -1.0, 0.0, 1.0],
             [1.0, 1.0, 0.0, 1.0],
         ]
+        let bounds = stereoLayout.textureCoordinateBounds(for: PanoramaTextureEye(eye))
+        let minX = Float(bounds.minX)
+        let maxX = Float(bounds.maxX)
+        let minY = Float(bounds.minY)
+        let maxY = Float(bounds.maxY)
         let uvs: [simd_float2] = [
-            [0.0, 1.0],
-            [0.0, 0.0],
-            [1.0, 1.0],
-            [1.0, 0.0],
+            [minX, maxY],
+            [minX, minY],
+            [maxX, maxY],
+            [maxX, minY],
         ]
         return (indices, positions, uvs)
     }
 
-    func set(encoder: MTLRenderCommandEncoder) {
+    func set(
+        encoder: MTLRenderCommandEncoder,
+        drawableSize: CGSize,
+        video2DTo3D: Video2DTo3DRenderConfiguration,
+        stereoscopicVideoLayout: StereoscopicVideoLayout,
+        stereoscopicVideoEye: StereoscopicVideoEye
+    ) {
+        let mesh = mesh(stereoLayout: stereoscopicVideoLayout, eye: stereoscopicVideoEye)
         encoder.setFrontFacing(.clockwise)
-        encoder.setVertexBuffer(posBuffer, offset: 0, index: 0)
-        encoder.setVertexBuffer(uvBuffer, offset: 0, index: 1)
-        encoder.drawIndexedPrimitives(type: primitiveType, indexCount: indexCount, indexType: indexType, indexBuffer: indexBuffer, indexBufferOffset: 0)
+        encoder.setVertexBuffer(mesh.posBuffer, offset: 0, index: 0)
+        encoder.setVertexBuffer(mesh.uvBuffer, offset: 0, index: 1)
+        guard video2DTo3D.isEnabled, stereoscopicVideoLayout == .mono else {
+            draw(encoder: encoder, mesh: mesh, video2DTo3D: .disabled, eye: stereoscopicVideoEye)
+            return
+        }
+        switch video2DTo3D.outputLayout {
+        case .selectedEye:
+            draw(encoder: encoder, mesh: mesh, video2DTo3D: video2DTo3D, eye: video2DTo3D.selectedEye)
+        case .sideBySide:
+            let width = Double(drawableSize.width / 2)
+            draw(
+                encoder: encoder,
+                mesh: mesh,
+                video2DTo3D: video2DTo3D,
+                eye: .left,
+                viewport: MTLViewport(originX: 0, originY: 0, width: width, height: Double(drawableSize.height), znear: 0, zfar: 1)
+            )
+            draw(
+                encoder: encoder,
+                mesh: mesh,
+                video2DTo3D: video2DTo3D,
+                eye: .right,
+                viewport: MTLViewport(originX: width, originY: 0, width: width, height: Double(drawableSize.height), znear: 0, zfar: 1)
+            )
+        case .topAndBottom:
+            let height = Double(drawableSize.height / 2)
+            draw(
+                encoder: encoder,
+                mesh: mesh,
+                video2DTo3D: video2DTo3D,
+                eye: .left,
+                viewport: MTLViewport(originX: 0, originY: 0, width: Double(drawableSize.width), height: height, znear: 0, zfar: 1)
+            )
+            draw(
+                encoder: encoder,
+                mesh: mesh,
+                video2DTo3D: video2DTo3D,
+                eye: .right,
+                viewport: MTLViewport(originX: 0, originY: height, width: Double(drawableSize.width), height: height, znear: 0, zfar: 1)
+            )
+        }
+    }
+
+    private func draw(
+        encoder: MTLRenderCommandEncoder,
+        mesh: PlaneMesh,
+        video2DTo3D: Video2DTo3DRenderConfiguration,
+        eye: StereoscopicVideoEye,
+        viewport: MTLViewport? = nil
+    ) {
+        var uniform = video2DTo3D.fragmentUniform(for: eye)
+        var shapeUniform = video2DTo3D.shapeUniform()
+        if let viewport {
+            encoder.setViewport(viewport)
+        }
+        encoder.setFragmentBytes(&uniform, length: MemoryLayout<SIMD4<Float>>.stride, index: 6)
+        encoder.setFragmentBytes(&shapeUniform, length: MemoryLayout<SIMD4<Float>>.stride, index: 7)
+        encoder.drawIndexedPrimitives(type: primitiveType, indexCount: indexCount, indexType: indexType, indexBuffer: mesh.indexBuffer, indexBufferOffset: 0)
+    }
+
+    private func mesh(stereoLayout: StereoscopicVideoLayout, eye: StereoscopicVideoEye) -> PlaneMesh {
+        let key = PlaneMeshKey(stereoLayout: stereoLayout, eye: eye)
+        if let mesh = meshes[key] {
+            return mesh
+        }
+        let (indices, positions, uvs) = PlaneDisplayModel.genPlane(stereoLayout: stereoLayout, eye: eye)
+        let device = MetalRender.device
+        let mesh = PlaneMesh(
+            indexBuffer: device.makeBuffer(bytes: indices, length: MemoryLayout<UInt16>.size * indices.count)!,
+            posBuffer: device.makeBuffer(bytes: positions, length: MemoryLayout<simd_float4>.size * positions.count),
+            uvBuffer: device.makeBuffer(bytes: uvs, length: MemoryLayout<simd_float2>.size * uvs.count)
+        )
+        meshes[key] = mesh
+        return mesh
     }
 
     func pipeline(planeCount: Int, bitDepth: Int32) -> MTLRenderPipelineState {
@@ -154,12 +262,12 @@ private class SphereDisplayModel {
         #endif
     }
 
-    func set(
+    func prepare(
         encoder: MTLRenderCommandEncoder,
         panoramaStereoLayout: PanoramaStereoLayout,
         panoramaFieldOfView: PanoramaFieldOfView,
         eye: PanoramaTextureEye
-    ) -> SphereMesh {
+    ) -> (indexCount: Int, indexBuffer: MTLBuffer) {
         let mesh = mesh(fieldOfView: panoramaFieldOfView, stereoLayout: panoramaStereoLayout, eye: eye)
         encoder.setFrontFacing(.clockwise)
         encoder.setVertexBuffer(mesh.posBuffer, offset: 0, index: 0)
@@ -169,7 +277,7 @@ private class SphereDisplayModel {
             modelViewMatrix = matrix
         }
         #endif
-        return mesh
+        return (mesh.indexCount, mesh.indexBuffer)
     }
 
     @MainActor
@@ -308,8 +416,13 @@ private class VRDisplayModel: SphereDisplayModel {
         super.init()
     }
 
-    func set(encoder: MTLRenderCommandEncoder, panoramaStereoLayout: PanoramaStereoLayout, panoramaFieldOfView: PanoramaFieldOfView) {
-        let mesh = super.set(encoder: encoder, panoramaStereoLayout: panoramaStereoLayout, panoramaFieldOfView: panoramaFieldOfView, eye: .mono)
+    func set(
+        encoder: MTLRenderCommandEncoder,
+        panoramaStereoLayout: PanoramaStereoLayout,
+        panoramaFieldOfView: PanoramaFieldOfView,
+        eye: PanoramaTextureEye
+    ) {
+        let mesh = prepare(encoder: encoder, panoramaStereoLayout: panoramaStereoLayout, panoramaFieldOfView: panoramaFieldOfView, eye: eye)
         var matrix = modelViewProjectionMatrix * modelViewMatrix
         let matrixBuffer = MetalRender.device.makeBuffer(bytes: &matrix, length: MemoryLayout<simd_float4x4>.size)
         encoder.setVertexBuffer(matrixBuffer, offset: 0, index: 2)
@@ -338,7 +451,7 @@ private class VRBoxDisplayModel: SphereDisplayModel {
             (modelViewProjectionMatrixLeft, PanoramaTextureEye.left, MTLViewport(originX: 0, originY: 0, width: width, height: Double(layerSize.height), znear: 0, zfar: 0)),
             (modelViewProjectionMatrixRight, PanoramaTextureEye.right, MTLViewport(originX: width, originY: 0, width: width, height: Double(layerSize.height), znear: 0, zfar: 0)),
         ].forEach { modelViewProjectionMatrix, eye, viewport in
-            let mesh = super.set(encoder: encoder, panoramaStereoLayout: panoramaStereoLayout, panoramaFieldOfView: panoramaFieldOfView, eye: eye)
+            let mesh = prepare(encoder: encoder, panoramaStereoLayout: panoramaStereoLayout, panoramaFieldOfView: panoramaFieldOfView, eye: eye)
             encoder.setViewport(viewport)
             var matrix = modelViewProjectionMatrix * modelViewMatrix
             let matrixBuffer = MetalRender.device.makeBuffer(bytes: &matrix, length: MemoryLayout<simd_float4x4>.size)

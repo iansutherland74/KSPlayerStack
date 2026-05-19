@@ -152,6 +152,12 @@ class SyncPlayerItemTrack<Frame: MEFrame>: PlayerItemTrackProtocol, CustomString
                     }
                 }
                 if let frame = frame as? Frame {
+                    if self.mediaType == .video,
+                       let videoFrame = frame as? VideoVTBFrame,
+                       let pixelBuffer = videoFrame.corePixelBuffer?.cvPixelBuffer
+                    {
+                        self.options.videoFrameOutput?.enqueue(pixelBuffer)
+                    }
                     self.outputRenderQueue.push(frame)
                     self.outputRenderQueue.fps = packet.assetTrack.nominalFrameRate
                 }
@@ -203,6 +209,9 @@ final class AsyncPlayerItemTrack<Frame: MEFrame>: SyncPlayerItemTrack<Frame> {
 
     required init(mediaType: AVFoundation.AVMediaType, frameCapacity: UInt8, options: KSOptions) {
         super.init(mediaType: mediaType, frameCapacity: frameCapacity, options: options)
+        if let packetCapacity = options.asyncPacketQueueMaxCount(mediaType: mediaType, frameCapacity: frameCapacity) {
+            packetQueue = CircularBuffer<Packet>(initialCapacity: packetCapacity, expanding: false)
+        }
         operationQueue.name = "KSPlayer_" + mediaType.rawValue
         operationQueue.maxConcurrentOperationCount = 1
         operationQueue.qualityOfService = .userInteractive

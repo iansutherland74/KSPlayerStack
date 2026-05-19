@@ -46,6 +46,9 @@ public class AssParse: KSParseProtocol {
             return false
         }
         while scanner.scanString("Format:") == nil {
+            guard !scanner.isAtEnd else {
+                return false
+            }
             if scanner.scanString("PlayResX:") != nil {
                 playResX = scanner.scanFloat() ?? 0
             } else if scanner.scanString("PlayResY:") != nil {
@@ -64,7 +67,7 @@ public class AssParse: KSParseProtocol {
                 continue
             }
             var dic = [String: String]()
-            for i in 1 ..< keys.count {
+            for i in 1 ..< min(keys.count, values.count) {
                 dic[keys[i]] = values[i]
             }
             styleMap[values[0]] = dic.parseASSStyle()
@@ -397,37 +400,44 @@ public class SrtParse: KSParseProtocol {
      {\an4}慢慢来
      */
     public func parsePart(scanner: Scanner) -> SubtitlePart? {
-        var decimal: String?
+        var timeStrs: String?
         repeat {
-            decimal = scanner.scanUpToCharacters(from: .newlines)
+            guard let line = scanner.scanUpToCharacters(from: .newlines) else {
+                _ = scanner.scanCharacters(from: .newlines)
+                continue
+            }
             _ = scanner.scanCharacters(from: .newlines)
-        } while decimal.flatMap(Int.init) == nil
-        let startString = scanner.scanUpToString("-->")
-        // skip spaces and newlines by default.
-        _ = scanner.scanString("-->")
-        if let startString,
-           let endString = scanner.scanUpToCharacters(from: .newlines)
-        {
-            _ = scanner.scanCharacters(from: .newlines)
-            var text = ""
-            var newLine: String? = nil
-            repeat {
-                if let str = scanner.scanUpToCharacters(from: .newlines) {
-                    text += str
-                }
-                newLine = scanner.scanCharacters(from: .newlines)
-                if newLine == "\n" || newLine == "\r\n" {
-                    text += "\n"
-                }
-            } while newLine == "\n" || newLine == "\r\n"
-            text = text.trimmingCharacters(in: .newlines)
-            let start = startString.parseDuration()
-            let end = endString.parseDuration()
-            let timedText = SubtitleInlineTimingParser.vttTimedText(in: text, cueEnd: end)
-            var textPosition = TextPosition()
-            return SubtitlePart(start, end, attributedString: timedText.text.build(textPosition: &textPosition), wordTimings: timedText.wordTimings)
+            if line.contains("-->") {
+                timeStrs = line
+                break
+            }
+        } while !scanner.isAtEnd
+        guard let timeStrs else {
+            return nil
         }
-        return nil
+        let timeArray = timeStrs.components(separatedBy: "-->")
+        guard timeArray.count == 2 else {
+            return nil
+        }
+        let startString = timeArray[0]
+        let endString = timeArray[1]
+        var text = ""
+        var newLine: String? = nil
+        repeat {
+            if let str = scanner.scanUpToCharacters(from: .newlines) {
+                text += str
+            }
+            newLine = scanner.scanCharacters(from: .newlines)
+            if newLine == "\n" || newLine == "\r\n" {
+                text += "\n"
+            }
+        } while newLine == "\n" || newLine == "\r\n"
+        text = text.trimmingCharacters(in: .newlines)
+        let start = startString.parseDuration()
+        let end = endString.parseDuration()
+        let timedText = SubtitleInlineTimingParser.vttTimedText(in: text, cueEnd: end)
+        var textPosition = TextPosition()
+        return SubtitlePart(start, end, attributedString: timedText.text.build(textPosition: &textPosition), wordTimings: timedText.wordTimings)
     }
 }
 

@@ -185,13 +185,25 @@ public struct KSAdaptiveBitrateSwitchingPolicy: Equatable {
     public var upgradeObservationDuration: TimeInterval
     /// Live/DVR streams default to avoiding automatic upgrades to preserve latency.
     public var allowsLiveUpgrades: Bool
+    /// Minimum seconds between network throughput samples.
+    public var minimumThroughputSampleInterval: TimeInterval
+    /// Throughput must exceed the target variant by this factor before upgrading.
+    public var upgradeThroughputSafetyFactor: Double
+    /// Current throughput below this fraction of the active variant triggers a downgrade.
+    public var downgradeThroughputSafetyFactor: Double
+    /// Low-latency live streams run with intentionally small buffers, so use a smaller downgrade threshold.
+    public var lowLatencyLiveDowngradeBufferThreshold: TimeInterval
 
     public init(minimumSwitchInterval: TimeInterval = 20,
                 upgradeBufferThreshold: TimeInterval = 12,
                 downgradeBufferThreshold: TimeInterval = 2,
                 downgradeRebufferCount: Int = 1,
                 upgradeObservationDuration: TimeInterval = 30,
-                allowsLiveUpgrades: Bool = false)
+                allowsLiveUpgrades: Bool = false,
+                minimumThroughputSampleInterval: TimeInterval = 1,
+                upgradeThroughputSafetyFactor: Double = 1.35,
+                downgradeThroughputSafetyFactor: Double = 0.9,
+                lowLatencyLiveDowngradeBufferThreshold: TimeInterval = 0.2)
     {
         self.minimumSwitchInterval = minimumSwitchInterval
         self.upgradeBufferThreshold = upgradeBufferThreshold
@@ -199,40 +211,222 @@ public struct KSAdaptiveBitrateSwitchingPolicy: Equatable {
         self.downgradeRebufferCount = downgradeRebufferCount
         self.upgradeObservationDuration = upgradeObservationDuration
         self.allowsLiveUpgrades = allowsLiveUpgrades
+        self.minimumThroughputSampleInterval = minimumThroughputSampleInterval
+        self.upgradeThroughputSafetyFactor = upgradeThroughputSafetyFactor
+        self.downgradeThroughputSafetyFactor = downgradeThroughputSafetyFactor
+        self.lowLatencyLiveDowngradeBufferThreshold = lowLatencyLiveDowngradeBufferThreshold
     }
 
     public func decision(definitionRank: Int, definitionCount: Int, bufferAhead: TimeInterval?, rebufferCount: Int, stableBufferDuration: TimeInterval,
                          secondsSinceLastSwitch: TimeInterval?, isLive: Bool, isAdaptiveStreamingManifest: Bool) -> Decision
     {
-        guard definitionCount > 1, !isAdaptiveStreamingManifest else {
+        let targetRank = targetDefinitionRank(
+            definitionRank: definitionRank,
+            definitionBandwidths: Array(repeating: nil, count: definitionCount),
+            bufferAhead: bufferAhead,
+            rebufferCount: rebufferCount,
+            stableBufferDuration: stableBufferDuration,
+            secondsSinceLastSwitch: secondsSinceLastSwitch,
+            estimatedThroughput: nil,
+            isLive: isLive,
+            isLowLatencyLive: false,
+            isAdaptiveStreamingManifest: isAdaptiveStreamingManifest
+        )
+        guard let targetRank else {
             return .stay
         }
-        if let secondsSinceLastSwitch, secondsSinceLastSwitch < minimumSwitchInterval {
-            return .stay
-        }
-
-        let normalizedRebufferCount = max(downgradeRebufferCount, 1)
-        if definitionRank > 0, rebufferCount >= normalizedRebufferCount {
+        if targetRank < definitionRank {
             return .switchToLower
         }
-
-        if let bufferAhead, bufferAhead.isFinite {
-            if definitionRank > 0, bufferAhead <= downgradeBufferThreshold {
-                return .switchToLower
-            }
-            if definitionRank < definitionCount - 1,
-               (!isLive || allowsLiveUpgrades),
-               bufferAhead >= upgradeBufferThreshold,
-               stableBufferDuration >= upgradeObservationDuration
-            {
-                return .switchToHigher
-            }
+        if targetRank > definitionRank {
+            return .switchToHigher
         }
         return .stay
     }
+
+    public func targetDefinitionRank(definitionRank: Int, definitionBandwidths: [Int64?], bufferAhead: TimeInterval?, rebufferCount: Int,
+                                     stableBufferDuration: TimeInterval, secondsSinceLastSwitch: TimeInterval?, estimatedThroughput: Int64?,
+                                     isLive: Bool, isLowLatencyLive: Bool = false, isAdaptiveStreamingManifest: Bool) -> Int?
+    {
+        guard definitionBandwidths.count > 1,
+              definitionBandwidths.indices.contains(definitionRank),
+              !isAdaptiveStreamingManifest
+        else {
+            return nil
+        }
+        if let secondsSinceLastSwitch, secondsSinceLastSwitch < minimumSwitchInterval {
+            return nil
+        }
+
+        let normalizedRebufferCount = max(downgradeRebufferCount, 1)
+        let normalizedEstimatedThroughput = estimatedThroughput.flatMap { $0 > 0 ? $0 : nil }
+        let currentBandwidth = normalizedBandwidth(definitionBandwidths[definitionRank])
+        let downgradeBufferLimit = isLowLatencyLive
+            ? max(0, min(lowLatencyLiveDowngradeBufferThreshold, downgradeBufferThreshold))
+            : downgradeBufferThreshold
+
+        if definitionRank > 0, rebufferCount >= normalizedRebufferCount {
+            return sustainableDowngradeRank(
+                from: definitionRank,
+                bandwidths: definitionBandwidths,
+                estimatedThroughput: normalizedEstimatedThroughput
+            )
+        }
+
+        if definitionRank > 0,
+           let bufferAhead,
+           bufferAhead.isFinite,
+           bufferAhead <= downgradeBufferLimit
+        {
+            return sustainableDowngradeRank(
+                from: definitionRank,
+                bandwidths: definitionBandwidths,
+                estimatedThroughput: normalizedEstimatedThroughput
+            )
+        }
+
+        if definitionRank > 0,
+           let normalizedEstimatedThroughput,
+           let currentBandwidth,
+           Double(normalizedEstimatedThroughput) < Double(currentBandwidth) * normalizedSafetyFactor(downgradeThroughputSafetyFactor, defaultValue: 0.9)
+        {
+            return sustainableDowngradeRank(
+                from: definitionRank,
+                bandwidths: definitionBandwidths,
+                estimatedThroughput: normalizedEstimatedThroughput
+            )
+        }
+
+        guard definitionRank < definitionBandwidths.count - 1,
+              !isLive || allowsLiveUpgrades,
+              let bufferAhead,
+              bufferAhead.isFinite,
+              bufferAhead >= upgradeBufferThreshold,
+              stableBufferDuration >= upgradeObservationDuration
+        else {
+            return nil
+        }
+
+        return sustainableUpgradeRank(
+            from: definitionRank,
+            bandwidths: definitionBandwidths,
+            estimatedThroughput: normalizedEstimatedThroughput
+        )
+    }
+
+    private func sustainableDowngradeRank(from definitionRank: Int, bandwidths: [Int64?], estimatedThroughput: Int64?) -> Int {
+        guard let estimatedThroughput else {
+            return definitionRank - 1
+        }
+        let safetyFactor = normalizedSafetyFactor(upgradeThroughputSafetyFactor, defaultValue: 1.35)
+        for rank in stride(from: definitionRank - 1, through: 0, by: -1) {
+            guard let bandwidth = normalizedBandwidth(bandwidths[rank]) else {
+                return definitionRank - 1
+            }
+            if Double(estimatedThroughput) >= Double(bandwidth) * safetyFactor {
+                return rank
+            }
+        }
+        return 0
+    }
+
+    private func sustainableUpgradeRank(from definitionRank: Int, bandwidths: [Int64?], estimatedThroughput: Int64?) -> Int? {
+        guard let estimatedThroughput else {
+            return definitionRank + 1
+        }
+        let safetyFactor = normalizedSafetyFactor(upgradeThroughputSafetyFactor, defaultValue: 1.35)
+        var targetRank: Int?
+        for rank in (definitionRank + 1) ..< bandwidths.count {
+            guard let bandwidth = normalizedBandwidth(bandwidths[rank]) else {
+                return definitionRank + 1
+            }
+            if Double(estimatedThroughput) >= Double(bandwidth) * safetyFactor {
+                targetRank = rank
+            } else {
+                break
+            }
+        }
+        return targetRank
+    }
+
+    private func normalizedBandwidth(_ bandwidth: Int64?) -> Int64? {
+        guard let bandwidth, bandwidth > 0 else {
+            return nil
+        }
+        return bandwidth
+    }
+
+    private func normalizedSafetyFactor(_ value: Double, defaultValue: Double) -> Double {
+        guard value.isFinite, value > 0 else {
+            return defaultValue
+        }
+        return value
+    }
 }
 
-public enum ClockProcessType {
+public struct KSAdaptiveBitrateSwitchingDiagnostic: Equatable {
+    public let currentDefinitionIndex: Int
+    public let currentDefinition: String
+    public let currentBandwidth: Int64?
+    public let estimatedThroughput: Int64?
+    public let bufferAhead: TimeInterval?
+    public let rebufferCount: Int
+    public let stableBufferDuration: TimeInterval
+    public let secondsSinceLastSwitch: TimeInterval?
+    public let isLive: Bool
+    public let isLowLatencyLive: Bool
+    public let isAdaptiveStreamingManifest: Bool
+    public let decision: KSAdaptiveBitrateSwitchingPolicy.Decision
+}
+
+struct KSAdaptiveBitrateThroughputEstimator: Equatable {
+    private var lastBytesRead: Int64?
+    private var lastSampleTime: TimeInterval?
+    private(set) var estimatedBitsPerSecond: Int64?
+
+    mutating func reset() {
+        lastBytesRead = nil
+        lastSampleTime = nil
+        estimatedBitsPerSecond = nil
+    }
+
+    mutating func sample(bytesRead: Int64?, at time: TimeInterval, minimumInterval: TimeInterval) -> Int64? {
+        guard let bytesRead, bytesRead >= 0, time.isFinite else {
+            return estimatedBitsPerSecond
+        }
+        guard let previousBytesRead = lastBytesRead, let previousSampleTime = lastSampleTime else {
+            lastBytesRead = bytesRead
+            lastSampleTime = time
+            return estimatedBitsPerSecond
+        }
+
+        let elapsed = time - previousSampleTime
+        let normalizedMinimumInterval = minimumInterval.isFinite ? max(minimumInterval, 0) : 1
+        guard elapsed >= normalizedMinimumInterval else {
+            return estimatedBitsPerSecond
+        }
+        defer {
+            lastBytesRead = bytesRead
+            lastSampleTime = time
+        }
+        let byteDelta = bytesRead - previousBytesRead
+        guard byteDelta > 0 else {
+            if byteDelta < 0 {
+                estimatedBitsPerSecond = nil
+            }
+            return estimatedBitsPerSecond
+        }
+        let currentBitsPerSecond = Int64(Double(byteDelta * 8) / elapsed)
+        if let existingEstimate = estimatedBitsPerSecond {
+            estimatedBitsPerSecond = Int64(Double(existingEstimate) * 0.7 + Double(currentBitsPerSecond) * 0.3)
+        } else {
+            estimatedBitsPerSecond = currentBitsPerSecond
+        }
+        return estimatedBitsPerSecond
+    }
+}
+
+public enum ClockProcessType: Equatable {
     case remain
     case next
     case dropNextFrame

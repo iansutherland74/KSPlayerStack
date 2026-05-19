@@ -28,6 +28,26 @@ final class PanoramaProjectionPolicyTest: XCTestCase {
         XCTAssertFalse(VideoProjection.cubemap.isRenderableInSphere)
     }
 
+    func testMetadataDetectsPanoramaStereoLayoutAnd180FOV() throws {
+        let metadata = [
+            "ProjectionType": "equirectangular 180",
+            "StereoMode": "side-by-side",
+        ]
+
+        let configuration = try XCTUnwrap(PanoramaProjectionPolicy.detectedConfiguration(metadata: metadata))
+
+        XCTAssertEqual(configuration.projection, .equirectangular)
+        XCTAssertEqual(configuration.stereoLayout, .sideBySide)
+        XCTAssertEqual(configuration.fieldOfView, .degrees180)
+    }
+
+    func testMetadataDetectsFlatTopAndBottomStereoLayout() {
+        let metadata = ["stereo_mode": "top-bottom"]
+
+        XCTAssertEqual(StereoscopicVideoPolicy.detectedLayout(metadata: metadata), .topAndBottom)
+        XCTAssertNil(PanoramaProjectionPolicy.detectedProjection(metadata: metadata))
+    }
+
     func testFormatDescriptionDetectsProjectionKind() throws {
         var formatDescription: CMFormatDescription?
         let extensions = ["ProjectionKind": "Equirectangular"] as CFDictionary
@@ -64,6 +84,26 @@ final class PanoramaProjectionPolicyTest: XCTestCase {
         XCTAssertEqual(PanoramaProjectionPolicy.resolvedProjection(mode: .equirectangular, detectedProjection: nil), .equirectangular)
     }
 
+    func testStereoscopicVideoModeResolvesManualAndAutomaticLayouts() {
+        XCTAssertEqual(
+            StereoscopicVideoPolicy.resolvedLayout(mode: .automatic, detectedLayout: .sideBySide),
+            .sideBySide
+        )
+        XCTAssertEqual(
+            StereoscopicVideoPolicy.resolvedLayout(mode: .topAndBottom, detectedLayout: nil),
+            .topAndBottom
+        )
+        XCTAssertNil(StereoscopicVideoPolicy.resolvedLayout(mode: .disabled, detectedLayout: .topAndBottom))
+        XCTAssertNil(StereoscopicVideoPolicy.resolvedLayout(mode: .automatic, detectedLayout: .mono))
+    }
+
+    func testStereoTextureCoordinateBoundsCropEachEye() {
+        XCTAssertEqual(StereoscopicVideoLayout.sideBySide.textureCoordinateBounds(for: .left), CGRect(x: 0, y: 0, width: 0.5, height: 1))
+        XCTAssertEqual(StereoscopicVideoLayout.sideBySide.textureCoordinateBounds(for: .right), CGRect(x: 0.5, y: 0, width: 0.5, height: 1))
+        XCTAssertEqual(StereoscopicVideoLayout.topAndBottom.textureCoordinateBounds(for: .left), CGRect(x: 0, y: 0, width: 1, height: 0.5))
+        XCTAssertEqual(StereoscopicVideoLayout.topAndBottom.textureCoordinateBounds(for: .right), CGRect(x: 0, y: 0.5, width: 1, height: 0.5))
+    }
+
     @MainActor
     func testPreferredPlayerTypeRoutesPanoramaModeToMEPlayer() throws {
         let originalFirstPlayerType = KSOptions.firstPlayerType
@@ -76,6 +116,22 @@ final class PanoramaProjectionPolicyTest: XCTestCase {
         options.panoramaMode = .automatic
 
         let url = try XCTUnwrap(URL(string: "https://example.com/movie.mp4"))
+
+        XCTAssertTrue(KSPlayerLayer.preferredPlayerType(for: url, options: options) == KSMEPlayer.self)
+    }
+
+    @MainActor
+    func testPreferredPlayerTypeRoutesStereoscopicModeToMEPlayer() throws {
+        let originalFirstPlayerType = KSOptions.firstPlayerType
+        defer {
+            KSOptions.firstPlayerType = originalFirstPlayerType
+        }
+        KSOptions.firstPlayerType = KSAVPlayer.self
+
+        let options = KSOptions()
+        options.stereoscopicVideoMode = .automatic
+
+        let url = try XCTUnwrap(URL(string: "https://example.com/flat-3d.mp4"))
 
         XCTAssertTrue(KSPlayerLayer.preferredPlayerType(for: url, options: options) == KSMEPlayer.self)
     }

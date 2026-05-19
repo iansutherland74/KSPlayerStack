@@ -24,10 +24,16 @@ private struct AdaptiveBitrateSwitchingState {
     var rebufferCount = 0
     var stableBufferStartedAt: TimeInterval?
     var lastDefinitionSwitchTime: TimeInterval?
+    var throughputEstimator = KSAdaptiveBitrateThroughputEstimator()
 
     mutating func resetHealth() {
         rebufferCount = 0
         stableBufferStartedAt = nil
+    }
+
+    mutating func resetSession() {
+        resetHealth()
+        throughputEstimator.reset()
     }
 }
 
@@ -65,6 +71,7 @@ open class VideoPlayerView: PlayerView {
     private var progressPreviewRequestedTime: TimeInterval?
     var compactPresentation: KSPlayerCompactPresentation?
     private var adaptiveBitrateState = AdaptiveBitrateSwitchingState()
+    @Published public private(set) var adaptiveBitrateSwitchingDiagnostic: KSAdaptiveBitrateSwitchingDiagnostic?
 
     public let bottomMaskView = LayerContainerView()
     public let topMaskView = LayerContainerView()
@@ -319,6 +326,7 @@ open class VideoPlayerView: PlayerView {
             updateSrt()
             renderSubtitle(parts: srtControl.parts, time: srtControl.currentSubtitleTime, backView: subtitleBackView, label: subtitleLabel, positionConstraints: subtitleBackViewPositionConstraints)
             renderSubtitle(parts: srtControl.secondaryParts, time: srtControl.currentSecondarySubtitleTime, backView: secondarySubtitleBackView, label: secondarySubtitleLabel, positionConstraints: secondarySubtitleBackViewPositionConstraints)
+            updatePictureInPictureSubtitleSnapshot()
         }
         updateAdaptiveBitrateSwitching(layer: layer)
     }
@@ -329,17 +337,50 @@ open class VideoPlayerView: PlayerView {
             self.toolBar.pipButton.isSelected = isActive
             self.updateSubtitleOverlayForPictureInPicture(isActive: isActive)
         }
+        updatePictureInPictureButtonAvailability()
         updateSubtitleOverlayForPictureInPicture(isActive: playerLayer?.isPipActive == true)
+    }
+
+    private func updatePictureInPictureButtonAvailability() {
+        if #available(tvOS 14.0, *) {
+            toolBar.pipButton.isHidden = PictureInPictureStartPolicy.unavailableReason(
+                isSystemSupported: AVPictureInPictureController.isPictureInPictureSupported(),
+                hasController: playerLayer?.player.pipController != nil,
+                isPossible: true
+            ) != nil
+        } else {
+            toolBar.pipButton.isHidden = true
+        }
     }
 
     private func updateSubtitleOverlayForPictureInPicture(isActive: Bool) {
         guard isActive else {
+            updatePictureInPictureSubtitleSnapshot()
             renderSubtitle(parts: srtControl.parts, time: srtControl.currentSubtitleTime, backView: subtitleBackView, label: subtitleLabel, positionConstraints: subtitleBackViewPositionConstraints)
             renderSubtitle(parts: srtControl.secondaryParts, time: srtControl.currentSecondarySubtitleTime, backView: secondarySubtitleBackView, label: secondarySubtitleLabel, positionConstraints: secondarySubtitleBackViewPositionConstraints)
             return
         }
         clearSubtitleOverlay(backView: subtitleBackView, label: subtitleLabel, positionConstraints: subtitleBackViewPositionConstraints)
         clearSubtitleOverlay(backView: secondarySubtitleBackView, label: secondarySubtitleLabel, positionConstraints: secondarySubtitleBackViewPositionConstraints)
+        updatePictureInPictureSubtitleSnapshot()
+    }
+
+    private func updatePictureInPictureSubtitleSnapshot() {
+        guard let mePlayer = playerLayer?.player as? KSMEPlayer else {
+            return
+        }
+        guard playerLayer?.isPipActive == true else {
+            mePlayer.setPictureInPictureSubtitleSnapshot(nil)
+            return
+        }
+        let snapshot = PictureInPictureSubtitleSnapshot.make(
+            primaryParts: srtControl.parts,
+            primaryTime: srtControl.currentSubtitleTime,
+            secondaryParts: srtControl.secondaryParts,
+            secondaryTime: srtControl.currentSecondarySubtitleTime,
+            activeWordAttributes: srtControl.activeWordAttributes
+        )
+        mePlayer.setPictureInPictureSubtitleSnapshot(snapshot)
     }
 
     override open func player(layer: KSPlayerLayer, state: KSPlayerState) {
@@ -348,6 +389,7 @@ open class VideoPlayerView: PlayerView {
         switch state {
         case .readyToPlay:
             toolBar.timeSlider.isPlayable = true
+            updatePictureInPictureButtonAvailability()
             prepareProgressPreviewThumbnails(for: layer)
             toolBar.videoSwitchButton.isHidden = layer.player.tracks(mediaType: .video).count < 2
             toolBar.audioSwitchButton.isHidden = layer.player.tracks(mediaType: .audio).count < 2
@@ -409,6 +451,7 @@ open class VideoPlayerView: PlayerView {
         seekToView.isHidden = true
         isPlayed = false
         lockButton.isSelected = false
+        adaptiveBitrateSwitchingDiagnostic = nil
     }
 
     // MARK: - KSSliderDelegate
@@ -444,7 +487,7 @@ open class VideoPlayerView: PlayerView {
         srtControl.apply(options: asset.options)
         updateSrt()
         srtControl.url = asset.url
-        adaptiveBitrateState.resetHealth()
+        adaptiveBitrateState.resetSession()
         adaptiveBitrateState.lastDefinitionSwitchTime = CACurrentMediaTime()
         if automatically {
             KSLog("[abr] switched definition to \(asset.definition)")
@@ -463,6 +506,7 @@ open class VideoPlayerView: PlayerView {
         resetProgressPreviewThumbnails()
         hideProgressPreview()
         adaptiveBitrateState = AdaptiveBitrateSwitchingState()
+        adaptiveBitrateSwitchingDiagnostic = nil
         currentDefinition = definitionIndex >= resource.definitions.count ? resource.definitions.count - 1 : definitionIndex
         srtControl.apply(options: resource.definitions[currentDefinition].options)
         updateSrt()
@@ -491,11 +535,11 @@ open class VideoPlayerView: PlayerView {
               let options = adaptiveBitrateSwitchingOptions(for: resource),
               currentDefinition < resource.definitions.count
         else {
+            adaptiveBitrateSwitchingDiagnostic = nil
             return
         }
 
         let policy = options.adaptiveBitrateSwitchingPolicy
-        let currentURL = resource.definitions[currentDefinition].url
         let bufferAhead = adaptiveBufferAhead(player: layer.player)
         let now = CACurrentMediaTime()
         if let bufferAhead, bufferAhead >= policy.upgradeBufferThreshold, layer.state == .bufferFinished {
@@ -510,26 +554,54 @@ open class VideoPlayerView: PlayerView {
         guard let definitionRank = orderedDefinitionIndices.firstIndex(of: currentDefinition) else {
             return
         }
+        let orderedDefinitionBandwidths = orderedDefinitionIndices.map { resource.definitions[$0].bandwidth }
         let stableBufferDuration = adaptiveBitrateState.stableBufferStartedAt.map { now - $0 } ?? 0
         let secondsSinceLastSwitch = adaptiveBitrateState.lastDefinitionSwitchTime.map { now - $0 }
-        let decision = policy.decision(
+        let estimatedThroughput = adaptiveBitrateState.throughputEstimator.sample(
+            bytesRead: layer.player.dynamicInfo?.bytesRead,
+            at: now,
+            minimumInterval: policy.minimumThroughputSampleInterval
+        )
+        let isLive = !layer.player.duration.isFinite || layer.player.duration <= 0
+        let isAdaptiveStreamingManifest = resource.definitions.contains { $0.url.isAdaptiveStreamingManifest }
+        let targetRank = policy.targetDefinitionRank(
             definitionRank: definitionRank,
-            definitionCount: orderedDefinitionIndices.count,
+            definitionBandwidths: orderedDefinitionBandwidths,
             bufferAhead: bufferAhead,
             rebufferCount: adaptiveBitrateState.rebufferCount,
             stableBufferDuration: stableBufferDuration,
             secondsSinceLastSwitch: secondsSinceLastSwitch,
-            isLive: !layer.player.duration.isFinite || layer.player.duration <= 0,
-            isAdaptiveStreamingManifest: currentURL.isAdaptiveStreamingManifest
+            estimatedThroughput: estimatedThroughput,
+            isLive: isLive,
+            isLowLatencyLive: isLive && options.lowLatencyLiveProfile != nil,
+            isAdaptiveStreamingManifest: isAdaptiveStreamingManifest
+        )
+        let decision: KSAdaptiveBitrateSwitchingPolicy.Decision
+        if let targetRank, targetRank < definitionRank {
+            decision = .switchToLower
+        } else if let targetRank, targetRank > definitionRank {
+            decision = .switchToHigher
+        } else {
+            decision = .stay
+        }
+        let currentAsset = resource.definitions[currentDefinition]
+        adaptiveBitrateSwitchingDiagnostic = KSAdaptiveBitrateSwitchingDiagnostic(
+            currentDefinitionIndex: currentDefinition,
+            currentDefinition: currentAsset.definition,
+            currentBandwidth: currentAsset.bandwidth,
+            estimatedThroughput: estimatedThroughput,
+            bufferAhead: bufferAhead,
+            rebufferCount: adaptiveBitrateState.rebufferCount,
+            stableBufferDuration: stableBufferDuration,
+            secondsSinceLastSwitch: secondsSinceLastSwitch,
+            isLive: isLive,
+            isLowLatencyLive: isLive && options.lowLatencyLiveProfile != nil,
+            isAdaptiveStreamingManifest: isAdaptiveStreamingManifest,
+            decision: decision
         )
 
-        switch decision {
-        case .stay:
-            break
-        case .switchToLower:
-            change(definitionIndex: orderedDefinitionIndices[definitionRank - 1], automatically: true)
-        case .switchToHigher:
-            change(definitionIndex: orderedDefinitionIndices[definitionRank + 1], automatically: true)
+        if let targetRank, targetRank != definitionRank {
+            change(definitionIndex: orderedDefinitionIndices[targetRank], automatically: true)
         }
     }
 

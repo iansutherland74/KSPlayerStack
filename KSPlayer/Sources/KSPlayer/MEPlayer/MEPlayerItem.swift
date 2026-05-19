@@ -10,6 +10,7 @@ import FFmpegKit
 import Libavcodec
 import Libavfilter
 import Libavformat
+import Libavutil
 
 private final class SeekCompletion: @unchecked Sendable {
     private let handler: (Bool) -> Void
@@ -42,6 +43,174 @@ enum FFmpegSeekabilityPolicy {
     }
 }
 
+enum MEPlayerStreamRecordingError: Error, Equatable, LocalizedError {
+    case unsafeDestination(URL)
+    case destinationExists(URL)
+    case sourceAndDestinationMatch(URL)
+    case noRecordableStreams
+
+    var errorDescription: String? {
+        switch self {
+        case let .unsafeDestination(url):
+            return "Recording destination must be a writable file URL: \(url.path)."
+        case let .destinationExists(url):
+            return "Recording destination already exists: \(url.path)."
+        case let .sourceAndDestinationMatch(url):
+            return "Recording source and destination must be different files: \(url.path)."
+        case .noRecordableStreams:
+            return "No active audio, active video, or compatible subtitle streams can be recorded."
+        }
+    }
+}
+
+enum MEPlayerStreamRecordingMediaKind: Equatable {
+    case audio
+    case video
+    case subtitle
+    case other
+}
+
+enum MEPlayerStreamRecordingPathPolicy {
+    static func temporaryDestination(for destination: URL, uuid: UUID = UUID()) -> URL {
+        let basename = destination.deletingPathExtension().lastPathComponent
+        let pathExtension = destination.pathExtension
+        let filename = ".\(basename).recording.\(uuid.uuidString)"
+        let temporary = destination.deletingLastPathComponent().appendingPathComponent(filename)
+        return pathExtension.isEmpty ? temporary.appendingPathExtension("tmp") : temporary.appendingPathExtension(pathExtension)
+    }
+
+    static func prepareDestination(_ destination: URL, sourceURL: URL, fileManager: FileManager = .default) throws {
+        guard destination.isFileURL,
+              !destination.path.isEmpty,
+              !destination.lastPathComponent.isEmpty
+        else {
+            throw MEPlayerStreamRecordingError.unsafeDestination(destination)
+        }
+
+        let standardizedDestination = destination.standardizedFileURL
+        if sourceURL.isFileURL, sourceURL.standardizedFileURL == standardizedDestination {
+            throw MEPlayerStreamRecordingError.sourceAndDestinationMatch(destination)
+        }
+
+        let parent = standardizedDestination.deletingLastPathComponent()
+        do {
+            try fileManager.createDirectory(at: parent, withIntermediateDirectories: true)
+        } catch {
+            throw MEPlayerStreamRecordingError.unsafeDestination(destination)
+        }
+
+        var isDirectory = ObjCBool(false)
+        if fileManager.fileExists(atPath: standardizedDestination.path, isDirectory: &isDirectory) {
+            if isDirectory.boolValue {
+                throw MEPlayerStreamRecordingError.unsafeDestination(destination)
+            }
+            throw MEPlayerStreamRecordingError.destinationExists(destination)
+        }
+    }
+
+    static func prepareTemporaryDestination(_ temporaryDestination: URL, finalDestination: URL, fileManager: FileManager = .default) throws {
+        guard temporaryDestination.isFileURL,
+              temporaryDestination.deletingLastPathComponent().standardizedFileURL == finalDestination.deletingLastPathComponent().standardizedFileURL,
+              temporaryDestination.standardizedFileURL != finalDestination.standardizedFileURL
+        else {
+            throw MEPlayerStreamRecordingError.unsafeDestination(temporaryDestination)
+        }
+        if fileManager.fileExists(atPath: temporaryDestination.path) {
+            try? fileManager.removeItem(at: temporaryDestination)
+        }
+    }
+}
+
+enum MEPlayerStreamRecordingTrackPolicy {
+    static func mediaKind(for codecType: Libavutil.AVMediaType) -> MEPlayerStreamRecordingMediaKind {
+        switch codecType {
+        case AVMEDIA_TYPE_AUDIO:
+            return .audio
+        case AVMEDIA_TYPE_VIDEO:
+            return .video
+        case AVMEDIA_TYPE_SUBTITLE:
+            return .subtitle
+        default:
+            return .other
+        }
+    }
+
+    static func isQuickTimeContainer(formatName: String?) -> Bool {
+        formatName?.lowercased().split(separator: ",").contains { name in
+            name == "mp4" || name == "mov"
+        } ?? false
+    }
+
+    static func shouldCreateStream(
+        mediaKind: MEPlayerStreamRecordingMediaKind,
+        isEnabledPlaybackTrack: Bool,
+        isQuickTimeContainer: Bool,
+        isMovTextSubtitle: Bool,
+        hasRecordedAudio: Bool,
+        hasRecordedVideo: Bool
+    ) -> Bool {
+        switch mediaKind {
+        case .audio:
+            return isEnabledPlaybackTrack && !hasRecordedAudio
+        case .video:
+            return isEnabledPlaybackTrack && !hasRecordedVideo
+        case .subtitle:
+            return !isQuickTimeContainer || isMovTextSubtitle
+        case .other:
+            return false
+        }
+    }
+
+    static func mediaTypeDescription(for mediaKind: MEPlayerStreamRecordingMediaKind) -> String {
+        switch mediaKind {
+        case .audio:
+            return "audio"
+        case .video:
+            return "video"
+        case .subtitle:
+            return "subtitle"
+        case .other:
+            return "other"
+        }
+    }
+
+    static func skipReason(
+        mediaKind: MEPlayerStreamRecordingMediaKind,
+        isEnabledPlaybackTrack: Bool,
+        isQuickTimeContainer: Bool,
+        isMovTextSubtitle: Bool,
+        hasRecordedAudio: Bool,
+        hasRecordedVideo: Bool
+    ) -> String? {
+        switch mediaKind {
+        case .audio:
+            if hasRecordedAudio {
+                return "only the currently selected audio stream is recorded"
+            }
+            return isEnabledPlaybackTrack ? nil : "audio stream is not the active playback track"
+        case .video:
+            if hasRecordedVideo {
+                return "only the currently selected video stream is recorded"
+            }
+            return isEnabledPlaybackTrack ? nil : "video stream is not the active playback track"
+        case .subtitle:
+            if isQuickTimeContainer, !isMovTextSubtitle {
+                return "QuickTime containers can only stream-copy mov_text subtitles; KSPlayer external overlay subtitles are not muxed by live recording"
+            }
+            return nil
+        case .other:
+            return "stream type is not audio, video, or subtitle"
+        }
+    }
+
+    static func externalSubtitlePolicyDiagnostic(isTextSubtitle: Bool, isMuxerSupported: Bool) -> String {
+        if isTextSubtitle, isMuxerSupported {
+            return "External text subtitles can be muxed only when they are provided as FFmpeg input streams; active KSPlayer overlay subtitles are not connected to the live stream recorder."
+        }
+        return "Active external subtitles are KSPlayer overlay data and are not merged by live stream recording."
+    }
+}
+
 public final class MEPlayerItem: @unchecked Sendable {
     private let url: URL
     private let options: KSOptions
@@ -51,6 +220,15 @@ public final class MEPlayerItem: @unchecked Sendable {
     private var outputFormatCtx: UnsafeMutablePointer<AVFormatContext>?
     private var outputPacket: UnsafeMutablePointer<AVPacket>?
     private var streamMapping = [Int: Int]()
+    private var recordFinalURL: URL?
+    private var recordTemporaryURL: URL?
+    private var recordProgressHandler: (@Sendable (StreamRecordingProgress) -> Void)?
+    private var recordStreams = [StreamRecordingStreamDiagnostic]()
+    private var recordPacketsWritten = Int64(0)
+    private var recordPacketsSkipped = Int64(0)
+    private var recordDuration = TimeInterval(0)
+    private var recordFirstPacketTimestamp: TimeInterval?
+    private var recordLastProgressEmitTime = 0.0
     private var fileAccess: KSSecurityScopedURLAccess?
     private var embeddedFontStore: EmbeddedFontAttachmentStore?
     private var openOperation: BlockOperation?
@@ -74,6 +252,13 @@ public final class MEPlayerItem: @unchecked Sendable {
     private var videoDisplayCount = UInt8(0)
     private var seekByBytes = false
     private var lastVideoDisplayTime = CACurrentMediaTime()
+    private var firstVideoRenderTime = 0.0
+    private var firstAudioRenderTime = 0.0
+    private var renderedVideoFrameCount = UInt64(0)
+    private var audioRenderUpdateCount = UInt64(0)
+    private var lastLowLatencyLoadingState: LoadingState?
+    private var lastLowLatencyDiagnosticUpdateTime = 0.0
+    private var lowLatencyLiveDiagnosticAggregator = LowLatencyLiveDiagnosticAggregator()
     public private(set) var chapters: [Chapter] = []
     public var currentPlaybackTime: TimeInterval {
         state == .seeking ? seekTime : (mainClock().time - startTime).seconds
@@ -84,6 +269,13 @@ public final class MEPlayerItem: @unchecked Sendable {
     public private(set) var duration: TimeInterval = 0
     public private(set) var fileSize: Double = 0
     public private(set) var naturalSize = CGSize.zero
+    var canRestartLoopPlayback: Bool {
+        SeamlessLoopPlaybackPolicy.canRestartMEPlayerLoop(
+            isLoopPlay: options.isLoopPlay,
+            duration: duration,
+            isSeekable: seekable
+        )
+    }
     private var error: NSError? {
         didSet {
             if error != nil {
@@ -201,6 +393,7 @@ public final class MEPlayerItem: @unchecked Sendable {
 
 extension MEPlayerItem {
     private func openThread() {
+        Self.closeCustomIO(in: self.formatCtx)
         avformat_close_input(&self.formatCtx)
         embeddedFontStore?.cleanup()
         embeddedFontStore = nil
@@ -246,6 +439,7 @@ extension MEPlayerItem {
         if bluRaySource == nil, let pb = options.process(url: url) {
             // 如果要自定义协议的话，那就用avio_alloc_context，对formatCtx.pointee.pb赋值
             formatCtx.pointee.pb = pb.getContext()
+            formatCtx.pointee.flags |= AVFMT_FLAG_CUSTOM_IO
         }
         let urlString: String
         if let bluRaySource {
@@ -278,6 +472,7 @@ extension MEPlayerItem {
             } else {
                 error = .init(errorCode: .formatOpenInput, avErrorCode: result)
             }
+            Self.closeCustomIO(in: self.formatCtx)
             avformat_close_input(&self.formatCtx)
             return
         }
@@ -344,61 +539,177 @@ extension MEPlayerItem {
         }
     }
 
-    func startRecord(url: URL) {
+    func startRecord(url: URL, progress: (@Sendable (StreamRecordingProgress) -> Void)? = nil) {
         stopRecord()
-        let filename = url.isFileURL ? url.path : url.absoluteString
+        let temporaryURL = MEPlayerStreamRecordingPathPolicy.temporaryDestination(for: url)
+        let filename = temporaryURL.path
+        do {
+            try MEPlayerStreamRecordingPathPolicy.prepareDestination(url, sourceURL: self.url)
+            try MEPlayerStreamRecordingPathPolicy.prepareTemporaryDestination(temporaryURL, finalDestination: url)
+        } catch {
+            KSLog(error)
+            return
+        }
+        recordFinalURL = url.standardizedFileURL
+        recordTemporaryURL = temporaryURL.standardizedFileURL
+        recordProgressHandler = progress
+        recordStreams.removeAll()
+        recordPacketsWritten = 0
+        recordPacketsSkipped = 0
+        recordDuration = 0
+        recordFirstPacketTimestamp = nil
+        recordLastProgressEmitTime = 0
+        emitRecordProgress(phase: .starting, force: true, message: "Recording to a temporary file until stopRecord() finalizes the output.")
         var ret = avformat_alloc_output_context2(&outputFormatCtx, nil, nil, filename)
         guard let outputFormatCtx, let formatCtx else {
-            KSLog(NSError(errorCode: .formatOutputCreate, avErrorCode: ret))
+            let error = NSError(errorCode: .formatOutputCreate, avErrorCode: ret)
+            KSLog(error)
+            resetRecordOutput(writeTrailer: false, error: error)
             return
         }
         var index = 0
-        var audioIndex: Int?
-        var videoIndex: Int?
+        var hasRecordedAudio = false
+        var hasRecordedVideo = false
         let formatName = outputFormatCtx.pointee.oformat.pointee.name.flatMap { String(cString: $0) }
+        let isQuickTimeContainer = MEPlayerStreamRecordingTrackPolicy.isQuickTimeContainer(formatName: formatName)
+        let enabledPlaybackTrackIDs = Set(assetTracks.filter { $0.isEnabled && ($0.mediaType == .audio || $0.mediaType == .video) }.map { Int($0.trackID) })
         for i in 0 ..< Int(formatCtx.pointee.nb_streams) {
             if let inputStream = formatCtx.pointee.streams[i] {
                 let codecType = inputStream.pointee.codecpar.pointee.codec_type
-                if [AVMEDIA_TYPE_AUDIO, AVMEDIA_TYPE_VIDEO, AVMEDIA_TYPE_SUBTITLE].contains(codecType) {
-                    if codecType == AVMEDIA_TYPE_AUDIO {
-                        if let audioIndex {
-                            streamMapping[i] = audioIndex
-                            continue
-                        } else {
-                            audioIndex = index
-                        }
-                    } else if codecType == AVMEDIA_TYPE_VIDEO {
-                        if let videoIndex {
-                            streamMapping[i] = videoIndex
-                            continue
-                        } else {
-                            videoIndex = index
-                        }
-                    }
+                let codecID = inputStream.pointee.codecpar.pointee.codec_id
+                let mediaKind = MEPlayerStreamRecordingTrackPolicy.mediaKind(for: codecType)
+                let isEnabledPlaybackTrack = enabledPlaybackTrackIDs.contains(i)
+                let isMovTextSubtitle = codecID == AV_CODEC_ID_MOV_TEXT
+                if MEPlayerStreamRecordingTrackPolicy.shouldCreateStream(
+                    mediaKind: mediaKind,
+                    isEnabledPlaybackTrack: isEnabledPlaybackTrack,
+                    isQuickTimeContainer: isQuickTimeContainer,
+                    isMovTextSubtitle: isMovTextSubtitle,
+                    hasRecordedAudio: hasRecordedAudio,
+                    hasRecordedVideo: hasRecordedVideo
+                ) {
                     if let outStream = avformat_new_stream(outputFormatCtx, nil) {
                         streamMapping[i] = index
+                        let outputIndex = index
                         index += 1
-                        avcodec_parameters_copy(outStream.pointee.codecpar, inputStream.pointee.codecpar)
-                        if codecType == AVMEDIA_TYPE_SUBTITLE, formatName == "mp4" || formatName == "mov" {
-                            outStream.pointee.codecpar.pointee.codec_id = AV_CODEC_ID_MOV_TEXT
+                        ret = avcodec_parameters_copy(outStream.pointee.codecpar, inputStream.pointee.codecpar)
+                        guard ret >= 0 else {
+                            let error = NSError(errorCode: .codecContextSetParam, avErrorCode: ret)
+                            KSLog(error)
+                            resetRecordOutput(writeTrailer: false, error: error)
+                            return
                         }
-                        if inputStream.pointee.codecpar.pointee.codec_id == AV_CODEC_ID_HEVC {
+                        if codecID == AV_CODEC_ID_HEVC {
                             outStream.pointee.codecpar.pointee.codec_tag = CMFormatDescription.MediaSubType.hevc.rawValue.bigEndian
                         } else {
                             outStream.pointee.codecpar.pointee.codec_tag = 0
                         }
+                        outStream.pointee.time_base = inputStream.pointee.time_base
+                        av_dict_copy(&outStream.pointee.metadata, inputStream.pointee.metadata, 0)
+                        recordStreams.append(StreamRecordingStreamDiagnostic(
+                            inputIndex: i,
+                            outputIndex: outputIndex,
+                            mediaType: MEPlayerStreamRecordingTrackPolicy.mediaTypeDescription(for: mediaKind),
+                            codecName: Self.codecName(for: codecID),
+                            action: .recorded
+                        ))
+                        if mediaKind == .audio {
+                            hasRecordedAudio = true
+                        } else if mediaKind == .video {
+                            hasRecordedVideo = true
+                        }
                     }
+                } else if let reason = MEPlayerStreamRecordingTrackPolicy.skipReason(
+                    mediaKind: mediaKind,
+                    isEnabledPlaybackTrack: isEnabledPlaybackTrack,
+                    isQuickTimeContainer: isQuickTimeContainer,
+                    isMovTextSubtitle: isMovTextSubtitle,
+                    hasRecordedAudio: hasRecordedAudio,
+                    hasRecordedVideo: hasRecordedVideo
+                ) {
+                    recordStreams.append(StreamRecordingStreamDiagnostic(
+                        inputIndex: i,
+                        outputIndex: nil,
+                        mediaType: MEPlayerStreamRecordingTrackPolicy.mediaTypeDescription(for: mediaKind),
+                        codecName: Self.codecName(for: codecID),
+                        action: .skipped,
+                        reason: reason
+                    ))
                 }
             }
         }
-        avio_open(&(outputFormatCtx.pointee.pb), filename, AVIO_FLAG_WRITE)
+        guard !streamMapping.isEmpty else {
+            let error = MEPlayerStreamRecordingError.noRecordableStreams
+            KSLog(error)
+            resetRecordOutput(writeTrailer: false, error: error)
+            return
+        }
+        av_dict_copy(&outputFormatCtx.pointee.metadata, formatCtx.pointee.metadata, 0)
+        ret = avio_open(&(outputFormatCtx.pointee.pb), filename, AVIO_FLAG_WRITE)
+        guard ret >= 0 else {
+            let error = NSError(errorCode: .formatWriteHeader, avErrorCode: ret)
+            KSLog(error)
+            resetRecordOutput(writeTrailer: false, error: error)
+            return
+        }
         ret = avformat_write_header(outputFormatCtx, nil)
         guard ret >= 0 else {
-            KSLog(NSError(errorCode: .formatWriteHeader, avErrorCode: ret))
-            avformat_close_input(&self.outputFormatCtx)
+            let error = NSError(errorCode: .formatWriteHeader, avErrorCode: ret)
+            KSLog(error)
+            resetRecordOutput(writeTrailer: false, error: error)
             return
         }
         outputPacket = av_packet_alloc()
+        emitRecordProgress(phase: .recording, force: true)
+    }
+
+    private static func codecName(for codecID: AVCodecID) -> String? {
+        guard let name = avcodec_get_name(codecID) else {
+            return nil
+        }
+        return String(cString: name)
+    }
+
+    private var recordBytesWritten: Int64 {
+        outputFormatCtx?.pointee.pb?.pointee.bytes_written ?? 0
+    }
+
+    private func emitRecordProgress(phase: StreamRecordingPhase, force: Bool = false, message: String? = nil) {
+        let now = CACurrentMediaTime()
+        guard force || now - recordLastProgressEmitTime >= 0.25 else {
+            return
+        }
+        recordLastProgressEmitTime = now
+        let progress = StreamRecordingProgress(
+            phase: phase,
+            destinationURL: recordFinalURL,
+            temporaryURL: recordTemporaryURL,
+            duration: recordDuration,
+            bytesWritten: recordBytesWritten,
+            packetsWritten: recordPacketsWritten,
+            packetsSkipped: recordPacketsSkipped,
+            droppedVideoFrameCount: dynamicInfo.droppedVideoFrameCount,
+            droppedVideoPacketCount: dynamicInfo.droppedVideoPacketCount,
+            streams: recordStreams,
+            message: message
+        )
+        dynamicInfo.streamRecordingProgress = progress
+        options.streamRecordingProgressHandler?(progress)
+        recordProgressHandler?(progress)
+    }
+
+    private func updateRecordDuration(packet: UnsafeMutablePointer<AVPacket>, inputTimeBase: AVRational) {
+        let timestamp = packet.pointee.pts == swift_AV_NOPTS_VALUE ? packet.pointee.dts : packet.pointee.pts
+        guard timestamp != swift_AV_NOPTS_VALUE else {
+            return
+        }
+        let packetTime = TimeInterval(av_rescale_q(timestamp, inputTimeBase, AVRational(num: 1, den: AV_TIME_BASE))) / TimeInterval(AV_TIME_BASE)
+        if recordFirstPacketTimestamp == nil {
+            recordFirstPacketTimestamp = packetTime
+        }
+        if let recordFirstPacketTimestamp {
+            recordDuration = max(recordDuration, packetTime - recordFirstPacketTimestamp)
+        }
     }
 
     private func createCodec(formatCtx: UnsafeMutablePointer<AVFormatContext>) {
@@ -641,8 +952,16 @@ extension MEPlayerItem {
                     outputPacket.pointee.pos = -1
                     let ret = av_interleaved_write_frame(outputFormatCtx, outputPacket)
                     if ret < 0 {
+                        recordPacketsSkipped += 1
+                        av_packet_unref(outputPacket)
                         KSLog("can not av_interleaved_write_frame")
+                    } else {
+                        recordPacketsWritten += 1
+                        updateRecordDuration(packet: corePacket, inputTimeBase: inputTb)
+                        emitRecordProgress(phase: .recording)
                     }
+                } else {
+                    recordPacketsSkipped += 1
                 }
             }
             if corePacket.pointee.size <= 0 {
@@ -653,6 +972,18 @@ extension MEPlayerItem {
                 packet.assetTrack = first
                 storeMemorySeekPacketIfNeeded(packet)
                 if first.mediaType == .video {
+                    first.recordDolbyVisionPacket(
+                        packet,
+                        compositorAvailability: options.dolbyVisionFELCompositorAvailability,
+                        playbackPolicy: options.dolbyVisionFELPlaybackPolicy
+                    )
+                    if let diagnostic = first.dolbyVisionPlaybackDiagnostic {
+                        options.dolbyVisionPlaybackDiagnostic = diagnostic
+                        if diagnostic.blocksPlayback {
+                            error = NSError(description: diagnostic.description)
+                            return 0
+                        }
+                    }
                     if options.readVideoTime == 0 {
                         options.readVideoTime = CACurrentMediaTime()
                     }
@@ -674,13 +1005,13 @@ extension MEPlayerItem {
                     isLoopPlay: options.isLoopPlay,
                     isSeamlessLoopEnabled: options.isSeamlessLoopEnabled,
                     usesAsyncPacketQueue: usesAsyncPacketQueue,
-                    tracksAlreadyLooping: tracksAlreadyLooping
-                ) {
+                    tracksAlreadyLooping: tracksAlreadyLooping,
+                    canSeekToStart: canRestartLoopPlayback
+                ), seekDemuxerToLoopStart() {
+                    memorySeekCache.invalidate()
                     allPlayerItemTracks.forEach { $0.isLoopModel = true }
-                    _ = av_seek_frame(formatCtx, -1, startTime.value, AVSEEK_FLAG_BACKWARD)
                 } else {
-                    allPlayerItemTracks.forEach { $0.isEndOfFile = true }
-                    state = .finished
+                    finishReadingAtEndOfFile()
                 }
             } else {
                 //                        if IS_AVERROR_INVALIDDATA(readResult)
@@ -688,6 +1019,23 @@ extension MEPlayerItem {
             }
         }
         return readResult
+    }
+
+    private func seekDemuxerToLoopStart() -> Bool {
+        guard let formatCtx else {
+            return false
+        }
+        let result = av_seek_frame(formatCtx, -1, startTime.value, AVSEEK_FLAG_BACKWARD)
+        guard result >= 0 else {
+            return false
+        }
+        formatCtx.pointee.pb?.pointee.eof_reached = 0
+        return true
+    }
+
+    private func finishReadingAtEndOfFile() {
+        allPlayerItemTracks.forEach { $0.isEndOfFile = true }
+        state = .finished
     }
 
     private func pause() {
@@ -763,6 +1111,9 @@ extension MEPlayerItem {
         videoClock.time = startTime
         isSeek = true
         isAudioStalled = audioTrack == nil
+        if options.isOfflineSubtitleGenerationEnabled {
+            options.offlineSubtitleGenerator?.reset()
+        }
     }
 }
 
@@ -809,11 +1160,7 @@ extension MEPlayerItem: MediaPlayback {
             self.memorySeekCache.invalidate()
             self.allPlayerItemTracks.forEach { $0.shutdown() }
             KSLog("清空formatCtx")
-            // 自定义的协议才会av_class为空
-            if let formatCtx = self.formatCtx, (formatCtx.pointee.flags & AVFMT_FLAG_CUSTOM_IO) != 0, let opaque = formatCtx.pointee.pb.pointee.opaque {
-                let value = Unmanaged<AbstractAVIOContext>.fromOpaque(opaque).takeRetainedValue()
-                value.close()
-            }
+            Self.closeCustomIO(in: self.formatCtx)
             // 不要自己来释放pb。不然第二次播放同一个url会出问题
 //            self.formatCtx?.pointee.pb = nil
             self.formatCtx?.pointee.interrupt_callback.opaque = nil
@@ -821,7 +1168,6 @@ extension MEPlayerItem: MediaPlayback {
             self.embeddedFontStore?.cleanup()
             self.embeddedFontStore = nil
             avformat_close_input(&self.formatCtx)
-            avformat_close_input(&self.outputFormatCtx)
             self.fileAccess?.stop()
             self.fileAccess = nil
             self.duration = 0
@@ -848,9 +1194,57 @@ extension MEPlayerItem: MediaPlayback {
     }
 
     func stopRecord() {
-        if let outputFormatCtx {
-            av_write_trailer(outputFormatCtx)
+        resetRecordOutput(writeTrailer: true)
+    }
+
+    private func resetRecordOutput(writeTrailer: Bool, error: Error? = nil) {
+        let finalURL = recordFinalURL
+        let temporaryURL = recordTemporaryURL
+        var finalizeError = error
+        if writeTrailer, outputFormatCtx != nil {
+            emitRecordProgress(phase: .finalizing, force: true)
         }
+        if let outputFormatCtx {
+            if writeTrailer {
+                let result = av_write_trailer(outputFormatCtx)
+                if result < 0 {
+                    finalizeError = KSPlayerClipExportError.ffmpegFailure(String(avErrorCode: result))
+                }
+            }
+            if outputFormatCtx.pointee.oformat.pointee.flags & AVFMT_NOFILE == 0 {
+                avio_closep(&outputFormatCtx.pointee.pb)
+            }
+            avformat_free_context(outputFormatCtx)
+            self.outputFormatCtx = nil
+        }
+        av_packet_free(&outputPacket)
+        if writeTrailer, finalizeError == nil, let finalURL, let temporaryURL {
+            do {
+                if FileManager.default.fileExists(atPath: finalURL.path) {
+                    throw MEPlayerStreamRecordingError.destinationExists(finalURL)
+                }
+                try FileManager.default.moveItem(at: temporaryURL, to: finalURL)
+                emitRecordProgress(phase: .finished, force: true, message: "Recording finalized by moving the temporary file into place.")
+            } catch {
+                finalizeError = error
+            }
+        }
+        if let temporaryURL, finalizeError != nil || !writeTrailer {
+            try? FileManager.default.removeItem(at: temporaryURL)
+        }
+        if let finalizeError {
+            emitRecordProgress(phase: .failed, force: true, message: finalizeError.localizedDescription)
+        }
+        streamMapping.removeAll()
+        recordFinalURL = nil
+        recordTemporaryURL = nil
+        recordProgressHandler = nil
+        recordStreams.removeAll()
+        recordPacketsWritten = 0
+        recordPacketsSkipped = 0
+        recordDuration = 0
+        recordFirstPacketTimestamp = nil
+        recordLastProgressEmitTime = 0
     }
 
     public func seek(time: TimeInterval, completion: @escaping ((Bool) -> Void)) {
@@ -891,6 +1285,7 @@ extension MEPlayerItem: MediaPlayback {
 extension MEPlayerItem: CodecCapacityDelegate {
     func codecDidChangeCapacity() {
         let loadingState = options.playable(capacitys: videoAudioTracks, isFirst: isFirst, isSeek: isSeek)
+        updateLowLatencyLiveDiagnostic(loadingState: loadingState)
         delegate?.sourceDidChange(loadingState: loadingState)
         if loadingState.isPlayable {
             isFirst = false
@@ -907,6 +1302,106 @@ extension MEPlayerItem: CodecCapacityDelegate {
         }
     }
 
+    private func updateLowLatencyLiveDiagnostic(loadingState: LoadingState) {
+        guard let profile = options.lowLatencyLiveProfile else {
+            dynamicInfo.lowLatencyLiveDiagnostic = nil
+            return
+        }
+        lastLowLatencyLoadingState = loadingState
+        lastLowLatencyDiagnosticUpdateTime = CACurrentMediaTime()
+        let firstVideoReadToDecodeDuration = elapsed(from: options.readVideoTime, to: options.decodeVideoTime)
+        let firstAudioReadToDecodeDuration = elapsed(from: options.readAudioTime, to: options.decodeAudioTime)
+        let firstVideoDecodeToRenderDuration = elapsed(from: options.decodeVideoTime, to: firstVideoRenderTime)
+        let firstAudioDecodeToRenderDuration = elapsed(from: options.decodeAudioTime, to: firstAudioRenderTime)
+        let firstVideoReadToRenderDuration = elapsed(from: options.readVideoTime, to: firstVideoRenderTime)
+        let firstAudioReadToRenderDuration = elapsed(from: options.readAudioTime, to: firstAudioRenderTime)
+        let audioLatencyEstimate = LowLatencyLivePlaybackPolicy.audioLatencyEstimate(
+            profile: profile,
+            audioFrameCount: audioTrack?.frameCount ?? 0,
+            audioFPS: audioTrack?.fps ?? 0,
+            preferredAudioIOBufferDuration: options.preferredAudioIOBufferDuration
+        )
+        let rollingMetrics = lowLatencyLiveDiagnosticAggregator.record(
+            bufferedDuration: loadingState.loadedTime,
+            packetCount: loadingState.packetCount,
+            frameCount: loadingState.frameCount,
+            audioVideoSyncDiff: dynamicInfo.audioVideoSyncDiff,
+            displayFPS: dynamicInfo.displayFPS,
+            videoReadToDecodeDuration: firstVideoReadToDecodeDuration,
+            videoDecodeToRenderDuration: firstVideoDecodeToRenderDuration,
+            videoReadToRenderDuration: firstVideoReadToRenderDuration,
+            audioLatencyEstimate: audioLatencyEstimate
+        )
+        dynamicInfo.lowLatencyLiveDiagnostic = LowLatencyLiveDiagnostic(
+            profile: profile,
+            bufferedDuration: loadingState.loadedTime,
+            packetCount: loadingState.packetCount,
+            frameCount: loadingState.frameCount,
+            droppedVideoFrameCount: dynamicInfo.droppedVideoFrameCount,
+            droppedVideoPacketCount: dynamicInfo.droppedVideoPacketCount,
+            renderedVideoFrameCount: renderedVideoFrameCount,
+            audioRenderUpdateCount: audioRenderUpdateCount,
+            audioVideoSyncDiff: dynamicInfo.audioVideoSyncDiff,
+            displayFPS: dynamicInfo.displayFPS,
+            audioLatencyEstimate: audioLatencyEstimate,
+            timestamps: lowLatencyLivePipelineTimestamps,
+            rollingMetrics: rollingMetrics,
+            prepareToReadyDuration: elapsed(from: options.prepareTime, to: options.readyTime),
+            openToReadyDuration: elapsed(from: options.openTime, to: options.readyTime),
+            startupToFirstVideoFrameDuration: elapsed(from: options.prepareTime, to: firstVideoRenderTime),
+            startupToFirstAudioFrameDuration: elapsed(from: options.prepareTime, to: firstAudioRenderTime),
+            firstVideoReadToDecodeDuration: firstVideoReadToDecodeDuration,
+            firstAudioReadToDecodeDuration: firstAudioReadToDecodeDuration,
+            firstVideoDecodeToRenderDuration: firstVideoDecodeToRenderDuration,
+            firstAudioDecodeToRenderDuration: firstAudioDecodeToRenderDuration,
+            firstVideoReadToRenderDuration: firstVideoReadToRenderDuration,
+            firstAudioReadToRenderDuration: firstAudioReadToRenderDuration
+        )
+    }
+
+    private func elapsed(from start: TimeInterval, to end: TimeInterval) -> TimeInterval? {
+        guard start > 0, end > 0, end >= start else {
+            return nil
+        }
+        return end - start
+    }
+
+    private var lowLatencyLivePipelineTimestamps: LowLatencyLivePipelineTimestamps {
+        let base = options.prepareTime > 0 ? options.prepareTime : 0
+        return LowLatencyLivePipelineTimestamps(
+            prepare: relativeTimestamp(options.prepareTime, base: base),
+            open: relativeTimestamp(options.openTime, base: base),
+            findStreams: relativeTimestamp(options.findTime, base: base),
+            ready: relativeTimestamp(options.readyTime, base: base),
+            firstVideoRead: relativeTimestamp(options.readVideoTime, base: base),
+            firstAudioRead: relativeTimestamp(options.readAudioTime, base: base),
+            firstVideoDecode: relativeTimestamp(options.decodeVideoTime, base: base),
+            firstAudioDecode: relativeTimestamp(options.decodeAudioTime, base: base),
+            firstVideoRender: relativeTimestamp(firstVideoRenderTime, base: base),
+            firstAudioRender: relativeTimestamp(firstAudioRenderTime, base: base)
+        )
+    }
+
+    private func relativeTimestamp(_ timestamp: TimeInterval, base: TimeInterval) -> TimeInterval? {
+        guard timestamp > 0 else {
+            return nil
+        }
+        guard base > 0, timestamp >= base else {
+            return timestamp
+        }
+        return timestamp - base
+    }
+
+    private func refreshLowLatencyLiveDiagnosticAfterRender(now: TimeInterval, force: Bool) {
+        guard options.lowLatencyLiveProfile != nil,
+              let lastLowLatencyLoadingState,
+              force || now - lastLowLatencyDiagnosticUpdateTime >= 0.25
+        else {
+            return
+        }
+        updateLowLatencyLiveDiagnostic(loadingState: lastLowLatencyLoadingState)
+    }
+
     func codecDidFinished(track: some CapacityProtocol) {
         if track.mediaType == .audio {
             isAudioStalled = true
@@ -915,12 +1410,13 @@ extension MEPlayerItem: CodecCapacityDelegate {
         if allSatisfy {
             delegate?.sourceDidFinished()
             timer.fireDate = Date.distantFuture
-            if options.isLoopPlay {
+            if canRestartLoopPlayback {
                 resetLoopClocksToStart()
-                audioTrack?.isLoopModel = false
-                videoTrack?.isLoopModel = false
+                allPlayerItemTracks.forEach { $0.isLoopModel = false }
                 if state == .finished {
                     seek(time: 0) { _ in }
+                } else {
+                    timer.fireDate = Date.distantPast
                 }
             }
         }
@@ -967,6 +1463,19 @@ extension MEPlayerItem: CodecCapacityDelegate {
             next.isEnabled = true
         }
     }
+
+    private static func closeCustomIO(in formatContext: UnsafeMutablePointer<AVFormatContext>?) {
+        guard let formatContext,
+              (formatContext.pointee.flags & AVFMT_FLAG_CUSTOM_IO) != 0,
+              let pb = formatContext.pointee.pb,
+              let opaque = pb.pointee.opaque
+        else {
+            return
+        }
+        let value = Unmanaged<AbstractAVIOContext>.fromOpaque(opaque).takeRetainedValue()
+        value.close()
+        pb.pointee.opaque = nil
+    }
 }
 
 extension MEPlayerItem: OutputRenderSourceDelegate {
@@ -976,6 +1485,12 @@ extension MEPlayerItem: OutputRenderSourceDelegate {
 
     public func setVideo(time: CMTime, position: Int64) {
 //        print("[video] video interval \(CACurrentMediaTime() - videoClock.lastMediaTime) video diff \(time.seconds - videoClock.time.seconds)")
+        let now = CACurrentMediaTime()
+        renderedVideoFrameCount += 1
+        let isFirstVideoRender = firstVideoRenderTime == 0
+        if isFirstVideoRender {
+            firstVideoRenderTime = now
+        }
         videoClock.time = time
         videoClock.position = position
         videoDisplayCount += 1
@@ -985,15 +1500,23 @@ extension MEPlayerItem: OutputRenderSourceDelegate {
             videoDisplayCount = 0
             lastVideoDisplayTime = videoClock.lastMediaTime
         }
+        refreshLowLatencyLiveDiagnosticAfterRender(now: now, force: isFirstVideoRender)
     }
 
     public func setAudio(time: CMTime, position: Int64) {
 //        print("[audio] setAudio: \(time.seconds)")
+        let now = CACurrentMediaTime()
+        audioRenderUpdateCount += 1
+        let isFirstAudioRender = firstAudioRenderTime == 0
+        if isFirstAudioRender {
+            firstAudioRenderTime = now
+        }
         // 切换到主线程的话，那播放起来会更顺滑
         runOnMainThread {
             self.audioClock.time = time
             self.audioClock.position = position
         }
+        refreshLowLatencyLiveDiagnosticAfterRender(now: now, force: isFirstAudioRender)
     }
 
     public func getVideoOutputRender(force: Bool) -> VideoVTBFrame? {

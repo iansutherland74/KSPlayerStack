@@ -185,18 +185,31 @@ open class KSPlayerLayer: NSObject, @unchecked Sendable {
     @Published
     public var isPipActive = false {
         didSet {
+            guard !isUpdatingPictureInPictureState else {
+                return
+            }
             if #available(tvOS 14.0, *) {
                 guard let pipController = player.pipController else {
+                    if isPipActive {
+                        KSLog("[pip] start skipped: \(PictureInPictureStartPolicy.unavailableReason(isSystemSupported: AVPictureInPictureController.isPictureInPictureSupported(), hasController: false, isPossible: false) ?? "unknown reason")")
+                        setPictureInPictureActiveFromController(false)
+                    }
                     return
                 }
 
                 if isPipActive {
+                    options.pictureInPictureSubtitleDiagnostic = player.pictureInPictureSubtitleDiagnostic
+                    KSLog("[pip] subtitle policy: \(player.pictureInPictureSubtitleDiagnostic.description)")
+                    (player as? KSMEPlayer)?.setPictureInPictureActive(true)
                     // 一定要async才不会pip之后就暂停播放
                     Task { @MainActor [weak self] in
-                        guard let self else { return }
-                        self.player.pipController?.start(view: self)
+                        guard let self, self.isPipActive else { return }
+                        if self.player.pipController?.start(view: self) != true {
+                            self.setPictureInPictureActiveFromController(false)
+                        }
                     }
                 } else {
+                    (player as? KSMEPlayer)?.setPictureInPictureActive(false)
                     pipController.stop(restoreUserInterface: true)
                 }
             }
@@ -205,9 +218,31 @@ open class KSPlayerLayer: NSObject, @unchecked Sendable {
 
     public private(set) var options: KSOptions
 
+    /// Decoded video frame callback for app-owned ML pipelines such as Depth Anything.
+    ///
+    /// KSPlayer emits `CVPixelBuffer`s from the KSMEPlayer decode path on a private serial queue. The callback is not
+    /// invoked on the main thread, and the queue drops frames according to `videoOutputConfiguration` when the app is
+    /// slower than playback.
+    public var videoOutput: KSVideoOutputHandler? {
+        didSet {
+            updateDecodedVideoFrameOutput()
+        }
+    }
+
+    /// Buffering and drop policy for `videoOutput`. Defaults to a single queued frame and keeping the latest frame.
+    public var videoOutputConfiguration = KSVideoFrameOutput.Configuration() {
+        didSet {
+            updateDecodedVideoFrameOutput()
+        }
+    }
+
     public var player: MediaPlayerProtocol {
         didSet {
             KSLog("player is \(player)")
+            (oldValue as? DecodedVideoFrameOutputConfigurable)?.decodedVideoFrameOutput = nil
+            if #available(tvOS 14.0, *), isPipActive {
+                stopPictureInPictureForPlayerReplacement(oldPlayer: oldValue)
+            }
             state = .initialized
             runOnMainThread { [weak self] in
                 guard let self else { return }
@@ -231,6 +266,7 @@ open class KSPlayerLayer: NSObject, @unchecked Sendable {
             player.playbackVolume = oldValue.playbackVolume
             player.delegate = self
             player.contentMode = .scaleAspectFit
+            applyDecodedVideoFrameOutput(to: player)
             if isAutoPlay, !isCommittingPrewarmedPlayer {
                 prepareToPlay()
             }
@@ -302,6 +338,8 @@ open class KSPlayerLayer: NSObject, @unchecked Sendable {
     private var startTime: TimeInterval = 0
     private var prewarmContext: DefinitionSwitchPrewarmContext?
     private var isCommittingPrewarmedPlayer = false
+    private var isUpdatingPictureInPictureState = false
+    private var decodedVideoFrameOutput: KSVideoFrameOutput?
     public init(url: URL, audioURL: URL? = nil, isAutoPlay: Bool = KSOptions.isAutoPlay, options: KSOptions, delegate: KSPlayerLayerDelegate? = nil) {
         self.url = url
         self.audioURL = audioURL
@@ -317,6 +355,7 @@ open class KSPlayerLayer: NSObject, @unchecked Sendable {
         }
         player.delegate = self
         player.contentMode = .scaleAspectFit
+        applyDecodedVideoFrameOutput(to: player)
         if isAutoPlay {
             prepareToPlay()
         }
@@ -342,6 +381,7 @@ open class KSPlayerLayer: NSObject, @unchecked Sendable {
 
     deinit {
         cancelPrewarmContext()
+        (player as? DecodedVideoFrameOutputConfigurable)?.decodedVideoFrameOutput = nil
         if #available(iOS 15.0, tvOS 15.0, macOS 12.0, *) {
             player.pipController?.contentSource = nil
         }
@@ -369,6 +409,14 @@ open class KSPlayerLayer: NSObject, @unchecked Sendable {
     public func set(url: URL, audioURL: URL?, options: KSOptions) {
         let previousUpscaling = self.options.videoUpscaling
         let previousColorAdjustment = self.options.videoColorAdjustment
+        let previous2DTo3DMode = self.options.video2DTo3DMode
+        let previous2DTo3DDepthStrength = self.options.video2DTo3DDepthStrength
+        let previous2DTo3DDepthDistance = self.options.video2DTo3DDepthDistance
+        let previous2DTo3DDepthCurvature = self.options.video2DTo3DDepthCurvature
+        let previous2DTo3DOutputLayout = self.options.video2DTo3DOutputLayout
+        let previousDepthProvider = self.options.videoDepthEstimationProvider
+        let previous2DTo3DRequiresMetal = Video2DTo3DPolicy.requiresMetalRenderPath(mode: previous2DTo3DMode)
+        let current2DTo3DRequiresMetal = Video2DTo3DPolicy.requiresMetalRenderPath(mode: options.video2DTo3DMode)
         let previousAudioURL = self.audioURL
         self.options = options
         runOnMainThread {
@@ -376,6 +424,15 @@ open class KSPlayerLayer: NSObject, @unchecked Sendable {
             if self.url == url {
                 if previousUpscaling != options.videoUpscaling ||
                     previousColorAdjustment != options.videoColorAdjustment ||
+                    previous2DTo3DRequiresMetal != current2DTo3DRequiresMetal ||
+                    (current2DTo3DRequiresMetal && (
+                        previous2DTo3DMode != options.video2DTo3DMode ||
+                            previous2DTo3DDepthStrength != options.video2DTo3DDepthStrength ||
+                            previous2DTo3DDepthDistance != options.video2DTo3DDepthDistance ||
+                            previous2DTo3DDepthCurvature != options.video2DTo3DDepthCurvature ||
+                            previous2DTo3DOutputLayout != options.video2DTo3DOutputLayout ||
+                            !Self.sameDepthProvider(previousDepthProvider, options.videoDepthEstimationProvider)
+                    )) ||
                     previousAudioURL != audioURL
                 {
                     self.audioURL = audioURL
@@ -403,6 +460,14 @@ open class KSPlayerLayer: NSObject, @unchecked Sendable {
     public func set(urls: [URL], options: KSOptions) {
         let previousUpscaling = self.options.videoUpscaling
         let previousColorAdjustment = self.options.videoColorAdjustment
+        let previous2DTo3DMode = self.options.video2DTo3DMode
+        let previous2DTo3DDepthStrength = self.options.video2DTo3DDepthStrength
+        let previous2DTo3DDepthDistance = self.options.video2DTo3DDepthDistance
+        let previous2DTo3DDepthCurvature = self.options.video2DTo3DDepthCurvature
+        let previous2DTo3DOutputLayout = self.options.video2DTo3DOutputLayout
+        let previousDepthProvider = self.options.videoDepthEstimationProvider
+        let previous2DTo3DRequiresMetal = Video2DTo3DPolicy.requiresMetalRenderPath(mode: previous2DTo3DMode)
+        let current2DTo3DRequiresMetal = Video2DTo3DPolicy.requiresMetalRenderPath(mode: options.video2DTo3DMode)
         self.options = options
         self.audioURL = nil
         self.urls.removeAll()
@@ -411,7 +476,16 @@ open class KSPlayerLayer: NSObject, @unchecked Sendable {
             runOnMainThread {
                 self.cancelPrewarmContext()
                 let didRendererOptionsChange = previousUpscaling != options.videoUpscaling ||
-                    previousColorAdjustment != options.videoColorAdjustment
+                    previousColorAdjustment != options.videoColorAdjustment ||
+                    previous2DTo3DRequiresMetal != current2DTo3DRequiresMetal ||
+                    (current2DTo3DRequiresMetal && (
+                        previous2DTo3DMode != options.video2DTo3DMode ||
+                            previous2DTo3DDepthStrength != options.video2DTo3DDepthStrength ||
+                            previous2DTo3DDepthDistance != options.video2DTo3DDepthDistance ||
+                            previous2DTo3DDepthCurvature != options.video2DTo3DDepthCurvature ||
+                            previous2DTo3DOutputLayout != options.video2DTo3DOutputLayout ||
+                            !Self.sameDepthProvider(previousDepthProvider, options.videoDepthEstimationProvider)
+                    ))
                 if self.url == first, didRendererOptionsChange {
                     self.replaceCurrentURLForOptionChange(url: first, audioURL: nil, options: options)
                 } else {
@@ -535,6 +609,17 @@ extension KSPlayerLayer: MediaPlayerDelegate {
 
     public func changeLoadState(player: some MediaPlayerProtocol) {
         guard player.playbackState != .seeking else { return }
+        if player.playbackState == .paused {
+            state = .paused
+            timer.fireDate = Date.distantFuture
+            MPNowPlayingInfoCenter.default().playbackState = .paused
+            return
+        }
+        if player.playbackState == .playing, !state.isPlaying {
+            state = player.loadState == .playable ? .bufferFinished : .buffering
+            timer.fireDate = Date.distantPast
+            MPNowPlayingInfoCenter.default().playbackState = .playing
+        }
         if player.loadState == .playable, startTime > 0 {
             let diff = CACurrentMediaTime() - startTime
             Task { @MainActor [weak self] in
@@ -614,24 +699,90 @@ extension KSPlayerLayer: MediaPlayerDelegate {
 
 @available(tvOS 14.0, *)
 extension KSPlayerLayer: AVPictureInPictureControllerDelegate {
-    public func pictureInPictureControllerDidStopPictureInPicture(_: AVPictureInPictureController) {
-        player.pipController?.stop(restoreUserInterface: false)
+    public func pictureInPictureControllerDidStartPictureInPicture(_: AVPictureInPictureController) {
+        setPictureInPictureActiveFromController(true)
     }
 
-    public func pictureInPictureController(_: AVPictureInPictureController, restoreUserInterfaceForPictureInPictureStopWithCompletionHandler _: @escaping (Bool) -> Void) {
+    public func pictureInPictureController(_ pictureInPictureController: AVPictureInPictureController, failedToStartPictureInPictureWithError error: Error) {
+        KSLog("[pip] failed to start Picture in Picture: \(error.localizedDescription)")
+        (pictureInPictureController as? KSPictureInPictureController)?.stop(restoreUserInterface: false)
+        setPictureInPictureActiveFromController(false)
+    }
+
+    public func pictureInPictureControllerDidStopPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
+        setPictureInPictureActiveFromController(false)
+        (pictureInPictureController as? KSPictureInPictureController)?.stop(restoreUserInterface: false)
+    }
+
+    public func pictureInPictureController(_: AVPictureInPictureController, restoreUserInterfaceForPictureInPictureStopWithCompletionHandler completionHandler: @escaping (Bool) -> Void) {
         isPipActive = false
+        completionHandler(true)
     }
 }
 
 // MARK: - private functions
 
 extension KSPlayerLayer {
+    private func updateDecodedVideoFrameOutput() {
+        decodedVideoFrameOutput?.flush()
+        if let videoOutput {
+            decodedVideoFrameOutput = KSVideoFrameOutput(
+                configuration: videoOutputConfiguration,
+                handler: videoOutput
+            )
+        } else {
+            decodedVideoFrameOutput = nil
+        }
+        applyDecodedVideoFrameOutput(to: player)
+    }
+
+    private func applyDecodedVideoFrameOutput(to player: any MediaPlayerProtocol) {
+        (player as? DecodedVideoFrameOutputConfigurable)?.decodedVideoFrameOutput = decodedVideoFrameOutput
+    }
+
+    private static func sameDepthProvider(_ lhs: (any VideoDepthEstimationProvider)?, _ rhs: (any VideoDepthEstimationProvider)?) -> Bool {
+        switch (lhs, rhs) {
+        case let (lhs?, rhs?):
+            return lhs === rhs
+        case (nil, nil):
+            return true
+        default:
+            return false
+        }
+    }
+
+    fileprivate func setPictureInPictureActiveFromController(_ active: Bool) {
+        guard isPipActive != active else {
+            return
+        }
+        (player as? KSMEPlayer)?.setPictureInPictureActive(active)
+        isUpdatingPictureInPictureState = true
+        defer {
+            isUpdatingPictureInPictureState = false
+        }
+        isPipActive = active
+    }
+
+    @available(tvOS 14.0, *)
+    fileprivate func stopPictureInPictureForPlayerReplacement(oldPlayer: any MediaPlayerProtocol) {
+        (oldPlayer as? KSMEPlayer)?.setPictureInPictureActive(false)
+        oldPlayer.pipController?.stop(restoreUserInterface: true)
+        setPictureInPictureActiveFromController(false)
+        KSLog("[pip] stopped Picture in Picture because the player was replaced")
+    }
+
     static func preferredPlayerType(for url: URL, audioURL: URL? = nil, options: KSOptions) -> MediaPlayerProtocol.Type {
         if audioURL != nil {
             return KSAVPlayer.self
         }
+        if let reason = Video2DTo3DPolicy.unavailableReason(mode: options.video2DTo3DMode) {
+            options.video2DTo3DDiagnostic = .unavailable(reason: reason)
+            KSLog("[video] \(reason)")
+        }
         if options.display != .plane ||
             options.panoramaMode != .disabled ||
+            options.stereoscopicVideoMode != .disabled ||
+            Video2DTo3DPolicy.requiresMetalRenderPath(mode: options.video2DTo3DMode) ||
             url.isBluRayInputCandidate ||
             url.isFFmpegOnlyInputScheme ||
             url.isMatroskaContainer ||
@@ -655,6 +806,14 @@ extension KSPlayerLayer {
             }
             if options.panoramaMode != .disabled {
                 KSLog("[video] panorama rendering is unavailable during wireless route playback")
+            }
+            if options.stereoscopicVideoMode != .disabled {
+                KSLog("[video] stereoscopic 3D rendering is unavailable during wireless route playback")
+            }
+            if options.video2DTo3DMode != .disabled {
+                let reason = Video2DTo3DPolicy.unavailableReason(mode: options.video2DTo3DMode) ?? "2D-to-3D conversion is unavailable during wireless route playback"
+                options.video2DTo3DDiagnostic = .unavailable(reason: reason)
+                KSLog("[video] \(reason)")
             }
             if options.isOfflineSubtitleGenerationEnabled {
                 KSLog("offline subtitle generation is unavailable during wireless route playback")

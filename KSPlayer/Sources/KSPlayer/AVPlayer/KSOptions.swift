@@ -19,25 +19,96 @@ public enum PictureInPictureSubtitlePolicy: Sendable, Equatable {
     /// Use PiP-compatible subtitle paths when available.
     ///
     /// AVPlayer can show system-rendered legible media selections in Picture in Picture. KSPlayer-owned
-    /// overlay subtitles, including external text/image subtitles, secondary subtitles, and KSMEPlayer/libass
-    /// bitmap subtitles, are not composited into the video frames sent to Apple's PiP window.
+    /// overlay subtitles stay inline unless `burnIn` is selected for the sample-buffer KSMEPlayer path.
     case automatic
+    /// Burn KSPlayer-rendered primary/secondary text, external image, and libass bitmap subtitles into
+    /// KSMEPlayer sample-buffer frames for system PiP when the renderer can safely do so.
+    ///
+    /// This is intentionally opt-in because it changes emitted video frames, currently applies only to
+    /// SDR CoreGraphics-readable sample buffers, and is not available for native AVPlayer PiP.
+    case burnIn
     /// Do not expose native PiP subtitle selection. Overlay subtitles continue to render in the inline player only.
     case disabled
+}
+
+public struct PictureInPictureSubtitleDiagnostic: Equatable, Sendable, CustomStringConvertible {
+    public enum Status: Equatable, Sendable {
+        case disabled
+        case nativeLegible
+        case inlineOverlayOnly
+        case burnedIn
+        case burnInUnavailable
+    }
+
+    public let status: Status
+    public let message: String
+
+    public var description: String { message }
 }
 
 enum PictureInPictureSubtitleRenderMode: Equatable {
     case disabled
     case nativeLegible
     case inlineOverlayOnly
+    case burnedIn
+    case burnInUnavailable
 }
 
 enum PictureInPictureSubtitlePolicyResolver {
-    static func renderMode(policy: PictureInPictureSubtitlePolicy, usesNativeLegibleSelection: Bool) -> PictureInPictureSubtitleRenderMode {
+    private static let inlineOverlayReason = "KSPlayer overlay subtitles are UI layers and are not composited into the AVPlayer layer or sample-buffer frames used by system Picture in Picture."
+
+    static func renderMode(
+        policy: PictureInPictureSubtitlePolicy,
+        usesNativeLegibleSelection: Bool,
+        supportsSampleBufferBurnIn: Bool = false
+    ) -> PictureInPictureSubtitleRenderMode {
         guard policy != .disabled else {
             return .disabled
         }
+        if policy == .burnIn {
+            return supportsSampleBufferBurnIn ? .burnedIn : .burnInUnavailable
+        }
         return usesNativeLegibleSelection ? .nativeLegible : .inlineOverlayOnly
+    }
+
+    static func diagnostic(
+        policy: PictureInPictureSubtitlePolicy,
+        usesNativeLegibleSelection: Bool,
+        supportsSampleBufferBurnIn: Bool = false,
+        burnInUnavailableReason: String? = nil
+    ) -> PictureInPictureSubtitleDiagnostic {
+        switch renderMode(
+            policy: policy,
+            usesNativeLegibleSelection: usesNativeLegibleSelection,
+            supportsSampleBufferBurnIn: supportsSampleBufferBurnIn
+        ) {
+        case .disabled:
+            return PictureInPictureSubtitleDiagnostic(
+                status: .disabled,
+                message: "Picture in Picture subtitle selection is disabled by policy."
+            )
+        case .nativeLegible:
+            return PictureInPictureSubtitleDiagnostic(
+                status: .nativeLegible,
+                message: "Native AVFoundation legible tracks can be shown by system Picture in Picture; KSPlayer overlay subtitles remain inline-only."
+            )
+        case .inlineOverlayOnly:
+            return PictureInPictureSubtitleDiagnostic(
+                status: .inlineOverlayOnly,
+                message: inlineOverlayReason
+            )
+        case .burnedIn:
+            return PictureInPictureSubtitleDiagnostic(
+                status: .burnedIn,
+                message: "KSMEPlayer will burn KSPlayer-rendered subtitles into sample-buffer frames while system Picture in Picture is active."
+            )
+        case .burnInUnavailable:
+            let reason = burnInUnavailableReason ?? "the active player path does not expose a subtitle burn-in renderer"
+            return PictureInPictureSubtitleDiagnostic(
+                status: .burnInUnavailable,
+                message: "Picture in Picture subtitle burn-in was requested but is unavailable because \(reason)."
+            )
+        }
     }
 }
 
@@ -48,6 +119,39 @@ public enum KSLowLatencyLiveProfile: Equatable, Sendable {
     /// It cannot guarantee a fixed latency target; protocol behavior, encoder GOP/B-frames, network jitter,
     /// camera buffering, and device decode capacity still dominate end-to-end latency.
     case lan
+}
+
+public struct LowLatencyLiveEncoderSettingsRecommendation: Equatable, Sendable {
+    public let preferredCodecs: [String]
+    public let maximumGOPDuration: TimeInterval
+    public let maximumBFrameCount: Int
+    public let disablesLookahead: Bool
+    public let usesConstrainedBitrate: Bool
+    public let notes: [String]
+}
+
+public struct LowLatencyLiveTransportSettingsRecommendation: Equatable, Sendable {
+    public let protocolName: String
+    public let preferredTransport: String
+    public let serverBufferDuration: TimeInterval
+    public let rtpReorderQueueSize: Int
+    public let usesWallClockTimestamps: Bool
+    public let notes: [String]
+}
+
+public struct LowLatencyLiveSourceRecommendations: Equatable, Sendable {
+    public let profile: KSLowLatencyLiveProfile
+    public let encoder: LowLatencyLiveEncoderSettingsRecommendation
+    public let rtsp: LowLatencyLiveTransportSettingsRecommendation
+    public let rtp: LowLatencyLiveTransportSettingsRecommendation
+    public let validationChecklist: [String]
+    public let caveats: [String]
+}
+
+public extension KSLowLatencyLiveProfile {
+    var sourceRecommendations: LowLatencyLiveSourceRecommendations {
+        LowLatencyLivePlaybackPolicy.sourceRecommendations(profile: self)
+    }
 }
 
 public enum VideoProjection: Equatable, Sendable {
@@ -61,6 +165,24 @@ public enum PanoramaStereoLayout: Equatable, Hashable, Sendable {
     case mono
     case sideBySide
     case topAndBottom
+}
+
+public typealias StereoscopicVideoLayout = PanoramaStereoLayout
+
+public enum StereoscopicVideoMode: Equatable, Sendable {
+    /// Preserve the packed source frame as normal 2D video.
+    case disabled
+    /// Detect side-by-side or top-and-bottom packing from stream metadata and crop one eye on the Metal path.
+    case automatic
+    /// Treat the source as left/right packed 3D video.
+    case sideBySide
+    /// Treat the source as top/bottom packed 3D video.
+    case topAndBottom
+}
+
+public enum StereoscopicVideoEye: Equatable, Hashable, Sendable {
+    case left
+    case right
 }
 
 public enum PanoramaFieldOfView: Equatable, Hashable, Sendable {
@@ -128,6 +250,187 @@ public enum MultichannelAudioPreference: Equatable, Sendable {
     case stereo
 }
 
+public enum AudioMultichannelContentSupportResolver {
+    public static func supportsMultichannelContent(
+        spatialPreference: AudioSpatializationPreference,
+        multichannelPreference: MultichannelAudioPreference,
+        sourceChannelCount: AVAudioChannelCount?,
+        isSpatialRoute: Bool?
+    ) -> Bool {
+        guard multichannelPreference != .stereo else {
+            return false
+        }
+        switch spatialPreference {
+        case .automatic:
+            return isSpatialRoute == true || (sourceChannelCount ?? 0) > 2
+        case .enabled:
+            return true
+        case .disabled:
+            return false
+        }
+    }
+}
+
+public enum AudioRouteOutputKind: String, Equatable, Sendable, CustomStringConvertible {
+    case builtIn
+    case wired
+    case bluetooth
+    case airPlay
+    case hdmi
+    case usb
+    case carAudio
+    case unknown
+
+    public var description: String { rawValue }
+}
+
+public enum AudioRouteOutputClassifier {
+    public static func outputKind(portTypeRawValue: String) -> AudioRouteOutputKind {
+        let normalized = portTypeRawValue.lowercased().filter { $0.isLetter || $0.isNumber }
+        if normalized.contains("airplay") {
+            return .airPlay
+        }
+        if normalized.contains("bluetooth") {
+            return .bluetooth
+        }
+        if normalized.contains("hdmi") {
+            return .hdmi
+        }
+        if normalized.contains("usb") {
+            return .usb
+        }
+        if normalized.contains("car") {
+            return .carAudio
+        }
+        if normalized.contains("headphone") || normalized.contains("lineout") || normalized.contains("line") {
+            return .wired
+        }
+        if normalized.contains("builtin") || normalized.contains("speaker") || normalized.contains("receiver") {
+            return .builtIn
+        }
+        return .unknown
+    }
+
+    public static func isExternalRoute(_ outputKind: AudioRouteOutputKind) -> Bool {
+        switch outputKind {
+        case .airPlay, .bluetooth, .hdmi, .usb, .carAudio, .wired:
+            return true
+        case .builtIn, .unknown:
+            return false
+        }
+    }
+}
+
+public enum AudioPlaybackPipeline: String, Equatable, Sendable, CustomStringConvertible {
+    case nativeAVPlayer
+    case decodedPCM
+
+    public var description: String {
+        switch self {
+        case .nativeAVPlayer:
+            return "native AVPlayer"
+        case .decodedPCM:
+            return "decoded PCM"
+        }
+    }
+}
+
+public enum EncodedAudioPassthroughAvailability: String, Equatable, Sendable {
+    case notApplicable
+    case nativeRouteDependent
+    case decodedPCMOnly
+}
+
+public struct EncodedAudioPassthroughPolicy: Equatable, Sendable {
+    public let availability: EncodedAudioPassthroughAvailability
+    public let requiresHardwareRouteValidation: Bool
+    public let reason: String
+}
+
+public enum EncodedAudioPassthroughPolicyResolver {
+    public static func isEncodedPassthroughCandidate(mediaSubTypeRawValue: String?) -> Bool {
+        guard let mediaSubTypeRawValue else {
+            return false
+        }
+        let token = mediaSubTypeRawValue.lowercased().filter { $0.isLetter || $0.isNumber }
+        return ["ec3", "eac3", "ac4", "mlpa", "truehd", "thd"].contains(token)
+    }
+
+    public static func isEncodedPassthroughCandidate(metadata: FFmpegAudioCodecMetadata?) -> Bool {
+        guard let metadata else {
+            return false
+        }
+        return metadata.isDolbyAtmos || metadata.isDolbyAC4 || metadata.isDolbyTrueHD || metadata.isDolbyEAC3
+    }
+
+    public static func policy(
+        pipeline: AudioPlaybackPipeline,
+        containsEncodedPassthroughCandidate: Bool
+    ) -> EncodedAudioPassthroughPolicy {
+        guard containsEncodedPassthroughCandidate else {
+            return EncodedAudioPassthroughPolicy(
+                availability: .notApplicable,
+                requiresHardwareRouteValidation: false,
+                reason: "No encoded Dolby passthrough candidate was detected in the selected audio track."
+            )
+        }
+        switch pipeline {
+        case .nativeAVPlayer:
+            return EncodedAudioPassthroughPolicy(
+                availability: .nativeRouteDependent,
+                requiresHardwareRouteValidation: true,
+                reason: "Encoded Atmos, AC-4, and TrueHD passthrough are delegated to Apple's native AVPlayer route and depend on the current hardware output."
+            )
+        case .decodedPCM:
+            return EncodedAudioPassthroughPolicy(
+                availability: .decodedPCMOnly,
+                requiresHardwareRouteValidation: false,
+                reason: "KSMEPlayer decodes supported FFmpeg audio to PCM before output and has no encoded bitstream passthrough path."
+            )
+        }
+    }
+}
+
+public struct AudioRouteOutputDiagnostic: Equatable, Sendable {
+    public let portName: String
+    public let portType: String
+    public let outputKind: AudioRouteOutputKind
+    public let channelCount: Int?
+    public let isSpatialAudioEnabled: Bool?
+}
+
+public struct AudioRouteDiagnostic: Equatable, Sendable, CustomStringConvertible {
+    public let playbackPipeline: AudioPlaybackPipeline
+    public let outputPorts: [AudioRouteOutputDiagnostic]
+    public let maximumOutputNumberOfChannels: Int?
+    public let preferredOutputNumberOfChannels: Int?
+    public let outputNumberOfChannels: Int?
+    public let outputLatency: TimeInterval?
+    public let routeSharingPolicy: String?
+    public let configuredSupportsMultichannelContent: Bool
+    public let spatialPreference: AudioSpatializationPreference
+    public let multichannelPreference: MultichannelAudioPreference
+    public let sourceChannelCount: AVAudioChannelCount?
+    public let allowsExternalPlayback: Bool?
+    public let usesExternalPlaybackWhileExternalScreenIsActive: Bool?
+    public let isExternalPlaybackActive: Bool?
+    public let encodedPassthroughPolicy: EncodedAudioPassthroughPolicy
+
+    public var hasExternalOutput: Bool {
+        outputPorts.contains { AudioRouteOutputClassifier.isExternalRoute($0.outputKind) }
+    }
+
+    public var description: String {
+        let ports = outputPorts.map { output in
+            let channels = output.channelCount.map { ", channels: \($0)" } ?? ""
+            let spatial = output.isSpatialAudioEnabled.map { ", spatial: \($0)" } ?? ""
+            return "\(output.portName) (\(output.portType), \(output.outputKind)\(channels)\(spatial))"
+        }.joined(separator: "; ")
+        return "pipeline: \(playbackPipeline), ports: [\(ports)], routeSharingPolicy: \(routeSharingPolicy ?? "unavailable"), " +
+            "supportsMultichannelContent: \(configuredSupportsMultichannelContent), encodedPassthrough: \(encodedPassthroughPolicy.availability.rawValue)"
+    }
+}
+
 #if !os(macOS)
 public enum AudioRouteSharingPolicyResolver {
     public static var platformDefaultPolicy: AVAudioSession.RouteSharingPolicy {
@@ -162,7 +465,7 @@ public enum PanoramaProjectionPolicy {
 
         return PanoramaVideoConfiguration(
             projection: projection,
-            stereoLayout: detectedStereoLayout(in: normalized),
+            stereoLayout: detectedStereoLayout(in: normalized) ?? .mono,
             fieldOfView: detectedFieldOfView(in: normalized)
         )
     }
@@ -207,6 +510,22 @@ public enum PanoramaProjectionPolicy {
         }
     }
 
+    public static func detectedStereoLayout(metadata: [String: String]) -> StereoscopicVideoLayout? {
+        let normalized = metadata.reduce(into: [String: String]()) { result, entry in
+            result[normalizedKey(entry.key)] = normalizedValue(entry.value)
+        }
+        return detectedStereoLayout(in: normalized)
+    }
+
+    public static func detectedStereoLayout(formatDescription: CMFormatDescription?) -> StereoscopicVideoLayout? {
+        guard let formatDescription,
+              let extensions = CMFormatDescriptionGetExtensions(formatDescription) as? [AnyHashable: Any]
+        else {
+            return nil
+        }
+        return detectedStereoLayout(metadata: flattenedMetadata(extensions))
+    }
+
     private static func detectedProjection(in normalized: [String: String]) -> VideoProjection? {
         for key in ["projection", "projectiontype", "projectionformat", "projectionkind", "spatialmediaprojection", "sphericalprojection"] {
             if let projection = normalized[key].flatMap(projection(from:)) {
@@ -239,24 +558,24 @@ public enum PanoramaProjectionPolicy {
         return tokenizedValue.isEmpty ? nil : .unknown(value)
     }
 
-    private static func detectedStereoLayout(in normalized: [String: String]) -> PanoramaStereoLayout {
+    private static func detectedStereoLayout(in normalized: [String: String]) -> StereoscopicVideoLayout? {
         for key in ["stereomode", "stereolayout", "stereo3d", "st3d", "spatialstereolayout", "sphericalstereomode", "framepacking"] {
             if let layout = normalized[key].flatMap(stereoLayout(from:)) {
                 return layout
             }
         }
-        return .mono
+        return nil
     }
 
-    private static func stereoLayout(from value: String) -> PanoramaStereoLayout? {
+    private static func stereoLayout(from value: String) -> StereoscopicVideoLayout? {
         let tokenizedValue = tokenizedValue(value)
         if ["", "0", "false", "no", "none", "mono", "2d", "flat"].contains(tokenizedValue) {
             return .mono
         }
-        if ["sidebyside", "leftright", "rightleft", "sbs", "lr", "rl"].contains(tokenizedValue) {
+        if ["sidebyside", "leftright", "sbs", "lr"].contains(tokenizedValue) {
             return .sideBySide
         }
-        if ["topbottom", "bottomtop", "overunder", "underover", "tb", "bt", "ou", "uo"].contains(tokenizedValue) {
+        if ["topbottom", "overunder", "tb", "ou"].contains(tokenizedValue) {
             return .topAndBottom
         }
         return nil
@@ -320,6 +639,33 @@ public enum PanoramaProjectionPolicy {
     }
 }
 
+public enum StereoscopicVideoPolicy {
+    public static func detectedLayout(metadata: [String: String]) -> StereoscopicVideoLayout? {
+        PanoramaProjectionPolicy.detectedStereoLayout(metadata: metadata).flatMap(renderableLayout(_:))
+    }
+
+    public static func detectedLayout(formatDescription: CMFormatDescription?) -> StereoscopicVideoLayout? {
+        PanoramaProjectionPolicy.detectedStereoLayout(formatDescription: formatDescription).flatMap(renderableLayout(_:))
+    }
+
+    public static func resolvedLayout(mode: StereoscopicVideoMode, detectedLayout: StereoscopicVideoLayout?) -> StereoscopicVideoLayout? {
+        switch mode {
+        case .disabled:
+            return nil
+        case .automatic:
+            return detectedLayout.flatMap(renderableLayout(_:))
+        case .sideBySide:
+            return .sideBySide
+        case .topAndBottom:
+            return .topAndBottom
+        }
+    }
+
+    private static func renderableLayout(_ layout: StereoscopicVideoLayout) -> StereoscopicVideoLayout? {
+        layout == .mono ? nil : layout
+    }
+}
+
 public extension VideoProjection {
     var isRenderableInSphere: Bool {
         switch self {
@@ -331,10 +677,19 @@ public extension VideoProjection {
     }
 }
 
-enum PanoramaTextureEye {
+enum PanoramaTextureEye: Hashable {
     case mono
     case left
     case right
+
+    init(_ eye: StereoscopicVideoEye) {
+        switch eye {
+        case .left:
+            self = .left
+        case .right:
+            self = .right
+        }
+    }
 }
 
 extension PanoramaStereoLayout {
@@ -398,8 +753,13 @@ open class KSOptions {
     public var memorySeekCacheDuration = KSOptions.memorySeekCacheDuration
     /// Maximum compressed packet bytes retained by the memory seek cache.
     public var memorySeekCacheMaxByteSize = KSOptions.memorySeekCacheMaxByteSize
-    //  record stream
+    /// KSMEPlayer-only live demux recording destination. Existing files are not overwritten.
+    ///
+    /// Recording writes to a sibling temporary file while active and moves it into place only after
+    /// `stopRecord()` writes the trailer successfully. A crash or process kill can still leave only the
+    /// temporary file.
     public var outputURL: URL?
+    public var streamRecordingProgressHandler: (@Sendable (StreamRecordingProgress) -> Void)?
     public var avOptions = [String: Any]()
     public var formatContextOptions = [String: Any]()
     public var decoderOptions = [String: Any]()
@@ -434,8 +794,13 @@ open class KSOptions {
     // audio
     public var audioFilters = [String]()
     public var syncDecodeAudio = false
+    /// Optional preferred hardware I/O buffer duration for decoded PCM playback.
+    public var preferredAudioIOBufferDuration: TimeInterval?
     public var audioSpatializationPreference = KSOptions.audioSpatializationPreference
     public var multichannelAudioPreference = KSOptions.multichannelAudioPreference
+    /// Last observed audio route/capability snapshot. This reports public runtime state only; it is not a hardware validation result.
+    @Published
+    public internal(set) var audioRouteDiagnostic: AudioRouteDiagnostic?
     #if !os(macOS)
     /// Overrides the AVAudioSession route sharing policy used for playback.
     /// Set this to `.longFormAudio` when an app wants audio-only AirPlay/Wi-Fi routes.
@@ -482,7 +847,32 @@ open class KSOptions {
     public var panoramaStereoLayout = KSOptions.panoramaStereoLayout
     /// Selects whether equirectangular panorama content covers a front 180-degree hemisphere or a full 360-degree sphere.
     public var panoramaFieldOfView = KSOptions.panoramaFieldOfView
+    /// Controls packed flat 3D video rendering independently from panorama mode.
+    public var stereoscopicVideoMode = KSOptions.stereoscopicVideoMode
+    /// Selects which eye is shown when flat side-by-side/top-and-bottom 3D is rendered on a normal 2D display.
+    public var stereoscopicVideoEye = KSOptions.stereoscopicVideoEye
+    /// Resolved texture packing for the selected video track. Non-mono values force the Metal path for eye cropping.
+    public internal(set) var stereoscopicVideoLayout = StereoscopicVideoLayout.mono
+    /// Opt-in conversion of ordinary 2D video into a pseudo-stereo presentation on the Metal path.
+    public var video2DTo3DMode = KSOptions.video2DTo3DMode
+    /// Horizontal disparity strength for 2D-to-3D conversion. Values are clamped to `0 ... 1` at render time.
+    public var video2DTo3DDepthStrength = KSOptions.video2DTo3DDepthStrength
+    /// Inter-eye distance scale for generated 2D-to-3D parallax. Values are clamped to `0 ... 2` at render time.
+    public var video2DTo3DDepthDistance = KSOptions.video2DTo3DDepthDistance
+    /// Curvature applied to normalized depth around the neutral plane. Values are clamped to `0.25 ... 3` at render time.
+    public var video2DTo3DDepthCurvature = KSOptions.video2DTo3DDepthCurvature
+    /// Output policy for generated stereo: selected eye for normal displays, or packed side-by-side/top-and-bottom frames.
+    public var video2DTo3DOutputLayout = KSOptions.video2DTo3DOutputLayout
+    /// Latest 2D-to-3D availability diagnostic. 2D-to-3D conversion is Vision Pro-only; regular stereoscopic and panorama rendering are separate.
+    @Published
+    public internal(set) var video2DTo3DDiagnostic: Video2DTo3DDiagnostic?
+    /// Optional app-owned depth provider, for example a private Vision Pro Depth Anything Core ML or ONNX adapter.
+    public var videoDepthEstimationProvider: (any VideoDepthEstimationProvider)?
+    /// Optional decoded-frame callback for the KSMEPlayer path. Frames are delivered off the decode/render thread.
+    public var videoFrameOutput: KSVideoFrameOutput?
     public var videoDelay = 0.0 // s
+    /// Controls MEPlayer deinterlacing on the FFmpeg software filter path.
+    /// Native AVPlayer output keeps Apple's system-managed handling.
     public var deinterlaceMode = KSOptions.deinterlaceMode
     @available(*, deprecated, message: "Use deinterlaceMode instead.")
     public var autoDeInterlace: Bool {
@@ -504,6 +894,26 @@ open class KSOptions {
     public internal(set) var videoUpscalingState = VideoUpscalingState.inactive
     /// GPU-side SDR color controls for the Metal renderer. Neutral defaults preserve existing output.
     public var videoColorAdjustment = KSOptions.videoColorAdjustment
+    /// Controls how HDR10+ dynamic metadata is treated when KSPlayer owns FFmpeg/Metal playback.
+    ///
+    /// The default preserves the system display path when that path is otherwise selected. Apps can choose
+    /// `.metalDynamicToneMapping` to force KSPlayer's conservative Metal knee/rolloff shader when structured metadata is
+    /// available, or `.staticHDR10Fallback` to force the explicit HDR10 fallback.
+    public var hdr10PlusToneMappingPolicy = KSOptions.hdr10PlusToneMappingPolicy
+    /// Last observed Dolby Vision playback capability for the selected video track.
+    /// General builds keep the explicit HDR10 base-layer fallback unless `dolbyVisionFELPlaybackPolicy` requires composition.
+    @Published
+    public internal(set) var dolbyVisionPlaybackDiagnostic: DolbyVisionPlaybackDiagnostic?
+    /// Controls Profile 7 FEL behavior when full composition is unavailable.
+    public var dolbyVisionFELPlaybackPolicy = KSOptions.dolbyVisionFELPlaybackPolicy
+    /// Optional public/open FEL compositor backend. KSPlayer does not ship one today; this hook is for future
+    /// implementations that can prove correct BL+EL+RPU residual reconstruction without private APIs.
+    public var dolbyVisionFELCompositorBackend: (any DolbyVisionFELCompositorBackend)?
+    public var dolbyVisionFELCompositorAvailability: DolbyVisionFELCompositorAvailability {
+        dolbyVisionFELCompositorBackend?.availability
+            ?? .unavailable(reason: DolbyVisionPlaybackDiagnostic.missingOpenFELCompositorReason)
+    }
+
     /// Shows a floating time bubble while hovering or scrubbing the progress bar.
     public var isProgressPreviewEnabled = KSOptions.isProgressPreviewEnabled
     /// Controls whether progress previews may warm thumbnail images in the background.
@@ -512,7 +922,7 @@ open class KSOptions {
     public var isDefinitionSwitchPrewarmingEnabled = KSOptions.isDefinitionSwitchPrewarmingEnabled
     /// Maximum time to wait for a prewarmed definition/source before falling back to the normal replace path.
     public var definitionSwitchPrewarmTimeout = KSOptions.definitionSwitchPrewarmTimeout
-    /// Automatically switches among separate KSPlayerResource definitions based on buffer health.
+    /// Automatically switches among separate KSPlayerResource definitions based on throughput and buffer health.
     ///
     /// HLS/DASH/other adaptive streaming manifests are left to the native player or FFmpeg demuxer.
     public var isAdaptiveBitrateSwitchingEnabled = KSOptions.isAdaptiveBitrateSwitchingEnabled
@@ -524,9 +934,13 @@ open class KSOptions {
     /// Enables KSPlayer's direct asynchronous VideoToolbox decode path for eligible compressed video packets.
     public var asynchronousDecompression = KSOptions.asynchronousDecompression
     public var videoDisable = false
+    /// Allows supported iOS/iPadOS players to enter system Picture in Picture automatically from inline playback.
     public var canStartPictureInPictureAutomaticallyFromInline = KSOptions.canStartPictureInPictureAutomaticallyFromInline
-    /// Controls subtitle behavior for Picture in Picture. Overlay subtitles are not burned into video unless a future renderer explicitly opts in.
+    /// Controls subtitle behavior for Picture in Picture. Overlay subtitle burn-in is opt-in and limited to supported KSMEPlayer sample-buffer frames.
     public var pictureInPictureSubtitlePolicy = KSOptions.pictureInPictureSubtitlePolicy
+    /// Last resolved PiP subtitle capability for the active player path.
+    @Published
+    public internal(set) var pictureInPictureSubtitleDiagnostic: PictureInPictureSubtitleDiagnostic?
     public var automaticWindowResize = true
     @Published
     public var videoInterlacingType: VideoInterlacingType?
@@ -609,17 +1023,26 @@ open class KSOptions {
         guard let scheme = url.ksNormalizedScheme, url.isFFmpegOnlyInputScheme else {
             return
         }
+        LowLatencyLivePlaybackPolicy.applyProtocolOptions(profile: lowLatencyLiveProfile, scheme: scheme, to: self)
         appendProtocolWhitelistEntries(Self.protocolWhitelistEntries(for: scheme))
     }
 
     private static func protocolWhitelistEntries(for scheme: String) -> [String] {
         switch scheme {
-        case "rtmp", "rtmps", "rtp", "rtsp":
+        case "rtmp", "rtp":
             return [scheme, "tcp", "udp"]
+        case "rtmps":
+            return ["rtmps", "rtmp", "tcp", "tls", "crypto"]
+        case "rtsp":
+            return ["rtsp", "rtp", "tcp", "udp", "http", "https", "tls"]
         case "nfs":
             return ["nfs", "tcp", "udp"]
         case "smb":
-            return ["smb", "tcp"]
+            return ["smb", "smb2", "tcp"]
+        case "smb2":
+            return ["smb2", "smb", "tcp"]
+        case "upnp", "dlna":
+            return [scheme, "upnp", "dlna", "http", "https", "tcp", "udp", "tls"]
         case "ftp", "sftp":
             return [scheme, "tcp"]
         case "srt":
@@ -742,16 +1165,29 @@ open class KSOptions {
     }
 
     open func videoFrameMaxCount(fps: Float, naturalSize: CGSize, isLive: Bool) -> UInt8 {
-        HighPerformanceVideoPlaybackPolicy.frameCapacity(fps: fps, naturalSize: naturalSize, isLive: isLive)
+        if let lowLatencyLiveProfile {
+            return LowLatencyLivePlaybackPolicy.frameCapacity(profile: lowLatencyLiveProfile, fps: fps, naturalSize: naturalSize, isLive: isLive)
+        }
+        return HighPerformanceVideoPlaybackPolicy.frameCapacity(fps: fps, naturalSize: naturalSize, isLive: isLive)
     }
 
     open func audioFrameMaxCount(fps: Float, channelCount: Int) -> UInt8 {
+        if let lowLatencyLiveProfile {
+            return LowLatencyLivePlaybackPolicy.audioFrameCapacity(profile: lowLatencyLiveProfile, fps: fps, channelCount: channelCount)
+        }
         let count = (Int(fps) * channelCount) >> 2
         if count >= UInt8.max {
             return UInt8.max
         } else {
             return UInt8(count)
         }
+    }
+
+    open func asyncPacketQueueMaxCount(mediaType: AVMediaType, frameCapacity: UInt8) -> Int? {
+        guard let lowLatencyLiveProfile else {
+            return nil
+        }
+        return LowLatencyLivePlaybackPolicy.packetQueueCapacity(profile: lowLatencyLiveProfile, mediaType: mediaType, frameCapacity: frameCapacity)
     }
 
     /// customize dar
@@ -769,7 +1205,70 @@ open class KSOptions {
     }
 
     open func isUseDisplayLayer(dynamicRange: DynamicRange?) -> Bool {
-        display == .plane && !videoColorAdjustment.shouldApply(dynamicRange: dynamicRange)
+        display == .plane &&
+            stereoscopicVideoLayout == .mono &&
+            !Video2DTo3DPolicy.requiresMetalRenderPath(mode: video2DTo3DMode) &&
+            !videoColorAdjustment.shouldApply(dynamicRange: dynamicRange)
+    }
+
+    open func isUseDisplayLayer(dynamicRange: DynamicRange?, hasHDR10PlusMetadata: Bool) -> Bool {
+        let usesDisplayLayer = isUseDisplayLayer(dynamicRange: dynamicRange)
+        guard hasHDR10PlusMetadata else {
+            return usesDisplayLayer
+        }
+        switch hdr10PlusToneMappingPolicy {
+        case .systemManagedWhenAvailable:
+            return usesDisplayLayer
+        case .metalDynamicToneMapping, .staticHDR10Fallback:
+            return false
+        }
+    }
+
+    open func hdr10PlusPlaybackDiagnostic(
+        hasHDR10PlusMetadata: Bool,
+        usesDisplayLayer: Bool,
+        metadata: HDR10PlusMetadata? = nil
+    ) -> HDR10PlusPlaybackDiagnostic? {
+        guard hasHDR10PlusMetadata else {
+            return nil
+        }
+        return HDR10PlusPlaybackDiagnostic(
+            renderPath: usesDisplayLayer ? .systemDisplayLayer : .metalRenderer,
+            toneMappingPolicy: hdr10PlusToneMappingPolicy,
+            metadata: metadata
+        )
+    }
+
+    open func hdr10PlusMetalToneMappingUniform(
+        metadata: HDR10PlusMetadata?,
+        dynamicRange: DynamicRange?
+    ) -> HDR10PlusMetalToneMappingUniform? {
+        guard hdr10PlusToneMappingPolicy == .metalDynamicToneMapping,
+              dynamicRange == .hdr10,
+              let metadata
+        else {
+            return nil
+        }
+        return HDR10PlusMetalToneMappingUniform(metadata: metadata)
+    }
+
+    open func video2DTo3DRenderConfiguration(hasDepthMap: Bool) -> Video2DTo3DRenderConfiguration {
+        if let reason = Video2DTo3DPolicy.unavailableReason(mode: video2DTo3DMode) {
+            video2DTo3DDiagnostic = .unavailable(reason: reason)
+        } else if video2DTo3DDiagnostic?.description == Video2DTo3DPolicy.unavailablePlatformReason {
+            video2DTo3DDiagnostic = nil
+        }
+        return Video2DTo3DPolicy.renderConfiguration(
+            mode: video2DTo3DMode,
+            depthStrength: video2DTo3DDepthStrength,
+            depthDistance: video2DTo3DDepthDistance,
+            depthCurvature: video2DTo3DDepthCurvature,
+            outputLayout: video2DTo3DOutputLayout,
+            selectedEye: stereoscopicVideoEye,
+            display: display,
+            stereoscopicVideoLayout: stereoscopicVideoLayout,
+            hasDepthMap: hasDepthMap
+        )
     }
 
     open func urlIO(log: String) {
@@ -783,6 +1282,7 @@ open class KSOptions {
     }
 
     private var idetTypeMap = [VideoInterlacingType: UInt]()
+    private var managedDeinterlaceFilters = [String]()
     open func filter(log: String) {
         if log.starts(with: "Repeated Field:"), deinterlaceMode != .disabled {
             for str in log.split(separator: ",") {
@@ -824,6 +1324,16 @@ open class KSOptions {
      */
     open func process(assetTrack: some MediaPlayerTrack) {
         if assetTrack.mediaType == .video {
+            if let track = assetTrack as? FFmpegAssetTrack {
+                dolbyVisionPlaybackDiagnostic = track.dolbyVisionPlaybackDiagnostic ?? track.dovi.map {
+                    DolbyVisionPlaybackDiagnostic(configuration: $0, felPlaybackPolicy: dolbyVisionFELPlaybackPolicy)
+                }
+            } else {
+                dolbyVisionPlaybackDiagnostic = assetTrack.dovi.map {
+                    DolbyVisionPlaybackDiagnostic(configuration: $0, felPlaybackPolicy: dolbyVisionFELPlaybackPolicy)
+                }
+            }
+            removeManagedDeinterlaceFilters()
             if display == .plane {
                 let detectedConfiguration = (assetTrack as? FFmpegAssetTrack)?.panoramaConfiguration
                     ?? PanoramaProjectionPolicy.detectedConfiguration(formatDescription: assetTrack.formatDescription)
@@ -839,9 +1349,16 @@ open class KSOptions {
                     display = panoramaStereoLayout.isStereo ? .vrBox : .vr
                 }
             }
+            let detectedStereoLayout = (assetTrack as? FFmpegAssetTrack)?.stereoscopicVideoLayout
+                ?? StereoscopicVideoPolicy.detectedLayout(formatDescription: assetTrack.formatDescription)
+            stereoscopicVideoLayout = StereoscopicVideoPolicy.resolvedLayout(
+                mode: stereoscopicVideoMode,
+                detectedLayout: detectedStereoLayout
+            ) ?? .mono
             let decision = VideoDeinterlacePolicy.decision(
                 mode: deinterlaceMode,
                 fieldOrder: assetTrack.fieldOrder,
+                formatDescription: assetTrack.formatDescription,
                 fps: assetTrack.nominalFrameRate,
                 naturalSize: assetTrack.naturalSize,
                 yadifMode: KSOptions.yadifMode,
@@ -853,6 +1370,7 @@ open class KSOptions {
                 asynchronousDecompression = false
                 for filter in decision.filters where !containsEquivalentVideoFilter(filter) {
                     videoFilters.append(filter)
+                    managedDeinterlaceFilters.append(filter)
                 }
                 if decision.doublesFrameRate {
                     assetTrack.nominalFrameRate = assetTrack.nominalFrameRate * 2
@@ -877,6 +1395,15 @@ open class KSOptions {
         }
     }
 
+    private func removeManagedDeinterlaceFilters() {
+        for filter in managedDeinterlaceFilters {
+            if let index = videoFilters.firstIndex(of: filter) {
+                videoFilters.remove(at: index)
+            }
+        }
+        managedDeinterlaceFilters.removeAll()
+    }
+
     private func containsEquivalentVideoFilter(_ filter: String) -> Bool {
         if filter == "idet" {
             return videoFilters.contains("idet")
@@ -891,6 +1418,11 @@ open class KSOptions {
 
     @MainActor
     open func updateVideo(refreshRate: Float, isDovi: Bool, formatDescription: CMFormatDescription?) {
+        updateVideo(refreshRate: refreshRate, dynamicRange: isDovi ? .dolbyVision : formatDescription?.dynamicRange)
+    }
+
+    @MainActor
+    open func updateVideo(refreshRate: Float, dynamicRange: DynamicRange?) {
         #if os(tvOS) || os(xrOS)
         /**
          快速更改preferredDisplayCriteria，会导致isDisplayModeSwitchInProgress变成true。
@@ -901,7 +1433,7 @@ open class KSOptions {
         else {
             return
         }
-        if let dynamicRange = isDovi ? .dolbyVision : formatDescription?.dynamicRange {
+        if let dynamicRange {
             displayManager.preferredDisplayCriteria = AVDisplayCriteria(refreshRate: refreshRate, videoDynamicRange: dynamicRange.rawValue)
         }
         #endif
@@ -917,6 +1449,19 @@ open class KSOptions {
         } else {
             if diff < -4 / fps {
                 videoClockDelayCount += 1
+                if let lowLatencyLiveProfile {
+                    let type = LowLatencyLivePlaybackPolicy.clockProcessType(
+                        profile: lowLatencyLiveProfile,
+                        diff: diff,
+                        fps: fps,
+                        frameCount: frameCount
+                    )
+                    if case .next = type {
+                        return (diff, .next)
+                    }
+                    KSLog("[video] low latency live delay=\(diff), frameCount=\(frameCount), action=\(type)")
+                    return (diff, type)
+                }
                 let log = "[video] video delay=\(diff), clock=\(desire), delay count=\(videoClockDelayCount), frameCount=\(frameCount)"
                 if frameCount == 1 {
                     if diff < -1, videoClockDelayCount % 10 == 0 {
@@ -1041,6 +1586,10 @@ enum VideoDeinterlacePolicy {
         }
     }
 
+    static func detectedInterlacingType(formatDescription: CMFormatDescription?) -> VideoInterlacingType? {
+        detectedInterlacingType(fieldOrder: FFmpegFieldOrder.detected(formatDescription: formatDescription))
+    }
+
     static func detectedInterlacingType(frameFlags: Int32) -> VideoInterlacingType {
         guard frameFlags & avFrameFlagInterlaced == avFrameFlagInterlaced else {
             return .progressive
@@ -1051,12 +1600,14 @@ enum VideoDeinterlacePolicy {
     static func decision(
         mode: VideoDeinterlaceMode,
         fieldOrder: FFmpegFieldOrder,
+        formatDescription: CMFormatDescription? = nil,
         fps: Float,
         naturalSize: CGSize,
         yadifMode: Int,
         addIdet: Bool
     ) -> VideoDeinterlaceDecision {
         let detectedType = detectedInterlacingType(fieldOrder: fieldOrder)
+            ?? detectedInterlacingType(formatDescription: formatDescription)
         switch mode {
         case .disabled:
             return VideoDeinterlaceDecision(filters: [], detectedInterlacingType: detectedType, skipReason: "disabled")
@@ -1315,6 +1866,10 @@ enum LowLatencyLivePlaybackPolicy {
     private static let lanProbeSize: Int64 = 32 * 1024
     private static let lanMaxAnalyzeDuration: Int64 = 100 * 1000
     private static let lanMaxDelay = 100 * 1000
+    private static let lanReadWriteTimeout = 2 * 1000 * 1000
+    private static let lanPreferredAudioIOBufferDuration = 0.005
+    private static let lanVideoPacketQueueFloor = 6
+    private static let lanAudioPacketQueueCapacity = 4
 
     static func apply(profile: KSLowLatencyLiveProfile, to options: KSOptions) {
         switch profile {
@@ -1332,11 +1887,81 @@ enum LowLatencyLivePlaybackPolicy {
             options.asynchronousDecompression = true
             options.syncDecodeVideo = false
             options.syncDecodeAudio = false
+            options.videoAdaptable = false
+            options.preferredAudioIOBufferDuration = options.preferredAudioIOBufferDuration ?? lanPreferredAudioIOBufferDuration
             options.probesize = options.probesize ?? lanProbeSize
             options.maxAnalyzeDuration = options.maxAnalyzeDuration ?? lanMaxAnalyzeDuration
             setDefaultFormatOption("max_delay", value: lanMaxDelay, options: options)
+            setDefaultFormatOption("rw_timeout", value: lanReadWriteTimeout, options: options)
+            setDefaultFormatOption("timeout", value: lanReadWriteTimeout, options: options)
             appendListOption("fflags", value: "nobuffer", separator: "+", options: options)
             appendListOption("avioflags", value: "direct", separator: "+", options: options)
+            appendListOption("flags", value: "low_delay", separator: "+", options: &options.decoderOptions)
+        }
+    }
+
+    static func applyProtocolOptions(profile: KSLowLatencyLiveProfile?, scheme: String, to options: KSOptions) {
+        guard profile == .lan else {
+            return
+        }
+        switch scheme {
+        case "rtsp":
+            setDefaultFormatOption("rtsp_transport", value: "udp", options: options)
+            setDefaultFormatOption("stimeout", value: lanReadWriteTimeout, options: options)
+            setDefaultFormatOption("reorder_queue_size", value: 0, options: options)
+        case "rtp", "udp":
+            setDefaultFormatOption("fifo_size", value: 50 * 188, options: options)
+            setDefaultFormatOption("overrun_nonfatal", value: 1, options: options)
+        default:
+            break
+        }
+    }
+
+    static func frameCapacity(profile: KSLowLatencyLiveProfile, fps: Float, naturalSize: CGSize, isLive: Bool) -> UInt8 {
+        switch profile {
+        case .lan:
+            guard isLive else {
+                return HighPerformanceVideoPlaybackPolicy.frameCapacity(fps: fps, naturalSize: naturalSize, isLive: false)
+            }
+            return min(HighPerformanceVideoPlaybackPolicy.frameCapacity(fps: fps, naturalSize: naturalSize, isLive: true), 6)
+        }
+    }
+
+    static func audioFrameCapacity(profile: KSLowLatencyLiveProfile, fps _: Float, channelCount _: Int) -> UInt8 {
+        switch profile {
+        case .lan:
+            return 4
+        }
+    }
+
+    static func packetQueueCapacity(profile: KSLowLatencyLiveProfile, mediaType: AVMediaType, frameCapacity: UInt8) -> Int {
+        switch profile {
+        case .lan:
+            if mediaType == .video {
+                return max(lanVideoPacketQueueFloor, Int(frameCapacity) * 2)
+            }
+            if mediaType == .audio {
+                return lanAudioPacketQueueCapacity
+            }
+            return Int(frameCapacity)
+        }
+    }
+
+    static func clockProcessType(profile: KSLowLatencyLiveProfile, diff: Double, fps: Double, frameCount: Int) -> ClockProcessType {
+        switch profile {
+        case .lan:
+            let normalizedFPS = fps.isFinite && fps > 0 ? fps : 60
+            let frameInterval = 1 / normalizedFPS
+            if diff < -0.5, frameCount <= 1 {
+                return .dropGOPPacket
+            }
+            if diff < -0.25, frameCount > 2 {
+                return .flush
+            }
+            if diff < -2 * frameInterval {
+                return .dropNextFrame
+            }
+            return .next
         }
     }
 
@@ -1359,15 +1984,105 @@ enum LowLatencyLivePlaybackPolicy {
         return nil
     }
 
+    static func audioLatencyEstimate(profile: KSLowLatencyLiveProfile, audioFrameCount: Int, audioFPS: Float, preferredAudioIOBufferDuration: TimeInterval?) -> TimeInterval? {
+        guard profile == .lan else {
+            return nil
+        }
+        let queueDuration: TimeInterval?
+        if audioFrameCount > 0, audioFPS.isFinite, audioFPS > 0 {
+            queueDuration = TimeInterval(audioFrameCount) / TimeInterval(audioFPS)
+        } else {
+            queueDuration = nil
+        }
+        let ioBufferDuration = preferredAudioIOBufferDuration.flatMap { duration in
+            duration.isFinite && duration > 0 ? duration : nil
+        }
+        switch (queueDuration, ioBufferDuration) {
+        case let (queueDuration?, ioBufferDuration?):
+            return queueDuration + ioBufferDuration
+        case let (queueDuration?, nil):
+            return queueDuration
+        case let (nil, ioBufferDuration?):
+            return ioBufferDuration
+        case (nil, nil):
+            return nil
+        }
+    }
+
+    static func sourceRecommendations(profile: KSLowLatencyLiveProfile) -> LowLatencyLiveSourceRecommendations {
+        switch profile {
+        case .lan:
+            return LowLatencyLiveSourceRecommendations(
+                profile: profile,
+                encoder: LowLatencyLiveEncoderSettingsRecommendation(
+                    preferredCodecs: ["H.264 hardware profile supported by the target device", "HEVC only after device decode validation"],
+                    maximumGOPDuration: 0.5,
+                    maximumBFrameCount: 0,
+                    disablesLookahead: true,
+                    usesConstrainedBitrate: true,
+                    notes: [
+                        "Use an all-P or IP-only low-delay GOP; avoid B-frames and encoder lookahead.",
+                        "Keep camera-side buffering and scene pre-processing features disabled when latency matters.",
+                        "Prefer the lowest resolution, frame rate, and bitrate that satisfy the product requirement before testing 4K."
+                    ]
+                ),
+                rtsp: LowLatencyLiveTransportSettingsRecommendation(
+                    protocolName: "RTSP",
+                    preferredTransport: "UDP/RTP on trusted LAN; TCP only when packet loss is worse than TCP head-of-line blocking",
+                    serverBufferDuration: 0.1,
+                    rtpReorderQueueSize: 0,
+                    usesWallClockTimestamps: true,
+                    notes: [
+                        "Disable server-side burst buffering, large jitter buffers, and long client pre-roll.",
+                        "Keep RTP packetization mode compatible with the camera and server; validate packet loss on the target switch/Wi-Fi.",
+                        "Expose RTP/RTCP timestamps so player metrics can be correlated with camera/server logs."
+                    ]
+                ),
+                rtp: LowLatencyLiveTransportSettingsRecommendation(
+                    protocolName: "RTP/UDP",
+                    preferredTransport: "Unicast UDP on wired LAN where possible",
+                    serverBufferDuration: 0.1,
+                    rtpReorderQueueSize: 0,
+                    usesWallClockTimestamps: true,
+                    notes: [
+                        "Avoid RTP reorder queues unless the measured network requires them.",
+                        "Size socket/fifo buffers for short jitter absorption, not seconds of backlog.",
+                        "Use RTCP sender reports or an equivalent clock source when comparing capture and render timestamps."
+                    ]
+                ),
+                validationChecklist: [
+                    "Capture camera time, server ingress/egress time, player diagnostic timestamps, and a high-speed glass-to-glass measurement in the same run.",
+                    "Run wired Ethernet before Wi-Fi so encoder/server latency is separated from network jitter.",
+                    "Repeat each run after a cold start, a steady-state minute, and a network-loss/jitter injection pass.",
+                    "Record device model, OS version, codec, resolution, frame rate, bitrate, GOP length, B-frame count, transport, and server buffer settings."
+                ],
+                caveats: [
+                    "These settings are recommendations for validation, not a latency guarantee.",
+                    "Sub-200ms claims require measurement with the actual camera, RTSP/RTP server, network, route, and playback device."
+                ]
+            )
+        }
+    }
+
     private static func setDefaultFormatOption(_ key: String, value: Any, options: KSOptions) {
         if options.formatContextOptions[key] == nil {
             options.formatContextOptions[key] = value
         }
     }
 
+    private static func setDefaultFormatOption(_ key: String, value: Any, options: inout [String: Any]) {
+        if options[key] == nil {
+            options[key] = value
+        }
+    }
+
     private static func appendListOption(_ key: String, value: String, separator: Character, options: KSOptions) {
-        guard let existing = options.formatContextOptions[key] as? String, !existing.isEmpty else {
-            options.formatContextOptions[key] = value
+        appendListOption(key, value: value, separator: separator, options: &options.formatContextOptions)
+    }
+
+    private static func appendListOption(_ key: String, value: String, separator: Character, options: inout [String: Any]) {
+        guard let existing = options[key] as? String, !existing.isEmpty else {
+            options[key] = value
             return
         }
         let values = existing
@@ -1376,7 +2091,7 @@ enum LowLatencyLivePlaybackPolicy {
         guard !values.contains(value) else {
             return
         }
-        options.formatContextOptions[key] = existing + String(separator) + value
+        options[key] = existing + String(separator) + value
     }
 
     private static func pixelCount(_ size: CGSize) -> Int {
@@ -1387,6 +2102,10 @@ enum LowLatencyLivePlaybackPolicy {
 }
 
 public enum SeamlessLoopPlaybackPolicy {
+    public static func shouldManuallyRestartAVPlayer(isLoopPlay: Bool, isSeamlessLoopEnabled: Bool) -> Bool {
+        isLoopPlay && !isSeamlessLoopEnabled
+    }
+
     public static func avPlayerActionAtItemEnd(isLoopPlay: Bool, isSeamlessLoopEnabled: Bool) -> AVPlayer.ActionAtItemEnd {
         isLoopPlay && isSeamlessLoopEnabled ? .none : .pause
     }
@@ -1399,9 +2118,14 @@ public enum SeamlessLoopPlaybackPolicy {
         isLoopPlay: Bool,
         isSeamlessLoopEnabled: Bool,
         usesAsyncPacketQueue: Bool,
-        tracksAlreadyLooping: Bool
+        tracksAlreadyLooping: Bool,
+        canSeekToStart: Bool = true
     ) -> Bool {
-        isLoopPlay && isSeamlessLoopEnabled && usesAsyncPacketQueue && !tracksAlreadyLooping
+        isLoopPlay && isSeamlessLoopEnabled && usesAsyncPacketQueue && !tracksAlreadyLooping && canSeekToStart
+    }
+
+    public static func canRestartMEPlayerLoop(isLoopPlay: Bool, duration: TimeInterval, isSeekable: Bool) -> Bool {
+        isLoopPlay && duration > 0 && isSeekable
     }
 }
 
@@ -1449,9 +2173,18 @@ public extension KSOptions {
     nonisolated(unsafe) static var isAdaptiveBitrateSwitchingEnabled = false
     nonisolated(unsafe) static var adaptiveBitrateSwitchingPolicy = KSAdaptiveBitrateSwitchingPolicy()
     nonisolated(unsafe) static var videoColorAdjustment = VideoColorAdjustment.neutral
+    nonisolated(unsafe) static var hdr10PlusToneMappingPolicy = HDR10PlusToneMappingPolicy.systemManagedWhenAvailable
+    nonisolated(unsafe) static var dolbyVisionFELPlaybackPolicy = DolbyVisionFELPlaybackPolicy.allowBaseLayerFallback
     nonisolated(unsafe) static var panoramaMode = PanoramaMode.disabled
     nonisolated(unsafe) static var panoramaStereoLayout = PanoramaStereoLayout.mono
     nonisolated(unsafe) static var panoramaFieldOfView = PanoramaFieldOfView.degrees360
+    nonisolated(unsafe) static var stereoscopicVideoMode = StereoscopicVideoMode.disabled
+    nonisolated(unsafe) static var stereoscopicVideoEye = StereoscopicVideoEye.left
+    nonisolated(unsafe) static var video2DTo3DMode = Video2DTo3DMode.disabled
+    nonisolated(unsafe) static var video2DTo3DDepthStrength = Video2DTo3DPolicy.defaultDepthStrength
+    nonisolated(unsafe) static var video2DTo3DDepthDistance = Video2DTo3DPolicy.defaultDepthDistance
+    nonisolated(unsafe) static var video2DTo3DDepthCurvature = Video2DTo3DPolicy.defaultDepthCurvature
+    nonisolated(unsafe) static var video2DTo3DOutputLayout = Video2DTo3DOutputLayout.selectedEye
     nonisolated(unsafe) static var deinterlaceMode = VideoDeinterlaceMode.automatic
     nonisolated(unsafe) static var subtitleCaptionAppearancePolicy = SubtitleCaptionAppearancePolicy.never
     nonisolated(unsafe) static var isAssSubtitleImageRenderingEnabled = true
@@ -1490,9 +2223,10 @@ public extension KSOptions {
         return Int(ncpu)
     }
 
-    static func setAudioSession(options: KSOptions? = nil) {
+    static func setAudioSession(options: KSOptions? = nil, playbackPipeline: AudioPlaybackPipeline = .nativeAVPlayer) {
         #if os(macOS)
 //        try? AVAudioSession.sharedInstance().setRouteSharingPolicy(.longFormAudio)
+        updateAudioRouteDiagnostic(options: options, playbackPipeline: playbackPipeline)
         #else
         var category = AVAudioSession.sharedInstance().category
         if category != .playAndRecord {
@@ -1500,7 +2234,16 @@ public extension KSOptions {
         }
         let policy = AudioRouteSharingPolicyResolver.resolvedPolicy(optionPolicy: options?.audioRouteSharingPolicy, defaultPolicy: audioRouteSharingPolicy)
         try? AVAudioSession.sharedInstance().setCategory(category, mode: .moviePlayback, policy: policy)
-        configureMultichannelContentSupport(options: options, sourceChannelCount: nil, isSpatialRoute: nil)
+        if let preferredAudioIOBufferDuration = options?.preferredAudioIOBufferDuration {
+            try? AVAudioSession.sharedInstance().setPreferredIOBufferDuration(preferredAudioIOBufferDuration)
+        }
+        let supportsMultichannel = configureMultichannelContentSupport(options: options, sourceChannelCount: nil, isSpatialRoute: nil)
+        updateAudioRouteDiagnostic(
+            options: options,
+            playbackPipeline: playbackPipeline,
+            routeSharingPolicy: routeSharingPolicyDescription(policy),
+            configuredSupportsMultichannelContent: supportsMultichannel
+        )
         try? AVAudioSession.sharedInstance().setActive(true)
         #endif
     }
@@ -1554,23 +2297,161 @@ public extension KSOptions {
         }
     }
 
-    private static func configureMultichannelContentSupport(options: KSOptions?, sourceChannelCount: AVAudioChannelCount?, isSpatialRoute: Bool?) {
+    @discardableResult
+    private static func configureMultichannelContentSupport(options: KSOptions?, sourceChannelCount: AVAudioChannelCount?, isSpatialRoute: Bool?) -> Bool {
         guard #available(tvOS 15.0, iOS 15.0, *) else {
-            return
+            return false
         }
         let spatialPreference = options?.audioSpatializationPreference ?? KSOptions.audioSpatializationPreference
         let multichannelPreference = options?.multichannelAudioPreference ?? KSOptions.multichannelAudioPreference
-        let supportsMultichannel: Bool
-        switch spatialPreference {
-        case .automatic:
-            supportsMultichannel = multichannelPreference != .stereo && ((isSpatialRoute ?? false) || (sourceChannelCount ?? 0) > 2)
-        case .enabled:
-            supportsMultichannel = multichannelPreference != .stereo
-        case .disabled:
-            supportsMultichannel = false
-        }
+        let supportsMultichannel = AudioMultichannelContentSupportResolver.supportsMultichannelContent(
+            spatialPreference: spatialPreference,
+            multichannelPreference: multichannelPreference,
+            sourceChannelCount: sourceChannelCount,
+            isSpatialRoute: isSpatialRoute
+        )
         try? AVAudioSession.sharedInstance().setSupportsMultichannelContent(supportsMultichannel)
         KSLog("[audio] supportsMultichannelContent: \(supportsMultichannel), spatialPreference: \(spatialPreference), multichannelPreference: \(multichannelPreference)")
+        return supportsMultichannel
+    }
+    #endif
+
+    @discardableResult
+    static func updateAudioRouteDiagnostic(
+        options: KSOptions?,
+        playbackPipeline: AudioPlaybackPipeline,
+        sourceChannelCount: AVAudioChannelCount? = nil,
+        containsEncodedPassthroughCandidate: Bool = false,
+        allowsExternalPlayback: Bool? = nil,
+        usesExternalPlaybackWhileExternalScreenIsActive: Bool? = nil,
+        isExternalPlaybackActive: Bool? = nil,
+        routeSharingPolicy: String? = nil,
+        configuredSupportsMultichannelContent: Bool? = nil
+    ) -> AudioRouteDiagnostic {
+        let spatialPreference = options?.audioSpatializationPreference ?? KSOptions.audioSpatializationPreference
+        let multichannelPreference = options?.multichannelAudioPreference ?? KSOptions.multichannelAudioPreference
+        let spatialRoute = currentRouteContainsSpatialAudioOutput()
+        let supportsMultichannel = configuredSupportsMultichannelContent ?? AudioMultichannelContentSupportResolver.supportsMultichannelContent(
+            spatialPreference: spatialPreference,
+            multichannelPreference: multichannelPreference,
+            sourceChannelCount: sourceChannelCount,
+            isSpatialRoute: spatialRoute
+        )
+        let resolvedRouteSharingPolicy = routeSharingPolicy ?? currentRouteSharingPolicyDescription(options: options)
+        let diagnostic = AudioRouteDiagnostic(
+            playbackPipeline: playbackPipeline,
+            outputPorts: currentRouteOutputDiagnostics(),
+            maximumOutputNumberOfChannels: maximumOutputNumberOfChannels(),
+            preferredOutputNumberOfChannels: preferredOutputNumberOfChannels(),
+            outputNumberOfChannels: outputNumberOfChannels(),
+            outputLatency: outputLatency(),
+            routeSharingPolicy: resolvedRouteSharingPolicy,
+            configuredSupportsMultichannelContent: supportsMultichannel,
+            spatialPreference: spatialPreference,
+            multichannelPreference: multichannelPreference,
+            sourceChannelCount: sourceChannelCount,
+            allowsExternalPlayback: allowsExternalPlayback,
+            usesExternalPlaybackWhileExternalScreenIsActive: usesExternalPlaybackWhileExternalScreenIsActive,
+            isExternalPlaybackActive: isExternalPlaybackActive,
+            encodedPassthroughPolicy: EncodedAudioPassthroughPolicyResolver.policy(
+                pipeline: playbackPipeline,
+                containsEncodedPassthroughCandidate: containsEncodedPassthroughCandidate
+            )
+        )
+        options?.audioRouteDiagnostic = diagnostic
+        KSLog("[audio] route diagnostic: \(diagnostic.description), passthroughReason: \(diagnostic.encodedPassthroughPolicy.reason)")
+        return diagnostic
+    }
+
+    private static func currentRouteOutputDiagnostics() -> [AudioRouteOutputDiagnostic] {
+        #if os(macOS)
+        return []
+        #else
+        return AVAudioSession.sharedInstance().currentRoute.outputs.map { output in
+            let isSpatialAudioEnabled: Bool?
+            if #available(tvOS 15.0, iOS 15.0, *) {
+                isSpatialAudioEnabled = output.isSpatialAudioEnabled
+            } else {
+                isSpatialAudioEnabled = nil
+            }
+            return AudioRouteOutputDiagnostic(
+                portName: output.portName,
+                portType: output.portType.rawValue,
+                outputKind: AudioRouteOutputClassifier.outputKind(portTypeRawValue: output.portType.rawValue),
+                channelCount: output.channels?.count,
+                isSpatialAudioEnabled: isSpatialAudioEnabled
+            )
+        }
+        #endif
+    }
+
+    private static func currentRouteContainsSpatialAudioOutput() -> Bool? {
+        #if os(macOS)
+        return nil
+        #else
+        if #available(tvOS 15.0, iOS 15.0, *) {
+            return AVAudioSession.sharedInstance().currentRoute.outputs.contains { $0.isSpatialAudioEnabled }
+        } else {
+            return nil
+        }
+        #endif
+    }
+
+    private static func maximumOutputNumberOfChannels() -> Int? {
+        #if os(macOS)
+        return nil
+        #else
+        return AVAudioSession.sharedInstance().maximumOutputNumberOfChannels
+        #endif
+    }
+
+    private static func preferredOutputNumberOfChannels() -> Int? {
+        #if os(macOS)
+        return nil
+        #else
+        return AVAudioSession.sharedInstance().preferredOutputNumberOfChannels
+        #endif
+    }
+
+    private static func outputNumberOfChannels() -> Int? {
+        #if os(macOS)
+        return nil
+        #else
+        return AVAudioSession.sharedInstance().outputNumberOfChannels
+        #endif
+    }
+
+    private static func outputLatency() -> TimeInterval? {
+        #if os(macOS)
+        return nil
+        #else
+        return AVAudioSession.sharedInstance().outputLatency
+        #endif
+    }
+
+    private static func currentRouteSharingPolicyDescription(options: KSOptions?) -> String? {
+        #if os(macOS)
+        return nil
+        #else
+        let policy = AudioRouteSharingPolicyResolver.resolvedPolicy(optionPolicy: options?.audioRouteSharingPolicy, defaultPolicy: audioRouteSharingPolicy)
+        return routeSharingPolicyDescription(policy)
+        #endif
+    }
+
+    #if !os(macOS)
+    private static func routeSharingPolicyDescription(_ policy: AVAudioSession.RouteSharingPolicy) -> String {
+        switch policy {
+        case .default:
+            return "default"
+        case .longFormAudio:
+            return "longFormAudio"
+        case .longFormVideo:
+            return "longFormVideo"
+        case .independent:
+            return "independent"
+        @unknown default:
+            return "unknown(\(policy.rawValue))"
+        }
     }
     #endif
 }

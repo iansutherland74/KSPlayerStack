@@ -420,6 +420,27 @@ public extension URL {
         scheme?.lowercased()
     }
 
+    var ksRedactedAbsoluteString: String {
+        guard !isFileURL else {
+            return path
+        }
+        guard var components = URLComponents(url: self, resolvingAgainstBaseURL: false) else {
+            return scheme.map { "\($0)://redacted" } ?? "redacted-url"
+        }
+        if components.user != nil {
+            components.user = "redacted"
+        }
+        if components.password != nil {
+            components.password = "redacted"
+        }
+        if let queryItems = components.queryItems, !queryItems.isEmpty {
+            components.queryItems = queryItems.map { item in
+                URLQueryItem(name: item.name, value: item.value == nil ? nil : "redacted")
+            }
+        }
+        return components.string ?? (scheme.map { "\($0)://redacted" } ?? "redacted-url")
+    }
+
     var isFFmpegOnlyInputScheme: Bool {
         guard let scheme = ksNormalizedScheme else {
             return false
@@ -432,6 +453,7 @@ public extension URL {
     }
 
     private static let ffmpegOnlyInputSchemes: Set<String> = [
+        "dlna",
         "ftp",
         "nfs",
         "rtmp",
@@ -439,6 +461,7 @@ public extension URL {
         "rtp",
         "rtsp",
         "smb",
+        "smb2",
         "sftp",
         "srt",
         "udp",
@@ -816,8 +839,7 @@ extension CGImage {
             height = max(height, Int(rect.maxY))
         }
         let bitsPerComponent = 8
-        // RGBA(的bytes) * bitsPerComponent *width
-        let bytesPerRow = 4 * 8 * bitsPerComponent * width
+        let bytesPerRow = 4 * width
         return autoreleasepool {
             let context = CGContext(data: nil, width: width, height: height, bitsPerComponent: bitsPerComponent, bytesPerRow: bytesPerRow, space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
             guard let context else {

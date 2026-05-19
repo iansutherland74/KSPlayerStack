@@ -77,6 +77,18 @@ class MetalRender {
         return buffer
     }()
 
+    private lazy var neutralDepthTexture: MTLTexture? = {
+        var value = Float(0.5)
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .r32Float, width: 1, height: 1, mipmapped: false)
+        descriptor.usage = [.shaderRead]
+        guard let texture = MetalRender.device.makeTexture(descriptor: descriptor) else {
+            return nil
+        }
+        texture.label = "neutralDepth"
+        texture.replace(region: MTLRegionMake2D(0, 0, 1, 1), mipmapLevel: 0, withBytes: &value, bytesPerRow: MemoryLayout<Float>.stride)
+        return texture
+    }()
+
     func clear(drawable: MTLDrawable) {
         renderPassDescriptor.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
         renderPassDescriptor.colorAttachments[0].loadAction = .clear
@@ -98,6 +110,11 @@ class MetalRender {
         drawable: CAMetalDrawable,
         colorAdjustment: VideoColorAdjustment = .neutral,
         dynamicRange: DynamicRange? = nil,
+        hdr10PlusToneMapping: HDR10PlusMetalToneMappingUniform? = nil,
+        video2DTo3D: Video2DTo3DRenderConfiguration = .disabled,
+        depthTexture: MTLTexture? = nil,
+        stereoscopicVideoLayout: StereoscopicVideoLayout = .mono,
+        stereoscopicVideoEye: StereoscopicVideoEye = .left,
         panoramaStereoLayout: PanoramaStereoLayout = .mono,
         panoramaFieldOfView: PanoramaFieldOfView = .degrees360
     ) {
@@ -116,7 +133,17 @@ class MetalRender {
         }
         setFragmentBuffer(pixelBuffer: pixelBuffer, encoder: encoder)
         setColorAdjustment(colorAdjustment, dynamicRange: dynamicRange, encoder: encoder)
-        display.set(encoder: encoder, panoramaStereoLayout: panoramaStereoLayout, panoramaFieldOfView: panoramaFieldOfView)
+        setHDR10PlusToneMapping(hdr10PlusToneMapping, encoder: encoder)
+        setVideo2DTo3D(video2DTo3D, depthTexture: depthTexture, encoder: encoder)
+        display.set(
+            encoder: encoder,
+            drawableSize: CGSize(width: drawable.texture.width, height: drawable.texture.height),
+            video2DTo3D: video2DTo3D,
+            stereoscopicVideoLayout: stereoscopicVideoLayout,
+            stereoscopicVideoEye: stereoscopicVideoEye,
+            panoramaStereoLayout: panoramaStereoLayout,
+            panoramaFieldOfView: panoramaFieldOfView
+        )
         encoder.popDebugGroup()
         encoder.endEncoding()
         commandBuffer.present(drawable)
@@ -155,6 +182,31 @@ class MetalRender {
             shouldApply ? 1 : 0
         )
         encoder.setFragmentBytes(&uniforms, length: MemoryLayout<SIMD4<Float>>.stride, index: 3)
+    }
+
+    private func setHDR10PlusToneMapping(_ toneMapping: HDR10PlusMetalToneMappingUniform?, encoder: MTLRenderCommandEncoder) {
+        var global = HDR10PlusMetalToneMappingUniform.disabled.global
+        if let toneMapping, !toneMapping.windows.isEmpty {
+            let windowBuffer = toneMapping.windows.withUnsafeBytes { rawBuffer -> MTLBuffer? in
+                guard let baseAddress = rawBuffer.baseAddress else {
+                    return nil
+                }
+                return MetalRender.device.makeBuffer(bytes: baseAddress, length: rawBuffer.count)
+            }
+            if let windowBuffer {
+                global = toneMapping.global
+                encoder.setFragmentBuffer(windowBuffer, offset: 0, index: 5)
+            }
+        }
+        encoder.setFragmentBytes(&global, length: MemoryLayout<SIMD4<Float>>.stride, index: 4)
+    }
+
+    private func setVideo2DTo3D(_ configuration: Video2DTo3DRenderConfiguration, depthTexture: MTLTexture?, encoder: MTLRenderCommandEncoder) {
+        var uniform = configuration.fragmentUniform(for: configuration.selectedEye)
+        var shapeUniform = configuration.shapeUniform()
+        encoder.setFragmentTexture(depthTexture ?? neutralDepthTexture, index: 3)
+        encoder.setFragmentBytes(&uniform, length: MemoryLayout<SIMD4<Float>>.stride, index: 6)
+        encoder.setFragmentBytes(&shapeUniform, length: MemoryLayout<SIMD4<Float>>.stride, index: 7)
     }
 
     static func makePipelineState(fragmentFunction: String, isSphere: Bool = false, bitDepth: Int32 = 8) -> MTLRenderPipelineState {

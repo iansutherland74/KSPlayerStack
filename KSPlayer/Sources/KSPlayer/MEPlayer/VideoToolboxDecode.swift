@@ -7,6 +7,7 @@
 
 import FFmpegKit
 import Foundation
+import Libavcodec
 import Libavformat
 #if canImport(VideoToolbox)
 import VideoToolbox
@@ -56,6 +57,10 @@ final class VideoToolboxDecode: DecodeProtocol, @unchecked Sendable {
         guard let corePacket = packet.corePacket?.pointee, let data = corePacket.data else {
             return
         }
+        let hdr10Plus = packetHDR10PlusMetadata(from: packet)
+        if hdr10Plus.hasMetadata {
+            session.assetTrack.markHDR10PlusMetadataDetected(hdr10Plus.metadata)
+        }
         do {
             let sampleBuffer = try session.formatDescription.getSampleBuffer(
                 packet: packet,
@@ -78,7 +83,9 @@ final class VideoToolboxDecode: DecodeProtocol, @unchecked Sendable {
             let position = packet.position
             let nominalFrameRate = session.assetTrack.nominalFrameRate
             let isDovi = session.assetTrack.dovi != nil
+            let dolbyVisionFallbackDynamicRange = session.assetTrack.dovi?.hdrFallbackDynamicRange
             let fieldOrder = session.assetTrack.fieldOrder
+            let formatDescription = session.formatDescription
             let timebase = session.assetTrack.timebase
             let completion = SendableDecodeCompletion(handler: completionHandler)
             let status = VTDecompressionSessionDecodeFrame(session.decompressionSession, sampleBuffer: sampleBuffer, flags: flags, infoFlagsOut: &flagOut) { [weak self] status, infoFlags, imageBuffer, _, _ in
@@ -97,14 +104,25 @@ final class VideoToolboxDecode: DecodeProtocol, @unchecked Sendable {
                     }
                     return
                 }
-                let frame = VideoVTBFrame(fps: nominalFrameRate, isDovi: isDovi)
+                let frame = VideoVTBFrame(
+                    fps: nominalFrameRate,
+                    isDovi: isDovi,
+                    dolbyVisionFallbackDynamicRange: dolbyVisionFallbackDynamicRange
+                )
                 frame.interlacingType = VideoDeinterlacePolicy.detectedInterlacingType(fieldOrder: fieldOrder)
+                    ?? VideoDeinterlacePolicy.detectedInterlacingType(formatDescription: formatDescription)
                 frame.corePixelBuffer = imageBuffer
                 frame.timebase = timebase
                 frame.position = position
                 frame.timestamp = self.updateTiming(timestamp: timestamp, isKeyFrame: isKeyFrame, packetFlags: packetFlags, duration: duration)
                 frame.duration = duration
                 frame.size = size
+                if hdr10Plus.hasMetadata {
+                    frame.edrMetaData = EDRMetaData(
+                        hasHDR10PlusMetadata: true,
+                        hdr10PlusMetadata: hdr10Plus.metadata
+                    )
+                }
                 completion(.success(frame))
             }
             if status == noErr {
@@ -125,6 +143,22 @@ final class VideoToolboxDecode: DecodeProtocol, @unchecked Sendable {
         } catch {
             completionHandler(.failure(error))
         }
+    }
+
+    private func packetHDR10PlusMetadata(from packet: Packet) -> (hasMetadata: Bool, metadata: HDR10PlusMetadata?) {
+        guard let corePacket = packet.corePacket else {
+            return (false, nil)
+        }
+        var size = 0
+        guard let sideData = av_packet_get_side_data(corePacket, AV_PKT_DATA_DYNAMIC_HDR10_PLUS, &size) else {
+            return (false, nil)
+        }
+        return (true, FFmpegAssetTrack.hdr10PlusMetadata(
+            data: sideData,
+            size: size,
+            width: packet.assetTrack.codecpar.width,
+            height: packet.assetTrack.codecpar.height
+        ))
     }
 
     func doFlushCodec() {
@@ -229,6 +263,10 @@ class DecompressionSession {
                   + "\(hardwareDecodeAvailability)")
             return nil
         }
+        guard let decoderSpecification = VideoToolboxHardwareDecodePolicy.decoderSpecification(codecType: codecType) else {
+            KSLog(level: .debug, "[video] VideoToolbox decoder specification unavailable for \(codecType.string)")
+            return nil
+        }
         self.formatDescription = formatDescription
         #if os(macOS)
         VTRegisterProfessionalVideoWorkflowVideoDecoders()
@@ -246,7 +284,7 @@ class DecompressionSession {
         ]
         var session: VTDecompressionSession?
         // swiftlint:disable line_length
-        let status = VTDecompressionSessionCreate(allocator: kCFAllocatorDefault, formatDescription: formatDescription, decoderSpecification: CMFormatDescriptionGetExtensions(formatDescription), imageBufferAttributes: attributes, outputCallback: nil, decompressionSessionOut: &session)
+        let status = VTDecompressionSessionCreate(allocator: kCFAllocatorDefault, formatDescription: formatDescription, decoderSpecification: decoderSpecification, imageBufferAttributes: attributes, outputCallback: nil, decompressionSessionOut: &session)
         // swiftlint:enable line_length
         guard status == noErr, let decompressionSession = session else {
             KSLog(level: .debug, "[video] VideoToolbox session creation failed for \(codecType.string): \(status)")
@@ -256,7 +294,7 @@ class DecompressionSession {
             VTSessionSetProperty(decompressionSession, key: kVTDecompressionPropertyKey_PropagatePerFrameHDRDisplayMetadata,
                                  value: kCFBooleanTrue)
         }
-        let contentDynamicRange = assetTrack.dovi?.hdrFallbackDynamicRange
+        let contentDynamicRange = assetTrack.dynamicRange
         if contentDynamicRange?.isHDR == true, let destinationDynamicRange = options.availableDynamicRange(contentDynamicRange) {
             if destinationDynamicRange.isHDR {
                 let pixelTransferProperties = [kVTPixelTransferPropertyKey_DestinationColorPrimaries: destinationDynamicRange.colorPrimaries,
@@ -316,6 +354,16 @@ enum VideoToolboxHardwareDecodePolicy {
         kCMVideoCodecType_AppleProResRAWHQ,
     ]
 
+    static func decoderSpecification(codecType: CMVideoCodecType) -> CFDictionary? {
+        guard knownHardwareCodecTypes.contains(codecType) else {
+            return nil
+        }
+        let key = hevcFamilyCodecTypes.contains(codecType)
+            ? kVTVideoDecoderSpecification_EnableHardwareAcceleratedVideoDecoder
+            : kVTVideoDecoderSpecification_RequireHardwareAcceleratedVideoDecoder
+        return [key as String: kCFBooleanTrue as Any] as CFDictionary
+    }
+
     static func canAttemptAsynchronousDecompression(
         codecType: CMVideoCodecType,
         isHardwareDecodeSupported: (CMVideoCodecType) -> Bool = VTIsHardwareDecodeSupported,
@@ -352,6 +400,12 @@ enum VideoToolboxHardwareDecodePolicy {
         return true
         #endif
     }
+
+    private static let hevcFamilyCodecTypes: Set<CMVideoCodecType> = [
+        kCMVideoCodecType_HEVC,
+        kCMVideoCodecType_HEVCWithAlpha,
+        kCMVideoCodecType_DolbyVisionHEVC,
+    ]
 }
 #endif
 

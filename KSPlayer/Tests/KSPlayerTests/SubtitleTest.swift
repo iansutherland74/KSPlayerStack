@@ -43,6 +43,27 @@ class SubtitleTest: XCTestCase {
         )
     }
 
+    func testPictureInPictureSubtitlePolicyReportsOverlayLimitation() {
+        let nativeDiagnostic = PictureInPictureSubtitlePolicyResolver.diagnostic(
+            policy: .automatic,
+            usesNativeLegibleSelection: true
+        )
+        XCTAssertEqual(nativeDiagnostic.status, .nativeLegible)
+        XCTAssertTrue(nativeDiagnostic.message.contains("KSPlayer overlay subtitles remain inline-only"))
+
+        let overlayDiagnostic = PictureInPictureSubtitlePolicyResolver.diagnostic(
+            policy: .automatic,
+            usesNativeLegibleSelection: false
+        )
+        XCTAssertEqual(overlayDiagnostic.status, .inlineOverlayOnly)
+        XCTAssertTrue(overlayDiagnostic.message.contains("not composited"))
+
+        XCTAssertEqual(
+            PictureInPictureSubtitlePolicyResolver.diagnostic(policy: .disabled, usesNativeLegibleSelection: true).status,
+            .disabled
+        )
+    }
+
     func testSrt() {
         let string = """
         1
@@ -97,6 +118,22 @@ class SubtitleTest: XCTestCase {
         let parts = parse.parse(scanner: scanner)
         XCTAssertEqual(parts.count, 9)
         XCTAssertEqual(parts[8].end, 3601.14)
+    }
+
+    func testSrtParsesCueWithoutNumericIndex() throws {
+        let string = """
+        00:00:00,000 --> 00:00:01,000
+        hello
+
+        00:00:01,000 --> 00:00:02,000
+        world
+
+        """
+        let parts = SrtParse().parse(scanner: Scanner(string: string))
+
+        XCTAssertEqual(parts.count, 2)
+        XCTAssertEqual(parts.first?.text?.string, "hello")
+        XCTAssertEqual(parts.last?.start, 1)
     }
 
     func testVtt() {
@@ -563,6 +600,7 @@ class SubtitleTest: XCTestCase {
     func testSubtitleURLClassifiesSubtitleKind() {
         XCTAssertEqual(URL(fileURLWithPath: "/tmp/movie.srt").subtitleKind, .text)
         XCTAssertEqual(URL(fileURLWithPath: "/tmp/movie.ass").subtitleKind, .text)
+        XCTAssertEqual(URL(fileURLWithPath: "/tmp/movie.ssa").subtitleKind, .text)
         XCTAssertEqual(URL(fileURLWithPath: "/tmp/movie.sup").subtitleKind, .image)
         XCTAssertEqual(URL(fileURLWithPath: "/tmp/movie.mkv").subtitleKind, .unknown)
     }
@@ -571,6 +609,63 @@ class SubtitleTest: XCTestCase {
         XCTAssertEqual(FFmpegAssetTrack.subtitleKind(codecID: AV_CODEC_ID_EIA_608, isImageSubtitle: false), .closedCaption)
         XCTAssertEqual(FFmpegAssetTrack.subtitleKind(codecID: AV_CODEC_ID_HDMV_PGS_SUBTITLE, isImageSubtitle: true), .image)
         XCTAssertEqual(FFmpegAssetTrack.subtitleKind(codecID: AV_CODEC_ID_SUBRIP, isImageSubtitle: false), .text)
+    }
+
+    func testFFmpegA53ClosedCaptionSideDataDistinguishesCEA608And708() {
+        var cea608Bytes: [UInt8] = [0x04, 0x14, 0x2c]
+        var cea708Bytes: [UInt8] = [0x06, 0xff, 0x80]
+        var mixedBytes: [UInt8] = [0x04, 0x14, 0x2c, 0x07, 0xff, 0x80]
+
+        XCTAssertEqual(
+            cea608Bytes.withUnsafeMutableBufferPointer {
+                FFmpegClosedCaptionRouting.format(a53CCSideData: $0.baseAddress, size: $0.count)
+            },
+            .cea608
+        )
+        XCTAssertEqual(
+            cea708Bytes.withUnsafeMutableBufferPointer {
+                FFmpegClosedCaptionRouting.format(a53CCSideData: $0.baseAddress, size: $0.count)
+            },
+            .cea708
+        )
+        XCTAssertEqual(
+            mixedBytes.withUnsafeMutableBufferPointer {
+                FFmpegClosedCaptionRouting.format(a53CCSideData: $0.baseAddress, size: $0.count)
+            },
+            .cea608And708
+        )
+    }
+
+    func testFFmpegA53ClosedCaptionRoutingFilters708FromEIA608Payload() {
+        var mixedBytes: [UInt8] = [0x04, 0x14, 0x2c, 0x06, 0xff, 0x80, 0x05, 0x15, 0x2d]
+        let payload = mixedBytes.withUnsafeMutableBufferPointer {
+            FFmpegClosedCaptionRouting.eia608Payload(a53CCSideData: $0.baseAddress, size: $0.count)
+        }
+
+        XCTAssertEqual(payload, Data([0x04, 0x14, 0x2c, 0x05, 0x15, 0x2d]))
+    }
+
+    func testFFmpegA53ClosedCaptionRoutingSkipsPure708ForEIA608Decoder() {
+        var cea708Bytes: [UInt8] = [0x06, 0xff, 0x80, 0x07, 0xff, 0x81]
+        let payload = cea708Bytes.withUnsafeMutableBufferPointer {
+            FFmpegClosedCaptionRouting.eia608Payload(a53CCSideData: $0.baseAddress, size: $0.count)
+        }
+
+        XCTAssertNil(payload)
+    }
+
+    func testStreamlessClosedCaptionTrackStoresSelectionState() throws {
+        var codecpar = AVCodecParameters()
+        codecpar.codec_type = AVMEDIA_TYPE_SUBTITLE
+        codecpar.codec_id = AV_CODEC_ID_EIA_608
+        let track = try XCTUnwrap(FFmpegAssetTrack(codecpar: codecpar))
+
+        XCTAssertEqual(track.subtitleKind, .closedCaption)
+        XCTAssertFalse(track.isEnabled)
+
+        track.isEnabled = true
+
+        XCTAssertTrue(track.isEnabled)
     }
 
     func testSubtitleDisplayNameLabelsNonTextKinds() {
@@ -583,57 +678,64 @@ class SubtitleTest: XCTestCase {
 
     func testShooterOnlineSubtitleRequestUsesHashAndSafeFilename() throws {
         let fileURL = URL(fileURLWithPath: "/Users/private/Movies/Movie Name.mkv")
-        let request = try XCTUnwrap(ShooterOnlineSubtitleProvider.makeSearchRequest(fileURL: fileURL, fileHash: "a;b;c;d"))
+        let request = try XCTUnwrap(ShooterOnlineSubtitleProvider.makeSearchRequest(fileURL: fileURL, fileHash: "a;b;c;d", userAgent: "KSPlayerTest"))
         let components = try XCTUnwrap(URLComponents(url: request.url!, resolvingAgainstBaseURL: false))
         let queryItems = Dictionary(uniqueKeysWithValues: (components.queryItems ?? []).map { ($0.name, $0.value ?? "") })
 
         XCTAssertEqual(request.httpMethod, "POST")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "User-Agent"), "KSPlayerTest")
         XCTAssertEqual(queryItems["filehash"], "a;b;c;d")
         XCTAssertEqual(queryItems["pathinfo"], "Movie Name.mkv")
         XCTAssertFalse(request.url!.absoluteString.contains("/Users/private"))
     }
 
     func testAssrtOnlineSubtitleRequestUsesBearerToken() throws {
-        let request = try XCTUnwrap(AssrtOnlineSubtitleProvider.makeSearchRequest(query: "My Movie", token: "user-token"))
+        let request = try XCTUnwrap(AssrtOnlineSubtitleProvider.makeSearchRequest(query: " My Movie ", token: " user-token ", userAgent: "KSPlayerTest"))
         let components = try XCTUnwrap(URLComponents(url: request.url!, resolvingAgainstBaseURL: false))
         let queryItems = Dictionary(uniqueKeysWithValues: (components.queryItems ?? []).map { ($0.name, $0.value ?? "") })
 
         XCTAssertEqual(request.httpMethod, "POST")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "User-Agent"), "KSPlayerTest")
         XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer user-token")
         XCTAssertEqual(queryItems["q"], "My Movie")
+        XCTAssertNil(AssrtOnlineSubtitleProvider.makeSearchRequest(query: "My Movie", token: " "))
     }
 
     func testOpenSubtitlesOnlineSubtitleSearchRequestUsesAppCredentialAndIDs() throws {
         let search = OnlineSubtitleSearchRequest(
-            query: "Movie",
-            languages: ["en", "zh-cn"],
-            movieHash: "hash-value",
+            query: " Movie ",
+            languages: ["en", "zh-cn", "EN", " "],
+            movieHash: " hash-value ",
             imdbID: 12345,
             tmdbID: 67890
         )
-        let request = try XCTUnwrap(OpenSubtitlesOnlineSubtitleProvider.makeSearchRequest(request: search, apiKey: "app-key", token: "session-token"))
+        let request = try XCTUnwrap(OpenSubtitlesOnlineSubtitleProvider.makeSearchRequest(request: search, apiKey: " app-key ", token: " session-token ", userAgent: "KSPlayerTest"))
         let components = try XCTUnwrap(URLComponents(url: request.url!, resolvingAgainstBaseURL: false))
         let queryItems = Dictionary(uniqueKeysWithValues: (components.queryItems ?? []).map { ($0.name, $0.value ?? "") })
 
         XCTAssertEqual(request.value(forHTTPHeaderField: "Api-Key"), "app-key")
         XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer session-token")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "User-Agent"), "KSPlayerTest")
         XCTAssertEqual(queryItems["query"], "Movie")
         XCTAssertEqual(queryItems["languages"], "en,zh-cn")
         XCTAssertEqual(queryItems["moviehash"], "hash-value")
         XCTAssertEqual(queryItems["imdb_id"], "12345")
         XCTAssertNil(queryItems["imbd_id"])
         XCTAssertEqual(queryItems["tmdb_id"], "67890")
+        XCTAssertNil(OpenSubtitlesOnlineSubtitleProvider.makeSearchRequest(request: search, apiKey: " "))
     }
 
     func testOpenSubtitlesDownloadRequestUsesJSONBody() throws {
-        let request = try XCTUnwrap(OpenSubtitlesOnlineSubtitleProvider.makeDownloadRequest(fileID: 42, apiKey: "app-key"))
+        let request = try XCTUnwrap(OpenSubtitlesOnlineSubtitleProvider.makeDownloadRequest(fileID: 42, apiKey: " app-key ", userAgent: "KSPlayerTest"))
         let body = try XCTUnwrap(request.httpBody)
         let json = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Int])
 
         XCTAssertEqual(request.httpMethod, "POST")
         XCTAssertEqual(request.value(forHTTPHeaderField: "Api-Key"), "app-key")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "User-Agent"), "KSPlayerTest")
         XCTAssertEqual(request.value(forHTTPHeaderField: "Content-Type"), "application/json")
         XCTAssertEqual(json["file_id"], 42)
+        XCTAssertNil(OpenSubtitlesOnlineSubtitleProvider.makeDownloadRequest(fileID: 42, apiKey: " "))
     }
 
     func testOnlineSubtitleDataSourceMapsProviderResultsWithoutNetwork() async throws {
@@ -656,6 +758,77 @@ class SubtitleTest: XCTestCase {
         XCTAssertEqual(info.name, "English.srt")
         XCTAssertEqual(info.delay, 0.5)
         XCTAssertEqual(info.comment, "fixture")
+    }
+
+    func testOnlineSubtitleDataSourceRanksDeduplicatesAndPreservesMetadata() async throws {
+        let duplicateURL = URL(string: "https://example.com/Movie.en.srt")!
+        let provider = StaticOnlineSubtitleProvider(results: [
+            OnlineSubtitleSearchResult(
+                providerID: "test",
+                subtitleID: "less-relevant",
+                name: "Other.fr.srt",
+                downloadURL: URL(string: "https://example.com/Other.fr.srt")!,
+                language: "fr",
+                format: "srt"
+            ),
+            OnlineSubtitleSearchResult(
+                providerID: "test",
+                subtitleID: "best",
+                name: "Movie.en.srt",
+                downloadURL: duplicateURL,
+                language: "en",
+                format: "srt",
+                comment: "trusted"
+            ),
+            OnlineSubtitleSearchResult(
+                providerID: "test",
+                subtitleID: "best",
+                name: "Movie duplicate id.srt",
+                downloadURL: URL(string: "https://example.com/duplicate-id.srt")!
+            ),
+            OnlineSubtitleSearchResult(
+                providerID: "other",
+                subtitleID: "same-url",
+                name: "Movie duplicate url.srt",
+                downloadURL: duplicateURL
+            ),
+        ])
+        let dataSource = OnlineSubtitleDataSouce(providers: [provider], languages: ["en"], userAgent: "UnitTest")
+
+        try await dataSource.searchSubtitle(fileURL: URL(fileURLWithPath: "/tmp/Movie.mkv"))
+
+        XCTAssertEqual(dataSource.infos.map(\.subtitleID), ["test:best", "test:less-relevant"])
+        let best = try XCTUnwrap(dataSource.infos.first as? URLSubtitleInfo)
+        XCTAssertEqual(best.name, "Movie.en.srt")
+        XCTAssertEqual(best.comment, "en - srt - trusted")
+    }
+
+    func testOnlineSubtitleDataSourceContinuesAfterProviderFailure() async throws {
+        let result = OnlineSubtitleSearchResult(
+            providerID: "test",
+            subtitleID: "ok",
+            name: "Movie.srt",
+            downloadURL: URL(string: "https://example.com/Movie.srt")!
+        )
+        let dataSource = OnlineSubtitleDataSouce(providers: [
+            FailingOnlineSubtitleProvider(),
+            StaticOnlineSubtitleProvider(results: [result]),
+        ])
+
+        try await dataSource.searchSubtitle(query: "Movie", languages: ["en"])
+
+        XCTAssertEqual(dataSource.infos.map(\.subtitleID), ["test:ok"])
+    }
+
+    func testOnlineSubtitleDataSourceThrowsWhenAllProvidersFail() async {
+        let dataSource = OnlineSubtitleDataSouce(providers: [FailingOnlineSubtitleProvider()])
+
+        do {
+            try await dataSource.searchSubtitle(query: "Movie", languages: ["en"])
+            XCTFail("Expected provider failure")
+        } catch {
+            XCTAssertEqual((error as NSError).domain, "OnlineSubtitleTest")
+        }
     }
 
     func testExternalSubtitleTranslationModeReplacesParsedText() async throws {
@@ -872,6 +1045,19 @@ class SubtitleTest: XCTestCase {
         let part = try XCTUnwrap(info.search(for: 0.5).first)
         XCTAssertNotNil(part.image)
         XCTAssertEqual(part.imageCanvasSize, CGSize(width: 1920, height: 1080))
+    }
+
+    func testCombinedImageSubtitleCanvasUsesBitmapBounds() throws {
+        let first = makeSubtitleCGImage(width: 10, height: 10)
+        let second = makeSubtitleCGImage(width: 5, height: 5)
+
+        let image = try XCTUnwrap(CGImage.combine(images: [
+            (CGRect(x: 10, y: 20, width: 10, height: 10), first),
+            (CGRect(x: 30, y: 40, width: 5, height: 5), second),
+        ]))
+
+        XCTAssertEqual(image.width, 35)
+        XCTAssertEqual(image.height, 45)
     }
 
     func testExternalImageSubtitleDisableClearsDecodedBitmapParts() async throws {
@@ -1137,6 +1323,15 @@ private struct StaticOnlineSubtitleProvider: OnlineSubtitleProvider {
     }
 }
 
+private struct FailingOnlineSubtitleProvider: OnlineSubtitleProvider {
+    let providerID = "failing"
+    let displayName = "Failing"
+
+    func searchSubtitles(request _: OnlineSubtitleSearchRequest) async throws -> [OnlineSubtitleSearchResult] {
+        throw NSError(domain: "OnlineSubtitleTest", code: 1)
+    }
+}
+
 private actor RecordingSubtitleTranslationProvider: SubtitleTranslationProvider {
     let providerID = "recording"
     private let translations: [String]
@@ -1390,6 +1585,22 @@ private func makeSubtitleFile(extension fileExtension: String, text: String) thr
         .appendingPathExtension(fileExtension)
     try text.write(to: url, atomically: true, encoding: .utf8)
     return url
+}
+
+private func makeSubtitleCGImage(width: Int, height: Int) -> CGImage {
+    let colorSpace = CGColorSpaceCreateDeviceRGB()
+    let context = CGContext(
+        data: nil,
+        width: width,
+        height: height,
+        bitsPerComponent: 8,
+        bytesPerRow: width * 4,
+        space: colorSpace,
+        bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+    )!
+    context.setFillColor(CGColor(red: 1, green: 1, blue: 1, alpha: 1))
+    context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+    return context.makeImage()!
 }
 
 private func makeSubtitleImage(width: Int, height: Int) -> UIImage {

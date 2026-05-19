@@ -7,6 +7,7 @@ import Libavformat
 public enum VideoExportError: Error, Equatable, LocalizedError {
     case unsupportedSource(URL)
     case unsupportedLiveOrPlaylist(URL)
+    case unsupportedBluRay(URL)
     case unsupportedSeparateAudio(URL)
     case unsafeDestination(URL)
     case destinationExists(URL)
@@ -18,11 +19,13 @@ public enum VideoExportError: Error, Equatable, LocalizedError {
     public var errorDescription: String? {
         switch self {
         case let .unsupportedSource(url):
-            return "Video export supports local files and direct HTTP(S) media files, not \(url.absoluteString)."
+            return "Video export supports local files and direct HTTP(S) media files, not \(url.ksRedactedAbsoluteString)."
         case let .unsupportedLiveOrPlaylist(url):
-            return "Video export does not download live, playlist, or segmented media URLs: \(url.absoluteString)."
+            return "Video export does not download live, playlist, or segmented media URLs: \(url.ksRedactedAbsoluteString)."
+        case let .unsupportedBluRay(url):
+            return "Video export does not export Blu-ray titles or menus. Use playback/clip paths that can open the selected title instead of whole-file export for \(url.ksRedactedAbsoluteString)."
         case let .unsupportedSeparateAudio(url):
-            return "Video export does not merge separate audio sources. Export the combined asset yourself or use a single muxed source instead of \(url.absoluteString)."
+            return "Video export does not merge separate audio sources. Export the combined asset yourself or use a single muxed source instead of \(url.ksRedactedAbsoluteString)."
         case let .unsafeDestination(url):
             return "Video export destination must be a writable file URL: \(url.path)."
         case let .destinationExists(url):
@@ -36,6 +39,16 @@ public enum VideoExportError: Error, Equatable, LocalizedError {
         case let .downloadFailed(message):
             return message
         }
+    }
+}
+
+public struct VideoExportSourceDiagnostic: Equatable, Sendable {
+    public let isSupported: Bool
+    public let message: String
+
+    public init(isSupported: Bool, message: String) {
+        self.isSupported = isSupported
+        self.message = message
     }
 }
 
@@ -171,7 +184,7 @@ public final class VideoExportService: @unchecked Sendable {
             throw VideoExportError.unsupportedLiveOrPlaylist(url)
         }
         if KSBluRayURLResolver.isBluRayCandidate(url) {
-            throw VideoExportError.unsupportedSource(url)
+            throw VideoExportError.unsupportedBluRay(url)
         }
         if url.isFileURL {
             options.prepareFormatContextOptions(for: url)
@@ -410,6 +423,10 @@ public final class VideoExportService: @unchecked Sendable {
 }
 
 public extension KSPlayerLayer {
+    var videoExportSourceDiagnostic: VideoExportSourceDiagnostic {
+        VideoExportSourcePolicy.diagnostic(for: url, audioURL: audioURL)
+    }
+
     /// Exports the currently loaded video source as a complete file using FFmpeg stream copy.
     ///
     /// This is a whole-source export, not a current-playback-window recorder. Use `recordClip` for a
@@ -456,6 +473,37 @@ enum VideoExportSourcePolicy {
     private static let directHTTPSchemes: Set<String> = ["http", "https"]
     private static let liveOrPlaylistExtensions: Set<String> = ["m3u", "m3u8", "mpd", "ism", "isml"]
     private static let liveSchemes: Set<String> = ["rtmp", "rtmps", "rtp", "rtsp", "udp"]
+
+    static func diagnostic(for url: URL, audioURL: URL? = nil) -> VideoExportSourceDiagnostic {
+        if let audioURL {
+            return VideoExportSourceDiagnostic(
+                isSupported: false,
+                message: "Whole-file export does not merge separate audio sources: \(audioURL.ksRedactedAbsoluteString)."
+            )
+        }
+        if isLiveOrSegmentedURL(url) {
+            return VideoExportSourceDiagnostic(
+                isSupported: false,
+                message: "Whole-file export rejects live, playlist, and segmented sources; use KSMEPlayer stream recording for live capture."
+            )
+        }
+        if KSBluRayURLResolver.isBluRayCandidate(url) {
+            return VideoExportSourceDiagnostic(
+                isSupported: false,
+                message: "Whole-file export does not select or export Blu-ray titles from ISO/BDMV sources."
+            )
+        }
+        if url.isFileURL || isDirectHTTPMediaURL(url) {
+            return VideoExportSourceDiagnostic(
+                isSupported: true,
+                message: "Whole-file export can remux this finite single-source media when FFmpeg can copy its streams into the destination container."
+            )
+        }
+        return VideoExportSourceDiagnostic(
+            isSupported: false,
+            message: "Whole-file export supports local files, direct HTTP(S) media files, and configured custom FFmpeg IO only."
+        )
+    }
 
     static func isDirectHTTPMediaURL(_ url: URL) -> Bool {
         guard let scheme = url.scheme?.lowercased(), directHTTPSchemes.contains(scheme) else {

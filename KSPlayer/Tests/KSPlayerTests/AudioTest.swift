@@ -112,6 +112,82 @@ class AudioTest: XCTestCase {
         XCTAssertEqual(mediaSubType.audioCodecDisplayName, "Dolby AC-4")
     }
 
+    func testDolbyCoreMediaSubtypeDisplayNames() {
+        XCTAssertEqual(CMFormatDescription.MediaSubType.dolbyDigital.audioCodecDisplayName, "Dolby Digital")
+        XCTAssertEqual(CMFormatDescription.MediaSubType.dolbyDigitalPlus.audioCodecDisplayName, "Dolby Digital Plus")
+        XCTAssertEqual(CMFormatDescription.MediaSubType.dolbyTrueHD.audioCodecDisplayName, "Dolby TrueHD")
+    }
+
+    func testAudioRouteOutputClassifier() {
+        XCTAssertEqual(AudioRouteOutputClassifier.outputKind(portTypeRawValue: "AirPlay"), .airPlay)
+        XCTAssertEqual(AudioRouteOutputClassifier.outputKind(portTypeRawValue: "BluetoothA2DPOutput"), .bluetooth)
+        XCTAssertEqual(AudioRouteOutputClassifier.outputKind(portTypeRawValue: "HDMIOutput"), .hdmi)
+        XCTAssertEqual(AudioRouteOutputClassifier.outputKind(portTypeRawValue: "BuiltInSpeaker"), .builtIn)
+        XCTAssertEqual(AudioRouteOutputClassifier.outputKind(portTypeRawValue: "Headphones"), .wired)
+        XCTAssertTrue(AudioRouteOutputClassifier.isExternalRoute(.airPlay))
+        XCTAssertTrue(AudioRouteOutputClassifier.isExternalRoute(.hdmi))
+        XCTAssertFalse(AudioRouteOutputClassifier.isExternalRoute(.builtIn))
+    }
+
+    func testEncodedPassthroughPolicyIsNativeOnly() {
+        let nativePolicy = EncodedAudioPassthroughPolicyResolver.policy(
+            pipeline: .nativeAVPlayer,
+            containsEncodedPassthroughCandidate: true
+        )
+        let pcmPolicy = EncodedAudioPassthroughPolicyResolver.policy(
+            pipeline: .decodedPCM,
+            containsEncodedPassthroughCandidate: true
+        )
+
+        XCTAssertEqual(nativePolicy.availability, .nativeRouteDependent)
+        XCTAssertTrue(nativePolicy.requiresHardwareRouteValidation)
+        XCTAssertEqual(pcmPolicy.availability, .decodedPCMOnly)
+        XCTAssertFalse(pcmPolicy.requiresHardwareRouteValidation)
+        XCTAssertTrue(pcmPolicy.reason.contains("PCM"))
+    }
+
+    func testEncodedPassthroughSubtypeDetection() {
+        XCTAssertTrue(EncodedAudioPassthroughPolicyResolver.isEncodedPassthroughCandidate(mediaSubTypeRawValue: "ec-3"))
+        XCTAssertTrue(EncodedAudioPassthroughPolicyResolver.isEncodedPassthroughCandidate(mediaSubTypeRawValue: "ac-4"))
+        XCTAssertTrue(EncodedAudioPassthroughPolicyResolver.isEncodedPassthroughCandidate(mediaSubTypeRawValue: "mlpa"))
+        XCTAssertFalse(EncodedAudioPassthroughPolicyResolver.isEncodedPassthroughCandidate(mediaSubTypeRawValue: "lpcm"))
+    }
+
+    func testAudioRouteDiagnosticReportsExternalOutputsWithoutHardwareValidation() {
+        let policy = EncodedAudioPassthroughPolicyResolver.policy(
+            pipeline: .decodedPCM,
+            containsEncodedPassthroughCandidate: true
+        )
+        let diagnostic = AudioRouteDiagnostic(
+            playbackPipeline: .decodedPCM,
+            outputPorts: [
+                AudioRouteOutputDiagnostic(
+                    portName: "Living Room",
+                    portType: "AirPlay",
+                    outputKind: .airPlay,
+                    channelCount: 2,
+                    isSpatialAudioEnabled: nil
+                ),
+            ],
+            maximumOutputNumberOfChannels: 2,
+            preferredOutputNumberOfChannels: 2,
+            outputNumberOfChannels: 2,
+            outputLatency: 0.1,
+            routeSharingPolicy: "longFormAudio",
+            configuredSupportsMultichannelContent: true,
+            spatialPreference: .automatic,
+            multichannelPreference: .automatic,
+            sourceChannelCount: 6,
+            allowsExternalPlayback: false,
+            usesExternalPlaybackWhileExternalScreenIsActive: false,
+            isExternalPlaybackActive: false,
+            encodedPassthroughPolicy: policy
+        )
+
+        XCTAssertTrue(diagnostic.hasExternalOutput)
+        XCTAssertEqual(diagnostic.encodedPassthroughPolicy.availability, .decodedPCMOnly)
+    }
+
     func testAV1CodecMapsToCoreMediaSampleEntry() {
         let mediaSubType = AV_CODEC_ID_AV1.mediaSubType
 
@@ -167,6 +243,59 @@ class AudioTest: XCTestCase {
         XCTAssertNotNil(layout)
         XCTAssertGreaterThan(layoutSize, 0)
         XCTAssertEqual(layout.flatMap { AVAudioChannelLayout(layout: $0) }?.channelCount, 6)
+    }
+
+    func testAtmosAudioFormatDescriptionPreservesLayoutTag() {
+        var codecpar = makeAudioCodecParameters(codecID: AV_CODEC_ID_TRUEHD, channels: 8)
+        codecpar.ch_layout = AVChannelLayout(order: AV_CHANNEL_ORDER_NATIVE, nb_channels: 8, u: AVChannelLayout.__Unnamed_union_u(mask: swift_AV_CH_LAYOUT_5POINT1POINT2), opaque: nil)
+        guard let track = FFmpegAssetTrack(codecpar: codecpar),
+              let formatDescription = track.formatDescription
+        else {
+            XCTFail("Expected Atmos audio format description")
+            return
+        }
+
+        var layoutSize = 0
+        let layout = CMAudioFormatDescriptionGetChannelLayout(formatDescription, sizeOut: &layoutSize)
+
+        XCTAssertNotNil(layout)
+        XCTAssertGreaterThan(layoutSize, 0)
+        XCTAssertEqual(layout.flatMap { AVAudioChannelLayout(layout: $0) }?.layoutTag, kAudioChannelLayoutTag_Atmos_5_1_2)
+    }
+
+    func testAudioMultichannelContentSupportResolver() {
+        XCTAssertFalse(AudioMultichannelContentSupportResolver.supportsMultichannelContent(spatialPreference: .automatic, multichannelPreference: .automatic, sourceChannelCount: nil, isSpatialRoute: nil))
+        XCTAssertTrue(AudioMultichannelContentSupportResolver.supportsMultichannelContent(spatialPreference: .automatic, multichannelPreference: .automatic, sourceChannelCount: 6, isSpatialRoute: false))
+        XCTAssertTrue(AudioMultichannelContentSupportResolver.supportsMultichannelContent(spatialPreference: .automatic, multichannelPreference: .automatic, sourceChannelCount: 2, isSpatialRoute: true))
+        XCTAssertTrue(AudioMultichannelContentSupportResolver.supportsMultichannelContent(spatialPreference: .enabled, multichannelPreference: .multichannel, sourceChannelCount: nil, isSpatialRoute: false))
+        XCTAssertFalse(AudioMultichannelContentSupportResolver.supportsMultichannelContent(spatialPreference: .enabled, multichannelPreference: .stereo, sourceChannelCount: 8, isSpatialRoute: true))
+        XCTAssertFalse(AudioMultichannelContentSupportResolver.supportsMultichannelContent(spatialPreference: .disabled, multichannelPreference: .multichannel, sourceChannelCount: 8, isSpatialRoute: true))
+    }
+
+    func testAudioFormatPreservesAtmosLayoutWhenChannelsArePreserved() {
+        var channelLayout = AVChannelLayout(order: AV_CHANNEL_ORDER_NATIVE, nb_channels: 8, u: AVChannelLayout.__Unnamed_union_u(mask: swift_AV_CH_LAYOUT_5POINT1POINT2), opaque: nil)
+        let audioFormat = AudioDescriptor.audioFormat(sampleFormat: AV_SAMPLE_FMT_FLTP, sampleRate: 48_000, outChannel: &channelLayout, channelCount: 8)
+
+        XCTAssertEqual(audioFormat.channelCount, 8)
+        XCTAssertEqual(audioFormat.channelLayout?.layoutTag, kAudioChannelLayoutTag_Atmos_5_1_2)
+    }
+
+    func testAudioFormatDownmixesToStereoLayoutWhenRequested() {
+        var channelLayout = AVChannelLayout(order: AV_CHANNEL_ORDER_NATIVE, nb_channels: 8, u: AVChannelLayout.__Unnamed_union_u(mask: swift_AV_CH_LAYOUT_5POINT1POINT2), opaque: nil)
+        let audioFormat = AudioDescriptor.audioFormat(sampleFormat: AV_SAMPLE_FMT_FLTP, sampleRate: 48_000, outChannel: &channelLayout, channelCount: 2)
+
+        XCTAssertEqual(channelLayout.nb_channels, 2)
+        XCTAssertEqual(audioFormat.channelCount, 2)
+        XCTAssertEqual(audioFormat.channelLayout?.layoutTag, kAudioChannelLayoutTag_Stereo)
+    }
+
+    func testUnsupportedNativeLayoutFallsBackToDefaultLayoutForChannelCount() {
+        var channelLayout = AVChannelLayout(order: AV_CHANNEL_ORDER_UNSPEC, nb_channels: 4, u: AVChannelLayout.__Unnamed_union_u(mask: 0), opaque: nil)
+        let audioFormat = AudioDescriptor.audioFormat(sampleFormat: AV_SAMPLE_FMT_FLTP, sampleRate: 48_000, outChannel: &channelLayout, channelCount: 4)
+
+        XCTAssertEqual(channelLayout.nb_channels, 4)
+        XCTAssertEqual(audioFormat.channelCount, 4)
+        XCTAssertNotNil(audioFormat.channelLayout)
     }
 
     private func makeAudioCodecParameters(codecID: AVCodecID, profile: Int32 = AV_PROFILE_UNKNOWN, channels: Int32 = 6) -> AVCodecParameters {

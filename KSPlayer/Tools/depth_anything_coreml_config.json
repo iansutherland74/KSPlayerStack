@@ -1,0 +1,33 @@
+{
+  "modelFamily": "depthAnything3",
+  "runtime": "coreML",
+  "preferredVisionOSRuntime": "Core ML with MLModelConfiguration.computeUnits = .cpuAndNeuralEngine",
+  "input": {
+    "name": "image",
+    "kind": "image",
+    "colorLayout": "RGB",
+    "width": 518,
+    "height": 518,
+    "note": "Include model-specific mean/std preprocessing in the exported graph or Core ML image preprocessing. KSPlayer resizes frames and passes a Core ML image input."
+  },
+  "output": {
+    "preferredName": "depth",
+    "acceptedNames": ["depth", "disparity", "predicted_depth"],
+    "acceptedKinds": ["MLMultiArray", "image"],
+    "shape": "1x1xHxW, 1xHxW, HxW, or image; KSPlayer reads the last two non-unit axes as height and width",
+    "normalization": "Finite values are min/max normalized per frame unless VideoDepthProcessingConfiguration.normalization is .none. Larger normalized values are treated as closer to the viewer."
+  },
+  "processing": {
+    "inputSize": {"width": 518, "height": 518},
+    "maximumInferenceFPS": 12,
+    "temporalSmoothingFactor": 0.6,
+    "invertDepth": false
+  },
+  "onnxRuntimeFallback": {
+    "enabledOnlyWhenAppBundlesVisionOSRuntime": true,
+    "preferredInputName": "image",
+    "preferredOutputName": "depth",
+    "tensorLayout": "NCHW",
+    "note": "Prefer Core ML for Vision Pro real-time playback. ONNX Runtime requires an app-supplied visionOS-compatible C library/framework."
+  }
+}

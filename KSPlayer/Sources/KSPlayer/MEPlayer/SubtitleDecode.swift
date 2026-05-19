@@ -107,6 +107,9 @@ class SubtitleDecode: DecodeProtocol {
     }
 
     func doFlushCodec() {
+        if let codecContext {
+            avcodec_flush_buffers(codecContext)
+        }
         #if canImport(libass)
         libassRenderer?.flush()
         #endif

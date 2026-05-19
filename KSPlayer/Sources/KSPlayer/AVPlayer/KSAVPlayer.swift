@@ -246,7 +246,7 @@ public class KSAVPlayer {
     }
 
     public required init(url: URL, audioURL: URL?, options: KSOptions) {
-        KSOptions.setAudioSession(options: options)
+        KSOptions.setAudioSession(options: options, playbackPipeline: .nativeAVPlayer)
         let playbackURL = KSDiskPrecache.playbackURL(for: url, options: options)
         let playbackAudioURL = audioURL.map { KSDiskPrecache.playbackURL(for: $0, options: options) }
         fileAccess = KSSecurityScopedURLAccess(urls: [playbackURL] + (playbackAudioURL.map { [$0] } ?? []))
@@ -257,6 +257,13 @@ public class KSAVPlayer {
             guard let self else { return }
             self.observer(playerItem: player.currentItem)
         }
+        #if !os(macOS)
+        NotificationCenter.default.addObserver(self, selector: #selector(audioRouteChange), name: AVAudioSession.routeChangeNotification, object: AVAudioSession.sharedInstance())
+        #endif
+    }
+
+    deinit {
+        NotificationCenter.default.removeObserver(self)
     }
 }
 
@@ -264,9 +271,12 @@ extension KSAVPlayer {
     public var player: AVQueuePlayer { playerView.player }
     public var playerLayer: AVPlayerLayer { playerView.playerLayer }
     @objc private func moviePlayDidEnd(notification _: Notification) {
-        if options.isLoopPlay {
+        if SeamlessLoopPlaybackPolicy.shouldManuallyRestartAVPlayer(
+            isLoopPlay: options.isLoopPlay,
+            isSeamlessLoopEnabled: options.isSeamlessLoopEnabled
+        ) {
             loopFromBeginning()
-        } else {
+        } else if !options.isLoopPlay {
             playbackState = .finished
         }
     }
@@ -302,6 +312,7 @@ extension KSAVPlayer {
             }
             // 默认选择第一个声道
             item.tracks.filter { $0.assetTrack?.mediaType.rawValue == AVMediaType.audio.rawValue }.dropFirst().forEach { $0.isEnabled = false }
+            updateAudioRouteDiagnosticForCurrentItem()
             let itemDuration = item.duration.seconds
             duration = itemDuration.isFinite ? max(itemDuration, 0) : 0
             let estimatedDataRates = item.tracks.compactMap { $0.assetTrack?.estimatedDataRate }
@@ -311,6 +322,30 @@ extension KSAVPlayer {
             error = item.error
         }
     }
+
+    private func updateAudioRouteDiagnosticForCurrentItem() {
+        let audioTrack = mediaPlayerTracks.first { $0.mediaType == .audio && $0.isEnabled } ?? mediaPlayerTracks.first { $0.mediaType == .audio }
+        let sourceChannelCount = audioTrack?.audioStreamBasicDescription.map { AVAudioChannelCount($0.mChannelsPerFrame) }
+        let containsEncodedPassthroughCandidate = EncodedAudioPassthroughPolicyResolver.isEncodedPassthroughCandidate(mediaSubTypeRawValue: audioTrack?.mediaSubType.rawValue.string)
+        KSOptions.updateAudioRouteDiagnostic(
+            options: options,
+            playbackPipeline: .nativeAVPlayer,
+            sourceChannelCount: sourceChannelCount,
+            containsEncodedPassthroughCandidate: containsEncodedPassthroughCandidate,
+            allowsExternalPlayback: allowsExternalPlayback,
+            usesExternalPlaybackWhileExternalScreenIsActive: usesExternalPlaybackWhileExternalScreenIsActive,
+            isExternalPlaybackActive: isExternalPlaybackActive
+        )
+    }
+
+    #if !os(macOS)
+    @objc private func audioRouteChange(notification: Notification) {
+        guard notification.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt != nil else {
+            return
+        }
+        updateAudioRouteDiagnosticForCurrentItem()
+    }
+    #endif
 
     private func updatePlayableDuration(item: AVPlayerItem) {
         let first = item.loadedTimeRanges.first { CMTimeRangeContainsTime($0.timeRangeValue, time: item.currentTime()) }
@@ -451,9 +486,19 @@ extension KSAVPlayer: @preconcurrency MediaPlayerProtocol {
     public var subtitleDataSouce: SubtitleDataSouce? {
         PictureInPictureSubtitlePolicyResolver.renderMode(
             policy: options.pictureInPictureSubtitlePolicy,
-            usesNativeLegibleSelection: true
+            usesNativeLegibleSelection: true,
+            supportsSampleBufferBurnIn: false
         ) == .disabled ? nil : self
     }
+    public var pictureInPictureSubtitleDiagnostic: PictureInPictureSubtitleDiagnostic {
+        PictureInPictureSubtitlePolicyResolver.diagnostic(
+            policy: options.pictureInPictureSubtitlePolicy,
+            usesNativeLegibleSelection: true,
+            supportsSampleBufferBurnIn: false,
+            burnInUnavailableReason: "native AVPlayer Picture in Picture can show AVFoundation legible selections but cannot burn KSPlayer overlay subtitles into video frames"
+        )
+    }
+
     public var isPlaying: Bool { player.rate > 0 ? true : playbackState == .playing }
     public var view: UIView? { playerView }
     public var currentPlaybackTime: TimeInterval {
@@ -560,7 +605,7 @@ extension KSAVPlayer: @preconcurrency MediaPlayerProtocol {
 
     public func replace(url: URL, audioURL: URL?, options: KSOptions) {
         KSLog("replaceUrl \(self)")
-        KSOptions.setAudioSession(options: options)
+        KSOptions.setAudioSession(options: options, playbackPipeline: .nativeAVPlayer)
         shutdown()
         let playbackURL = KSDiskPrecache.playbackURL(for: url, options: options)
         let playbackAudioURL = audioURL.map { KSDiskPrecache.playbackURL(for: $0, options: options) }
@@ -617,7 +662,8 @@ extension KSAVPlayer: @preconcurrency MediaPlayerProtocol {
         }
         guard PictureInPictureSubtitlePolicyResolver.renderMode(
             policy: options.pictureInPictureSubtitlePolicy,
-            usesNativeLegibleSelection: true
+            usesNativeLegibleSelection: true,
+            supportsSampleBufferBurnIn: false
         ) != .disabled else {
             return []
         }
@@ -627,6 +673,9 @@ extension KSAVPlayer: @preconcurrency MediaPlayerProtocol {
     public func select(track: some MediaPlayerTrack) {
         player.currentItem?.tracks.filter { $0.assetTrack?.mediaType == track.mediaType }.forEach { $0.isEnabled = false }
         track.isEnabled = true
+        if track.mediaType == .audio {
+            updateAudioRouteDiagnosticForCurrentItem()
+        }
     }
 
     private func legibleMediaSelectionTracks(for item: AVPlayerItem) -> [AVMediaPlayerTrack] {
@@ -694,7 +743,7 @@ class AVMediaPlayerTrack: @preconcurrency MediaPlayerTrack, SubtitleKindProvidin
     let isImageSubtitle = false
     let subtitleKind: SubtitleKind
     var dovi: DOVIDecoderConfigurationRecord?
-    let fieldOrder: FFmpegFieldOrder = .unknown
+    let fieldOrder: FFmpegFieldOrder
     var isPlayable: Bool
     @MainActor
     var isEnabled: Bool {
@@ -742,9 +791,19 @@ class AVMediaPlayerTrack: @preconcurrency MediaPlayerTrack, SubtitleKindProvidin
         }
         bitDepth = formatDescription?.bitDepth ?? 0
         // swiftlint:enable force_cast
+        dovi = formatDescription?.dolbyVisionConfigurationRecord
+        fieldOrder = FFmpegFieldOrder.detected(formatDescription: formatDescription)
         subtitleKind = Self.subtitleKind(mediaType: assetMediaType, formatDescription: formatDescription)
         let mediaSubType = formatDescription?.mediaSubType ?? .boxed
-        description = mediaSubType.audioCodecDisplayName ?? mediaSubType.rawValue.string
+        var description = mediaSubType.audioCodecDisplayName ?? mediaSubType.rawValue.string
+        if mediaType == .video {
+            if let dovi {
+                description += ", \(dovi.description)"
+            } else if let dynamicRange = formatDescription?.dynamicRange, dynamicRange != .sdr {
+                description += ", \(dynamicRange.description)"
+            }
+        }
+        self.description = description
     }
 
     init(mediaSelectionOption: AVMediaSelectionOption, group: AVMediaSelectionGroup, playerItem: AVPlayerItem) {
@@ -761,6 +820,7 @@ class AVMediaPlayerTrack: @preconcurrency MediaPlayerTrack, SubtitleKindProvidin
         isPlayable = mediaSelectionOption.isPlayable
         formatDescription = nil
         bitDepth = 0
+        fieldOrder = .unknown
         subtitleKind = Self.subtitleKind(mediaSelectionOption: mediaSelectionOption)
         description = mediaSelectionOption.displayName
     }
