@@ -269,6 +269,11 @@ public final class MEPlayerItem: @unchecked Sendable {
     public private(set) var duration: TimeInterval = 0
     public private(set) var fileSize: Double = 0
     public private(set) var naturalSize = CGSize.zero
+    /// Nominal frame rate from the active video track (`avg_frame_rate` / container estimate).
+    public var sourceVideoFrameRate: Float {
+        videoTrack?.fps ?? 0
+    }
+
     var canRestartLoopPlayback: Bool {
         SeamlessLoopPlaybackPolicy.canRestartMEPlayerLoop(
             isLoopPlay: options.isLoopPlay,
@@ -1423,7 +1428,10 @@ extension MEPlayerItem: CodecCapacityDelegate {
     }
 
     private func adaptableVideo(loadingState: LoadingState) {
-        if options.videoDisable || videoAdaptation == nil || loadingState.isEndOfFile || loadingState.isSeek || state == .seeking {
+        if options.videoDisable || !options.videoAdaptable || options.videoFrameOutput != nil || options.requiresDecodedVideoFrameOutput {
+            return
+        }
+        if videoAdaptation == nil || loadingState.isEndOfFile || loadingState.isSeek || state == .seeking {
             return
         }
         guard let track = videoTrack else {
@@ -1441,6 +1449,7 @@ extension MEPlayerItem: CodecCapacityDelegate {
         newFFmpegAssetTrack.isEnabled = true
         findBestAudio(videoTrack: newFFmpegAssetTrack)
         memorySeekCache.invalidate()
+        flushDecodedVideoPresentationBuffers()
         let bitRateState = VideoAdaptationState.BitRateState(bitRate: newBitrate, time: CACurrentMediaTime())
         videoAdaptation?.bitRateStates.append(bitRateState)
         delegate?.sourceDidChange(oldBitRate: oldBitRate, newBitrate: newBitrate)
@@ -1517,6 +1526,30 @@ extension MEPlayerItem: OutputRenderSourceDelegate {
             self.audioClock.position = position
         }
         refreshLowLatencyLiveDiagnosticAfterRender(now: now, force: isFirstAudioRender)
+    }
+
+    /// Clears queued decoded video frames and optional `videoFrameOutput` callbacks after ABR switches.
+    func flushDecodedVideoPresentationBuffers() {
+        if let videoTrack {
+            let count = videoTrack.outputRenderQueue.count
+            videoTrack.outputRenderQueue.flush()
+            if count > 0 {
+                dynamicInfo.droppedVideoFrameCount += UInt32(count)
+            }
+            if let asyncTrack = videoTrack as? AsyncPlayerItemTrack {
+                asyncTrack.packetQueue.flush()
+            }
+            if options.hardwareDecode {
+                videoTrack.resetVideoToolboxDecodersIfNeeded()
+            }
+        }
+        options.videoFrameOutput?.flush()
+    }
+
+    /// Replaces cached VideoToolbox decoders with FFmpeg after `hardwareDecode` is turned off.
+    func forceSoftwareVideoDecoders() {
+        videoTrack?.replaceVideoToolboxDecodersWithSoftware()
+        options.videoFrameOutput?.flush()
     }
 
     public func getVideoOutputRender(force: Bool) -> VideoVTBFrame? {

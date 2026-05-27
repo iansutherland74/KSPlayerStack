@@ -24,6 +24,24 @@ public enum DA3DepthFrameError: Error, Equatable, LocalizedError, Sendable {
     }
 }
 
+#if canImport(CoreML)
+public struct DA3DepthOutput: @unchecked Sendable {
+    public let multiArray: MLMultiArray
+    public let width: Int
+    public let height: Int
+    public let rawMinimum: Float?
+    public let rawMaximum: Float?
+
+    public init(multiArray: MLMultiArray, width: Int, height: Int, rawMinimum: Float?, rawMaximum: Float?) {
+        self.multiArray = multiArray
+        self.width = width
+        self.height = height
+        self.rawMinimum = rawMinimum
+        self.rawMaximum = rawMaximum
+    }
+}
+#endif
+
 public struct DA3DepthFrame: Equatable, Sendable {
     public let width: Int
     public let height: Int

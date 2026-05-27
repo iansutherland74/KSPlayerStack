@@ -4,6 +4,9 @@
 @preconcurrency import CoreVideo
 import Foundation
 import KSPlayer
+#if canImport(Metal)
+import Metal
+#endif
 
 public enum DepthAnythingV3EngineError: Error, LocalizedError, Sendable {
     case modelResourceNotFound(String)
@@ -43,10 +46,99 @@ public enum DepthAnythingV3EngineError: Error, LocalizedError, Sendable {
     }
 }
 
+public struct DA3EngineTimings: Equatable, Sendable {
+    public let preprocessingDuration: TimeInterval
+    public let inferenceDuration: TimeInterval
+    public let outputExtractionDuration: TimeInterval
+    public let totalDuration: TimeInterval
+
+    public static let empty = DA3EngineTimings(
+        preprocessingDuration: 0,
+        inferenceDuration: 0,
+        outputExtractionDuration: 0,
+        totalDuration: 0
+    )
+}
+
+public struct DA3ModelDiagnostics: Equatable, Sendable {
+    public let modelName: String
+    public let inputName: String
+    public let outputName: String
+    public let inputKind: String
+    public let inputWidth: Int
+    public let inputHeight: Int
+    public let supportsFlexibleInputShape: Bool
+    public let requestedInputWidth: Int?
+    public let requestedInputHeight: Int?
+    public let computeUnits: String
+
+    public var inputSizeSummary: String {
+        guard inputWidth > 0, inputHeight > 0 else {
+            return "source"
+        }
+        return "\(inputWidth)x\(inputHeight)"
+    }
+
+    public var requestedInputSizeSummary: String? {
+        guard let requestedInputWidth, let requestedInputHeight else {
+            return nil
+        }
+        return "\(requestedInputWidth)x\(requestedInputHeight)"
+    }
+
+    public var inputShapeNote: String {
+        if supportsFlexibleInputShape, let requestedInputSizeSummary {
+            return "flexible input using \(requestedInputSizeSummary)"
+        }
+        if supportsFlexibleInputShape {
+            return "flexible input"
+        }
+        if let requestedInputSizeSummary, requestedInputSizeSummary != inputSizeSummary {
+            return "fixed \(inputSizeSummary); requested \(requestedInputSizeSummary) ignored"
+        }
+        return "fixed \(inputSizeSummary)"
+    }
+
+    public var computeUnitsNote: String {
+        switch computeUnits {
+        case "all":
+            return "Core ML .all (ANE/GPU/CPU); profile in Instruments if inference is slow"
+        case "cpuAndNeuralEngine":
+            return "Core ML .cpuAndNeuralEngine (ANE-preferred; ops unsupported on ANE fall back to CPU)"
+        case "cpuOnly":
+            return "Core ML .cpuOnly (expect low FPS — avoid on Vision Pro)"
+        case "cpuAndGPU":
+            return "Core ML .cpuAndGPU"
+        default:
+            return "Core ML computeUnits \(computeUnits)"
+        }
+    }
+
+    public static let empty = DA3ModelDiagnostics(
+        modelName: "",
+        inputName: "",
+        outputName: "",
+        inputKind: "",
+        inputWidth: 0,
+        inputHeight: 0,
+        supportsFlexibleInputShape: false,
+        requestedInputWidth: nil,
+        requestedInputHeight: nil,
+        computeUnits: ""
+    )
+}
+
+public struct DA3DepthPredictionResult: Sendable {
+    public let depthOutput: DA3DepthOutput
+    public let frame: DA3DepthFrame?
+    public let timings: DA3EngineTimings
+    public let diagnostics: DA3ModelDiagnostics
+}
+
 /// App-target engine for dynamically loading a bundled compiled Depth Anything V3 `.mlmodelc`.
 public actor DepthAnythingV3Engine {
     private enum InputKind {
-        case image
+        case image(fixedSize: VideoDepthInputSize?)
         case multiArray(shape: [Int], dataType: MLMultiArrayDataType)
     }
 
@@ -62,49 +154,205 @@ public actor DepthAnythingV3Engine {
     }
 
     private let modelURL: URL
-    private let configuration: MLModelConfiguration
+    private let requestedConfiguration: MLModelConfiguration
+    private let allowsComputeUnitFallback: Bool
+    private var effectiveConfiguration: MLModelConfiguration
     private let preferredInputName: String?
     private let preferredOutputName: String
-    private let imageContext = CIContext(options: [.cacheIntermediates: false])
+    private let requestedInputSize: VideoDepthInputSize?
+    private let imageContext: CIContext
     private let colorSpace = CGColorSpaceCreateDeviceRGB()
     private var loadedModel: LoadedModel?
+    private var resizedPixelBufferPool: CVPixelBufferPool?
+    private var resizedPixelBufferPoolSize: VideoDepthInputSize?
 
     public static func defaultModelURL(in bundle: Bundle = .main) -> URL? {
         bundle.url(forResource: "da3-small", withExtension: "mlmodelc")
     }
 
+    public static func defaultModelConfiguration() -> MLModelConfiguration {
+        let configuration = MLModelConfiguration()
+        configuration.computeUnits = .all
+        return configuration
+    }
+
+    /// Prefer Apple Neural Engine. Public API uses `.cpuAndNeuralEngine` (strict NE-only is not exposed on all SDKs).
+    public static func neuralEnginePreferredConfiguration() -> MLModelConfiguration {
+        let configuration = MLModelConfiguration()
+        configuration.computeUnits = .cpuAndNeuralEngine
+        return configuration
+    }
+
+    /// Same as `neuralEnginePreferredConfiguration()`; demo default for Vision Pro.
+    public static func fastModelConfiguration() -> MLModelConfiguration {
+        neuralEnginePreferredConfiguration()
+    }
+
+    /// `DA3_COMPUTE_UNITS=strict_ane|ane|all|cpu` scheme override for device experiments.
+    public static func resolvedModelConfiguration(
+        allowsFallback: Bool = true
+    ) -> (configuration: MLModelConfiguration, allowsFallback: Bool) {
+        guard let raw = ProcessInfo.processInfo.environment["DA3_COMPUTE_UNITS"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased(),
+            !raw.isEmpty
+        else {
+            return (neuralEnginePreferredConfiguration(), allowsFallback)
+        }
+        switch raw {
+        case "strict_ane", "neural_engine_only", "neuralengineonly":
+            return (neuralEnginePreferredConfiguration(), false)
+        case "ane", "neural", "cpuandneuralengine":
+            return (neuralEnginePreferredConfiguration(), allowsFallback)
+        case "all":
+            return (defaultModelConfiguration(), allowsFallback)
+        case "cpu", "cpuonly":
+            var configuration = MLModelConfiguration()
+            configuration.computeUnits = .cpuOnly
+            return (configuration, allowsFallback)
+        case "gpu", "cpuandgpu":
+            var configuration = MLModelConfiguration()
+            configuration.computeUnits = .cpuAndGPU
+            return (configuration, allowsFallback)
+        default:
+            return (neuralEnginePreferredConfiguration(), allowsFallback)
+        }
+    }
+
     public init(
         modelURL: URL? = nil,
         bundle: Bundle = .main,
-        configuration: MLModelConfiguration = MLModelConfiguration(),
+        configuration: MLModelConfiguration? = nil,
+        allowsComputeUnitFallback: Bool? = nil,
         inputName: String? = nil,
-        outputName: String = "depth"
+        outputName: String = "depth",
+        requestedInputSize: VideoDepthInputSize? = nil
     ) throws {
         guard let resolvedModelURL = modelURL ?? Self.defaultModelURL(in: bundle) else {
             throw DepthAnythingV3EngineError.modelResourceNotFound("da3-small")
         }
         self.modelURL = resolvedModelURL
-        self.configuration = configuration
+        let resolved: (configuration: MLModelConfiguration, allowsFallback: Bool)
+        if let configuration {
+            resolved = (configuration, allowsComputeUnitFallback ?? true)
+        } else {
+            resolved = Self.resolvedModelConfiguration(allowsFallback: allowsComputeUnitFallback ?? true)
+        }
+        self.requestedConfiguration = resolved.configuration
+        self.allowsComputeUnitFallback = resolved.allowsFallback
+        self.effectiveConfiguration = resolved.configuration
         self.preferredInputName = inputName
         self.preferredOutputName = outputName
+        self.requestedInputSize = requestedInputSize
+        #if canImport(Metal)
+        if let device = MTLCreateSystemDefaultDevice() {
+            self.imageContext = CIContext(
+                mtlDevice: device,
+                options: [.cacheIntermediates: false, .name: "DepthAnythingV3Resize"]
+            )
+        } else {
+            self.imageContext = CIContext(options: [.cacheIntermediates: false])
+        }
+        #else
+        self.imageContext = CIContext(options: [.cacheIntermediates: false])
+        #endif
     }
 
     public func makeDepthFrame(from pixelBuffer: CVPixelBuffer) throws -> DA3DepthFrame {
-        try Task.checkCancellation()
-        let loadedModel = try loadModelIfNeeded()
-        let input = try makeInputProvider(for: pixelBuffer, input: loadedModel.input)
-        let output = try loadedModel.model.prediction(from: input)
-        try Task.checkCancellation()
-        guard let depth = output.featureValue(for: loadedModel.outputName)?.multiArrayValue else {
-            throw DepthAnythingV3EngineError.outputIsNotMultiArray(loadedModel.outputName)
+        let prediction = try makeDepthPrediction(from: pixelBuffer)
+        if let frame = prediction.frame {
+            return frame
         }
         return try DA3DepthFrame(
-            multiArray: depth,
-            outputName: loadedModel.outputName,
+            multiArray: prediction.depthOutput.multiArray,
+            outputName: prediction.diagnostics.outputName,
             metadata: [
-                "input": loadedModel.input.name,
-                "model": modelURL.lastPathComponent,
+                "input": prediction.diagnostics.inputName,
+                "model": prediction.diagnostics.modelName,
+                "computeUnits": prediction.diagnostics.computeUnits,
             ]
+        )
+    }
+
+    public func prepare() throws -> DA3ModelDiagnostics {
+        try Task.checkCancellation()
+        Depth3DDebug.log("Preparing Core ML model at \(modelURL.lastPathComponent)", phase: "coreml-prepare")
+        let diagnostics = try makeDiagnostics(for: loadModelIfNeeded())
+        Depth3DDebug.log("Core ML model ready: \(diagnostics.inputName) \(diagnostics.inputKind) \(diagnostics.inputSizeSummary), output \(diagnostics.outputName)", phase: "coreml-prepare")
+        return diagnostics
+    }
+
+    public func makeDepthPrediction(from pixelBuffer: CVPixelBuffer) throws -> DA3DepthPredictionResult {
+        try Task.checkCancellation()
+        let totalStart = Date().timeIntervalSinceReferenceDate
+        let loadedModel = try loadModelIfNeeded()
+        let preprocessingStart = Date().timeIntervalSinceReferenceDate
+        Depth3DDebug.log("Core ML input pixel buffer \(Self.pixelBufferDescription(pixelBuffer))", phase: "coreml-input", verboseOnly: true)
+        let input: MLFeatureProvider
+        do {
+            input = try makeInputProvider(for: pixelBuffer, input: loadedModel.input)
+            Depth3DDebug.log("Core ML provided input \(Self.featureProviderDescription(input, inputName: loadedModel.input.name))", phase: "coreml-input", verboseOnly: true)
+        } catch {
+            Depth3DDebug.fail("Core ML input creation failed: \(error.localizedDescription). Model \(Self.modelDescription(loadedModel)) source \(Self.pixelBufferDescription(pixelBuffer))", phase: "coreml-input")
+            throw error
+        }
+        let preprocessingDuration = Date().timeIntervalSinceReferenceDate - preprocessingStart
+        let inferenceStart = Date().timeIntervalSinceReferenceDate
+        let output: MLFeatureProvider
+        do {
+            output = try loadedModel.model.prediction(from: input)
+        } catch {
+            Depth3DDebug.fail("Core ML prediction failed: \(error.localizedDescription). Model \(Self.modelDescription(loadedModel)) input \(Self.featureProviderDescription(input, inputName: loadedModel.input.name))", phase: "coreml-prediction")
+            throw error
+        }
+        let inferenceDuration = Date().timeIntervalSinceReferenceDate - inferenceStart
+        if inferenceDuration > 0.15 {
+            Depth3DDebug.warn(
+                String(
+                    format: "Core ML inference %.0f ms — likely CPU/GPU fallback or oversized graph. Profile with Xcode Core ML template; re-export depth-only FP16 for ANE.",
+                    inferenceDuration * 1_000
+                ),
+                phase: "coreml-prediction"
+            )
+        }
+        try Task.checkCancellation()
+        let extractionStart = Date().timeIntervalSinceReferenceDate
+        guard let depth = output.featureValue(for: loadedModel.outputName)?.multiArrayValue else {
+            Depth3DDebug.fail("Core ML output \(loadedModel.outputName) missing multiArray. Available outputs: \(Array(output.featureNames).sorted().joined(separator: ", "))", phase: "coreml-output")
+            throw DepthAnythingV3EngineError.outputIsNotMultiArray(loadedModel.outputName)
+        }
+        let shape = depth.shape.map(\.intValue)
+        guard let dimensions = DA3DepthNumericRange.dimensions(for: shape) else {
+            throw DepthAnythingV3EngineError.unsupportedMultiArrayShape(
+                name: loadedModel.outputName,
+                shape: shape
+            )
+        }
+        let range = DA3DepthNumericRange.minMax(
+            multiArray: depth,
+            shape: shape,
+            width: dimensions.width,
+            height: dimensions.height
+        )
+        let depthOutput = DA3DepthOutput(
+            multiArray: depth,
+            width: dimensions.width,
+            height: dimensions.height,
+            rawMinimum: range.minimum,
+            rawMaximum: range.maximum
+        )
+        let extractionDuration = Date().timeIntervalSinceReferenceDate - extractionStart
+        let totalDuration = Date().timeIntervalSinceReferenceDate - totalStart
+        return DA3DepthPredictionResult(
+            depthOutput: depthOutput,
+            frame: nil,
+            timings: DA3EngineTimings(
+                preprocessingDuration: preprocessingDuration,
+                inferenceDuration: inferenceDuration,
+                outputExtractionDuration: extractionDuration,
+                totalDuration: totalDuration
+            ),
+            diagnostics: makeDiagnostics(for: loadedModel)
         )
     }
 
@@ -113,7 +361,17 @@ public actor DepthAnythingV3Engine {
             return loadedModel
         }
 
-        let model = try MLModel(contentsOf: modelURL, configuration: configuration)
+        let model: MLModel
+        do {
+            model = try loadModelWithComputeUnitPolicy()
+        } catch {
+            Depth3DDebug.fail("Unable to load Core ML model \(modelURL.lastPathComponent): \(error.localizedDescription)", phase: "coreml-load")
+            throw error
+        }
+        Depth3DDebug.log(
+            "Loaded Core ML model computeUnits=\(Self.computeUnitsDescription(effectiveConfiguration.computeUnits)) inputs \(Self.featureDescriptions(model.modelDescription.inputDescriptionsByName)); outputs \(Self.featureDescriptions(model.modelDescription.outputDescriptionsByName))",
+            phase: "coreml-load"
+        )
         let input = try Self.selectInput(
             from: model.modelDescription,
             preferredName: preferredInputName
@@ -125,6 +383,32 @@ public actor DepthAnythingV3Engine {
         let loadedModel = LoadedModel(model: model, input: input, outputName: outputName)
         self.loadedModel = loadedModel
         return loadedModel
+    }
+
+    private func loadModelWithComputeUnitPolicy() throws -> MLModel {
+        var candidates: [MLModelConfiguration] = [requestedConfiguration]
+        if allowsComputeUnitFallback,
+           requestedConfiguration.computeUnits == .cpuAndNeuralEngine
+        {
+            candidates.append(Self.defaultModelConfiguration())
+        }
+        var lastError: Error?
+        for candidate in candidates {
+            do {
+                let model = try MLModel(contentsOf: modelURL, configuration: candidate)
+                effectiveConfiguration = candidate
+                if candidate.computeUnits != requestedConfiguration.computeUnits {
+                    Depth3DDebug.warn(
+                        "ANE-preferred load failed; loaded \(modelURL.lastPathComponent) with computeUnits .all instead. Set DA3_COMPUTE_UNITS=strict_ane to fail fast.",
+                        phase: "coreml-load"
+                    )
+                }
+                return model
+            } catch {
+                lastError = error
+            }
+        }
+        throw lastError ?? DepthAnythingV3EngineError.modelResourceNotFound(modelURL.lastPathComponent)
     }
 
     private static func selectInput(
@@ -154,7 +438,16 @@ public actor DepthAnythingV3Engine {
     private static func inputDescriptor(name: String, feature: MLFeatureDescription) throws -> InputDescriptor {
         switch feature.type {
         case .image:
-            return InputDescriptor(name: name, kind: .image)
+            let fixedSize: VideoDepthInputSize?
+            if let constraint = feature.imageConstraint,
+               constraint.pixelsWide > 0,
+               constraint.pixelsHigh > 0
+            {
+                fixedSize = VideoDepthInputSize(width: constraint.pixelsWide, height: constraint.pixelsHigh)
+            } else {
+                fixedSize = nil
+            }
+            return InputDescriptor(name: name, kind: .image(fixedSize: fixedSize))
         case .multiArray:
             guard let constraint = feature.multiArrayConstraint else {
                 throw DepthAnythingV3EngineError.unsupportedInputFeature(name: name, type: "\(feature.type)")
@@ -196,8 +489,16 @@ public actor DepthAnythingV3Engine {
     ) throws -> MLFeatureProvider {
         let value: MLFeatureValue
         switch input.kind {
-        case .image:
-            value = MLFeatureValue(pixelBuffer: pixelBuffer)
+        case let .image(fixedSize):
+            if let targetSize = fixedSize ?? requestedInputSize {
+                value = MLFeatureValue(pixelBuffer: try makeResizedBGRA8PixelBuffer(
+                    from: pixelBuffer,
+                    width: targetSize.width,
+                    height: targetSize.height
+                ))
+            } else {
+                value = MLFeatureValue(pixelBuffer: pixelBuffer)
+            }
         case let .multiArray(shape, dataType):
             value = try MLFeatureValue(multiArray: makeImageMultiArray(
                 from: pixelBuffer,
@@ -247,24 +548,7 @@ public actor DepthAnythingV3Engine {
         width: Int,
         height: Int
     ) throws -> CVPixelBuffer {
-        let attributes: [CFString: Any] = [
-            kCVPixelBufferCGImageCompatibilityKey: true,
-            kCVPixelBufferCGBitmapContextCompatibilityKey: true,
-            kCVPixelBufferIOSurfacePropertiesKey: [:],
-        ]
-        var outputPixelBuffer: CVPixelBuffer?
-        let status = CVPixelBufferCreate(
-            kCFAllocatorDefault,
-            width,
-            height,
-            kCVPixelFormatType_32BGRA,
-            attributes as CFDictionary,
-            &outputPixelBuffer
-        )
-        guard status == kCVReturnSuccess, let outputPixelBuffer else {
-            throw DepthAnythingV3EngineError.pixelBufferAllocationFailed(status)
-        }
-
+        let outputPixelBuffer = try makeReusableResizedPixelBuffer(width: width, height: height)
         let inputImage = CIImage(cvPixelBuffer: pixelBuffer)
         let inputExtent = inputImage.extent
         let normalizedImage = inputImage.transformed(
@@ -284,6 +568,151 @@ public actor DepthAnythingV3Engine {
             colorSpace: colorSpace
         )
         return outputPixelBuffer
+    }
+
+    private func makeReusableResizedPixelBuffer(width: Int, height: Int) throws -> CVPixelBuffer {
+        let requestedSize = VideoDepthInputSize(width: width, height: height)
+        if resizedPixelBufferPool == nil || resizedPixelBufferPoolSize != requestedSize {
+            let attributes: [CFString: Any] = [
+                kCVPixelBufferCGImageCompatibilityKey: true,
+                kCVPixelBufferCGBitmapContextCompatibilityKey: true,
+                kCVPixelBufferIOSurfacePropertiesKey: [:],
+                kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_32BGRA,
+                kCVPixelBufferWidthKey: requestedSize.width,
+                kCVPixelBufferHeightKey: requestedSize.height,
+            ]
+            var pool: CVPixelBufferPool?
+            let poolStatus = CVPixelBufferPoolCreate(kCFAllocatorDefault, nil, attributes as CFDictionary, &pool)
+            guard poolStatus == kCVReturnSuccess, let pool else {
+                throw DepthAnythingV3EngineError.pixelBufferAllocationFailed(poolStatus)
+            }
+            resizedPixelBufferPool = pool
+            resizedPixelBufferPoolSize = requestedSize
+        }
+
+        guard let resizedPixelBufferPool else {
+            throw DepthAnythingV3EngineError.pixelBufferAllocationFailed(kCVReturnInvalidArgument)
+        }
+        var outputPixelBuffer: CVPixelBuffer?
+        let status = CVPixelBufferPoolCreatePixelBuffer(
+            kCFAllocatorDefault,
+            resizedPixelBufferPool,
+            &outputPixelBuffer
+        )
+        guard status == kCVReturnSuccess, let outputPixelBuffer else {
+            throw DepthAnythingV3EngineError.pixelBufferAllocationFailed(status)
+        }
+        return outputPixelBuffer
+    }
+
+    private func makeDiagnostics(for loadedModel: LoadedModel) -> DA3ModelDiagnostics {
+        let inputSize = inputSize(for: loadedModel.input)
+        return DA3ModelDiagnostics(
+            modelName: modelURL.lastPathComponent,
+            inputName: loadedModel.input.name,
+            outputName: loadedModel.outputName,
+            inputKind: Self.inputKindDescription(loadedModel.input.kind),
+            inputWidth: inputSize?.width ?? 0,
+            inputHeight: inputSize?.height ?? 0,
+            supportsFlexibleInputShape: false,
+            requestedInputWidth: requestedInputSize?.width,
+            requestedInputHeight: requestedInputSize?.height,
+            computeUnits: Self.computeUnitsDescription(effectiveConfiguration.computeUnits)
+        )
+    }
+
+    private func inputSize(for input: InputDescriptor) -> VideoDepthInputSize? {
+        switch input.kind {
+        case let .image(fixedSize):
+            return fixedSize ?? requestedInputSize
+        case let .multiArray(shape, _):
+            guard shape.count >= 3 else {
+                return nil
+            }
+            return VideoDepthInputSize(width: shape[shape.count - 1], height: shape[shape.count - 2])
+        }
+    }
+
+    private static func inputKindDescription(_ kind: InputKind) -> String {
+        switch kind {
+        case .image:
+            return "image"
+        case let .multiArray(_, dataType):
+            return "multiArray/\(dataType)"
+        }
+    }
+
+    private static func computeUnitsDescription(_ computeUnits: MLComputeUnits) -> String {
+        switch computeUnits {
+        case .all:
+            return "all"
+        case .cpuOnly:
+            return "cpuOnly"
+        case .cpuAndGPU:
+            return "cpuAndGPU"
+        case .cpuAndNeuralEngine:
+            return "cpuAndNeuralEngine"
+        @unknown default:
+            return "\(computeUnits)"
+        }
+    }
+
+    private static func modelDescription(_ loadedModel: LoadedModel) -> String {
+        "input=\(loadedModel.input.name) \(inputKindDescription(loadedModel.input.kind)) output=\(loadedModel.outputName)"
+    }
+
+    private static func featureDescriptions(_ descriptions: [String: MLFeatureDescription]) -> String {
+        descriptions
+            .sorted { $0.key < $1.key }
+            .map { name, feature in
+                "\(name):\(featureDescription(feature))"
+            }
+            .joined(separator: "; ")
+    }
+
+    private static func featureDescription(_ feature: MLFeatureDescription) -> String {
+        switch feature.type {
+        case .image:
+            if let constraint = feature.imageConstraint {
+                return "image \(constraint.pixelsWide)x\(constraint.pixelsHigh)"
+            }
+            return "image"
+        case .multiArray:
+            if let constraint = feature.multiArrayConstraint {
+                return "multiArray shape=\(constraint.shape.map(\.intValue)) type=\(constraint.dataType)"
+            }
+            return "multiArray"
+        default:
+            return "\(feature.type)"
+        }
+    }
+
+    private static func featureProviderDescription(_ provider: MLFeatureProvider, inputName: String) -> String {
+        guard let value = provider.featureValue(for: inputName) else {
+            return "\(inputName)=missing"
+        }
+        if let pixelBuffer = value.imageBufferValue {
+            return "\(inputName)=image \(pixelBufferDescription(pixelBuffer))"
+        }
+        if let multiArray = value.multiArrayValue {
+            return "\(inputName)=multiArray shape=\(multiArray.shape.map(\.intValue)) type=\(multiArray.dataType)"
+        }
+        return "\(inputName)=\(value.type)"
+    }
+
+    private static func pixelBufferDescription(_ pixelBuffer: CVPixelBuffer) -> String {
+        "\(CVPixelBufferGetWidth(pixelBuffer))x\(CVPixelBufferGetHeight(pixelBuffer)) format=\(pixelFormatDescription(CVPixelBufferGetPixelFormatType(pixelBuffer))) planes=\(CVPixelBufferGetPlaneCount(pixelBuffer))"
+    }
+
+    private static func pixelFormatDescription(_ pixelFormat: OSType) -> String {
+        let bytes = [
+            UInt8((pixelFormat >> 24) & 0xff),
+            UInt8((pixelFormat >> 16) & 0xff),
+            UInt8((pixelFormat >> 8) & 0xff),
+            UInt8(pixelFormat & 0xff),
+        ]
+        let code = String(bytes: bytes, encoding: .macOSRoman) ?? "\(pixelFormat)"
+        return "\(code)(0x\(String(pixelFormat, radix: 16)))"
     }
 
     private func fillRGBArray(

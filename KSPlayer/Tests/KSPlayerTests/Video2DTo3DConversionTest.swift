@@ -41,6 +41,9 @@ final class Video2DTo3DConversionTest: XCTestCase {
         XCTAssertEqual(Video2DTo3DPolicy.validatedDepthCurvature(0), 0.25)
         XCTAssertEqual(Video2DTo3DPolicy.validatedDepthCurvature(4), 3)
         XCTAssertEqual(Video2DTo3DPolicy.validatedDepthCurvature(.nan), Video2DTo3DPolicy.defaultDepthCurvature)
+        XCTAssertEqual(Video2DTo3DPolicy.validatedDepthSmoothingFactor(-1), 0)
+        XCTAssertEqual(Video2DTo3DPolicy.validatedDepthSmoothingFactor(1), 0.95)
+        XCTAssertEqual(Video2DTo3DPolicy.validatedDepthSmoothingFactor(.nan), Video2DTo3DPolicy.defaultDepthSmoothingFactor)
     }
 
     func testPolicyEnablesPseudoStereoForFlatPlaneVideo() {
@@ -49,6 +52,7 @@ final class Video2DTo3DConversionTest: XCTestCase {
             depthStrength: 0.4,
             depthDistance: 1.25,
             depthCurvature: 0.75,
+            depthSmoothingFactor: 0.5,
             outputLayout: .sideBySide,
             selectedEye: .right,
             display: .plane,
@@ -63,7 +67,9 @@ final class Video2DTo3DConversionTest: XCTestCase {
             XCTAssertEqual(configuration.drawableSize(for: CGSize(width: 1920, height: 1080)), CGSize(width: 3840, height: 1080))
             XCTAssertEqual(configuration.depthDistance, 1.25)
             XCTAssertEqual(configuration.depthCurvature, 0.75)
-            XCTAssertEqual(configuration.shapeUniform(), SIMD4<Float>(1.25, 0.75, 0, 0))
+            XCTAssertEqual(configuration.depthSmoothingFactor, 0.5)
+            XCTAssertEqual(configuration.stereoPassCount, 2)
+            XCTAssertEqual(configuration.shapeUniform(), SIMD4<Float>(1.25, 0.75, 0.5, 0))
         }
     }
 
@@ -73,6 +79,7 @@ final class Video2DTo3DConversionTest: XCTestCase {
             depthStrength: 0.5,
             depthDistance: 1,
             depthCurvature: 1,
+            depthSmoothingFactor: 0.6,
             outputLayout: .selectedEye,
             selectedEye: .left,
             display: .plane,
@@ -84,6 +91,7 @@ final class Video2DTo3DConversionTest: XCTestCase {
             depthStrength: 0.5,
             depthDistance: 1,
             depthCurvature: 1,
+            depthSmoothingFactor: 0.6,
             outputLayout: .selectedEye,
             selectedEye: .left,
             display: .plane,
@@ -102,6 +110,7 @@ final class Video2DTo3DConversionTest: XCTestCase {
             depthStrength: 0.5,
             depthDistance: 1,
             depthCurvature: 1,
+            depthSmoothingFactor: 0.6,
             outputLayout: .selectedEye,
             selectedEye: .left,
             display: .plane,
@@ -113,6 +122,7 @@ final class Video2DTo3DConversionTest: XCTestCase {
             depthStrength: 0.5,
             depthDistance: 1,
             depthCurvature: 1,
+            depthSmoothingFactor: 0.6,
             outputLayout: .selectedEye,
             selectedEye: .left,
             display: .vr,
@@ -150,6 +160,7 @@ final class Video2DTo3DConversionTest: XCTestCase {
         options.video2DTo3DDepthStrength = 0.4
         options.video2DTo3DDepthDistance = 3
         options.video2DTo3DDepthCurvature = 0
+        options.video2DTo3DDepthSmoothingFactor = 2
 
         let configuration = options.video2DTo3DRenderConfiguration(hasDepthMap: false)
 
@@ -158,6 +169,7 @@ final class Video2DTo3DConversionTest: XCTestCase {
             XCTAssertEqual(configuration.depthStrength, 0.4)
             XCTAssertEqual(configuration.depthDistance, 2)
             XCTAssertEqual(configuration.depthCurvature, 0.25)
+            XCTAssertEqual(configuration.depthSmoothingFactor, 0.95)
         }
     }
 
@@ -351,6 +363,9 @@ final class Video2DTo3DConversionTest: XCTestCase {
         }
         XCTAssertTrue(DepthAnythingV2DepthEstimationAdapter.ModelVariant.small.licenseNote.contains("Apache-2.0"))
         XCTAssertTrue(DepthAnythingV2DepthEstimationAdapter.ModelVariant.base.licenseNote.contains("CC-BY-NC-4.0"))
+        let plugin = adapter as any KSDepth3DPlugin
+        XCTAssertEqual(plugin.providerID, "depth-anything-v2")
+        XCTAssertTrue(plugin.displayName.contains("Depth Anything V2"))
     }
 
     func testDepthAnythingAdapterThrottlesAndSmoothsFakeInference() throws {

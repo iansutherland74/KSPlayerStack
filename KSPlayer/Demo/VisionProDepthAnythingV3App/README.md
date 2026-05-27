@@ -8,17 +8,23 @@ Open `KSPlayer/Demo/VisionProDepthAnythingV3App/VisionProDepthAnythingV3App.xcod
 
 The app links the local `KSPlayer` Swift package by relative path (`../..`) and includes the scaffold sources from `KSPlayer/Demo/VisionProDepthAnythingV3/Sources` by reference.
 
+## 3D Preview Mode
+
+This host app presents `KSVideoPlayer` in a normal SwiftUI `WindowGroup`, not an `ImmersiveSpace` or CompositorLayer stereo surface. The default debug layout is side-by-side packed preview so both generated eyes are visible in the window. `Selected Eye` is expected to look mostly flat because it shows one eye in a 2D window.
+
+Use the on-screen output layout picker, depth strength/distance/curvature sliders, DA3 depth contrast, and invert-depth toggle to validate that decoded frames reach DA3 and that the shader receives a useful disparity map. For headset-native stereo, this packed preview still needs to be replaced by a visionOS immersive/compositor presentation that submits separate left/right eye surfaces.
+
+The performance buttons are runtime tuning presets, not guaranteed device FPS claims. Use the status panel to compare configured cap, actual inference FPS, Core ML inference time, preprocessing time, texture upload time, Metal smoothing time, render time, stale-depth count, and debug modes (`Depth Disabled`, `Depth Only`, `Stereo Only`) on the headset.
+
 ## Model Resource
 
 The target copies `KSPlayer/PrivateArtifacts/DepthAnything3/coreml/DA3-SMALL/compiled/da3-small.mlmodelc` into the app bundle by reference. It does not duplicate the private artifact in this demo folder.
 
-Xcode does not generate Swift model wrapper types from an already compiled `.mlmodelc` bundle. To enable the real DA3 path:
+The demo uses `MLModel(contentsOf:)` to load that compiled bundle dynamically, so it does not require Xcode-generated `DepthAnythingV3Input` / `DepthAnythingV3Output` Swift wrapper types or a special active compilation condition. If the compiled resource is missing from the app bundle, the UI shows the model-missing guidance instead of starting the DA3 player path.
 
-1. Add the source `DepthAnythingV3.mlmodel` or `.mlpackage` to this app target.
-2. Confirm Xcode generates `DepthAnythingV3`, `DepthAnythingV3Input`, and `DepthAnythingV3Output`.
-3. Add `DEPTH_ANYTHING_V3_GENERATED` to the target's Active Compilation Conditions.
+The included compiled model is fixed-shape: `1 x 1 x 3 x 336 x 336` input and `336 x 336` depth output. The app reports this explicitly; 384x216 and wider input targets require a newly compiled fixed-shape or flexible-shape model.
 
-Until that flag is set, the app builds as an installable shell and shows guidance instead of compiling the generated-symbol-dependent player path.
+`KSPlayer/Tools/convert_depth_anything_to_coreml.py` is the PyTorch-to-Core ML export template for a future 384x216 DA3 Small model. Core ML Tools 9 does not directly convert ONNX; trace/script or `torch.export` the PyTorch wrapper and convert that artifact.
 
 ## Signing
 

@@ -861,6 +861,8 @@ open class KSOptions {
     public var video2DTo3DDepthDistance = KSOptions.video2DTo3DDepthDistance
     /// Curvature applied to normalized depth around the neutral plane. Values are clamped to `0.25 ... 3` at render time.
     public var video2DTo3DDepthCurvature = KSOptions.video2DTo3DDepthCurvature
+    /// Temporal smoothing factor for app-provided depth textures. Values are clamped to `0 ... 0.95` at render time.
+    public var video2DTo3DDepthSmoothingFactor = KSOptions.video2DTo3DDepthSmoothingFactor
     /// Output policy for generated stereo: selected eye for normal displays, or packed side-by-side/top-and-bottom frames.
     public var video2DTo3DOutputLayout = KSOptions.video2DTo3DOutputLayout
     /// Latest 2D-to-3D availability diagnostic. 2D-to-3D conversion is Vision Pro-only; regular stereoscopic and panorama rendering are separate.
@@ -868,9 +870,21 @@ open class KSOptions {
     public internal(set) var video2DTo3DDiagnostic: Video2DTo3DDiagnostic?
     /// Optional app-owned depth provider, for example a private Vision Pro Depth Anything Core ML or ONNX adapter.
     public var videoDepthEstimationProvider: (any VideoDepthEstimationProvider)?
+    /// Optional app-owned callback for render-path timing diagnostics.
+    public var video2DTo3DRenderMetricsHandler: (@MainActor @Sendable (Video2DTo3DRenderMetrics) -> Void)?
     /// Optional decoded-frame callback for the KSMEPlayer path. Frames are delivered off the decode/render thread.
     public var videoFrameOutput: KSVideoFrameOutput?
+    /// When true, `KSPlayerLayer` routes playback through `KSMEPlayer` so decoded `CVPixelBuffer`s are available.
+    public var requiresDecodedVideoFrameOutput = false
     public var videoDelay = 0.0 // s
+    /// When true, `videoClockSync` never drops frames (used while CompositorLayer immersive stereo is active).
+    public var relaxVideoClockSyncWhileImmersiveCompositorActive = false
+    /// When true, the flat `MetalPlayView` consumes frames but does not present them (immersive compositor only).
+    public var suppressWindowVideoPresentationWhileImmersiveCompositorActive = false
+    /// Updated by the Vision Pro demo while immersive is active; used to gate `KSVideoFrameOutput` to the audio clock.
+    public var immersiveAudioPlaybackSeconds: TimeInterval = 0
+    /// Delivers audio-synced video frames from `MetalPlayView` to the immersive compositor (not decode-live-edge).
+    public var immersivePresentVideoFrame: (@Sendable (CVPixelBuffer, TimeInterval) -> Void)?
     /// Controls MEPlayer deinterlacing on the FFmpeg software filter path.
     /// Native AVPlayer output keeps Apple's system-managed handling.
     public var deinterlaceMode = KSOptions.deinterlaceMode
@@ -1263,6 +1277,7 @@ open class KSOptions {
             depthStrength: video2DTo3DDepthStrength,
             depthDistance: video2DTo3DDepthDistance,
             depthCurvature: video2DTo3DDepthCurvature,
+            depthSmoothingFactor: video2DTo3DDepthSmoothingFactor,
             outputLayout: video2DTo3DOutputLayout,
             selectedEye: stereoscopicVideoEye,
             display: display,
@@ -1442,6 +1457,19 @@ open class KSOptions {
     open func videoClockSync(main: KSClock, nextVideoTime: TimeInterval, fps: Double, frameCount: Int) -> (Double, ClockProcessType) {
         let desire = main.getTime() - videoDelay
         let diff = nextVideoTime - desire
+        if relaxVideoClockSyncWhileImmersiveCompositorActive {
+            videoClockDelayCount = 0
+            return (diff, .next)
+        }
+        // Depth/ML may use KSVideoFrameOutput, but immersive video must stay on the audio clock.
+        if suppressWindowVideoPresentationWhileImmersiveCompositorActive,
+           immersivePresentVideoFrame != nil
+        {
+            // Fall through to normal A/V sync below.
+        } else if videoFrameOutput != nil || requiresDecodedVideoFrameOutput {
+            videoClockDelayCount = 0
+            return (diff, .next)
+        }
 //        print("[video] video diff \(diff) nextVideoTime \(nextVideoTime) main \(main.time.seconds)")
         if diff >= 1 / fps / 2 {
             videoClockDelayCount = 0
@@ -2184,6 +2212,7 @@ public extension KSOptions {
     nonisolated(unsafe) static var video2DTo3DDepthStrength = Video2DTo3DPolicy.defaultDepthStrength
     nonisolated(unsafe) static var video2DTo3DDepthDistance = Video2DTo3DPolicy.defaultDepthDistance
     nonisolated(unsafe) static var video2DTo3DDepthCurvature = Video2DTo3DPolicy.defaultDepthCurvature
+    nonisolated(unsafe) static var video2DTo3DDepthSmoothingFactor = Video2DTo3DPolicy.defaultDepthSmoothingFactor
     nonisolated(unsafe) static var video2DTo3DOutputLayout = Video2DTo3DOutputLayout.selectedEye
     nonisolated(unsafe) static var deinterlaceMode = VideoDeinterlaceMode.automatic
     nonisolated(unsafe) static var subtitleCaptionAppearancePolicy = SubtitleCaptionAppearancePolicy.never

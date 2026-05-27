@@ -309,6 +309,13 @@ extension KSMEPlayer: MEPlayerDelegate {
 
     func sourceDidChange(oldBitRate: Int64, newBitrate: Int64) {
         KSLog("oldBitRate \(oldBitRate) change to newBitrate \(newBitrate)")
+        let needsPresentationFlush = options.suppressWindowVideoPresentationWhileImmersiveCompositorActive
+            || options.relaxVideoClockSyncWhileImmersiveCompositorActive
+            || options.videoFrameOutput != nil
+        if needsPresentationFlush {
+            playerItem.flushDecodedVideoPresentationBuffers()
+            decodedVideoFrameOutput?.flush()
+        }
     }
 }
 
@@ -353,6 +360,69 @@ extension KSMEPlayer: @preconcurrency MediaPlayerProtocol {
 
     public var view: UIView? { videoOutput }
 
+    /// Unblocks the non-expanding decoded-video queue when the flat window stops presenting frames.
+    public func drainWindowVideoPresentationQueue(maxFrames: Int = 16) {
+        guard let videoOutput else {
+            return
+        }
+        let frameBudget = max(1, maxFrames)
+        for _ in 0 ..< frameBudget {
+            if let metalView = videoOutput as? MetalPlayView {
+                metalView.readNextFrame(force: false)
+            } else {
+                videoOutput.readNextFrame()
+            }
+        }
+    }
+
+    /// Clears queued window frames and drains the render queue after wiring `KSVideoFrameOutput`.
+    public func flushDecodedVideoPresentationForFrameOutput(maxDrainFrames: Int = 16) {
+        playerItem.flushDecodedVideoPresentationBuffers()
+        drainWindowVideoPresentationQueue(maxFrames: maxDrainFrames)
+    }
+
+    /// Copies presentation flags from the shared `KSPlayerLayer` / view-model options into the
+    /// player-owned `KSOptions` instance used by decode tracks and `MetalPlayView`.
+    public func synchronizePresentationOptions(from source: KSOptions) {
+        let hadSoftwareDecodePath = Self.requiresSoftwareVideoDecodePath(options)
+        options.relaxVideoClockSyncWhileImmersiveCompositorActive =
+            source.relaxVideoClockSyncWhileImmersiveCompositorActive
+        options.suppressWindowVideoPresentationWhileImmersiveCompositorActive =
+            source.suppressWindowVideoPresentationWhileImmersiveCompositorActive
+        options.immersiveAudioPlaybackSeconds = source.immersiveAudioPlaybackSeconds
+        options.immersivePresentVideoFrame = source.immersivePresentVideoFrame
+        options.videoAdaptable = source.videoAdaptable
+        options.requiresDecodedVideoFrameOutput = source.requiresDecodedVideoFrameOutput
+        options.hardwareDecode = source.hardwareDecode
+        options.asynchronousDecompression = source.asynchronousDecompression
+        videoOutput?.options = options
+        let needsSoftwareDecodePath = Self.requiresSoftwareVideoDecodePath(options)
+        guard needsSoftwareDecodePath else {
+            return
+        }
+        if !hadSoftwareDecodePath {
+            forceSoftwareVideoDecoders()
+        } else {
+            playerItem.forceSoftwareVideoDecoders()
+        }
+    }
+
+    private static func requiresSoftwareVideoDecodePath(_ options: KSOptions) -> Bool {
+        !options.hardwareDecode
+            || options.requiresDecodedVideoFrameOutput
+            || options.videoFrameOutput != nil
+    }
+
+    /// Drops active VideoToolbox decoders so the next packets use FFmpeg (required after turning off `hardwareDecode` mid-playback).
+    public func forceSoftwareVideoDecoders() {
+        playerItem.forceSoftwareVideoDecoders()
+        flushDecodedVideoPresentationForFrameOutput(maxDrainFrames: 32)
+    }
+
+    public var isDecodedVideoFrameOutputWired: Bool {
+        options.videoFrameOutput != nil
+    }
+
     public func replace(url: URL, options: KSOptions) {
         KSLog("replaceUrl \(self)")
         KSOptions.setAudioSession(options: options, playbackPipeline: .decodedPCM)
@@ -386,6 +456,9 @@ extension KSMEPlayer: @preconcurrency MediaPlayerProtocol {
     }
 
     public var duration: TimeInterval { playerItem.duration }
+
+    /// Nominal decoded video frame rate (PTS timeline), not display-link rate.
+    public var sourceVideoFrameRate: Float { playerItem.sourceVideoFrameRate }
 
     public var fileSize: Double { playerItem.fileSize }
 

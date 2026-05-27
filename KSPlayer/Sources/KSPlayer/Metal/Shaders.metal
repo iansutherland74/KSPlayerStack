@@ -75,10 +75,54 @@ float2 applyVideo2DTo3D(float2 uv,
         return uv;
     }
     float depth = video2DTo3DDepth(uv, conversion, shape, depthTexture, textureSampler);
-    float strength = clamp(conversion.y, 0.0, 0.4);
-    float distance = clamp(shape.x, 0.35, 1.2);
-    float parallax = clamp((depth - 0.5) * strength * distance * 0.04, -0.018, 0.018) * conversion.w;
+    float strength = clamp(conversion.y, 0.0, 1.0);
+    float distance = clamp(shape.x, 0.0, 2.0);
+    float parallax = clamp((depth - 0.5) * strength * distance * 0.04, -0.035, 0.035) * conversion.w;
     return clamp(uv + float2(parallax, 0.0), float2(0.001, 0.001), float2(0.999, 0.999));
+}
+
+struct DepthNormalizeParameters {
+    float depthMinimum;
+    float depthMaximum;
+    float contrast;
+    float invertDepth;
+};
+
+kernel void normalizeDepthTexture(texture2d<float, access::read> sourceTexture [[ texture(0) ]],
+                                  texture2d<float, access::write> outputTexture [[ texture(1) ]],
+                                  constant DepthNormalizeParameters& parameters [[ buffer(0) ]],
+                                  uint2 gid [[ thread_position_in_grid ]]) {
+    if (gid.x >= outputTexture.get_width() || gid.y >= outputTexture.get_height()) {
+        return;
+    }
+    float raw = sourceTexture.read(gid).r;
+    float range = max(parameters.depthMaximum - parameters.depthMinimum, 1e-5);
+    float normalized = clamp((raw - parameters.depthMinimum) / range, 0.0, 1.0);
+    if (parameters.invertDepth > 0.5) {
+        normalized = 1.0 - normalized;
+    }
+    float safeContrast = clamp(parameters.contrast, 0.1, 4.0);
+    normalized = clamp(((normalized - 0.5) * safeContrast) + 0.5, 0.0, 1.0);
+    outputTexture.write(float4(normalized, 0.0, 0.0, 1.0), gid);
+}
+
+kernel void smoothDepthTexture(texture2d<float, access::read> currentTexture [[ texture(0) ]],
+                               texture2d<float, access::read> previousTexture [[ texture(1) ]],
+                               texture2d<float, access::write> outputTexture [[ texture(2) ]],
+                               constant float& previousWeight [[ buffer(0) ]],
+                               constant float& maxDisparityChange [[ buffer(1) ]],
+                               uint2 gid [[ thread_position_in_grid ]]) {
+    if (gid.x >= outputTexture.get_width() || gid.y >= outputTexture.get_height()) {
+        return;
+    }
+    float currentDepth = clamp(currentTexture.read(gid).r, 0.0, 1.0);
+    float previousDepth = clamp(previousTexture.read(gid).r, 0.0, 1.0);
+    float weight = clamp(previousWeight, 0.0, 0.95);
+    float blended = mix(currentDepth, previousDepth, weight);
+    float maxChange = clamp(maxDisparityChange, 0.001, 0.25);
+    float delta = blended - currentDepth;
+    float smoothedDepth = currentDepth + clamp(delta, -maxChange, maxChange);
+    outputTexture.write(float4(smoothedDepth, 0.0, 0.0, 1.0), gid);
 }
 
 float3 pqToLinear(float3 rgb) {

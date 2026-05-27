@@ -25,7 +25,7 @@ public enum Video2DTo3DMode: Equatable, Sendable {
     }
 }
 
-public enum Video2DTo3DOutputLayout: Equatable, Sendable {
+public enum Video2DTo3DOutputLayout: CaseIterable, Equatable, Hashable, Sendable {
     /// Render only `KSOptions.stereoscopicVideoEye` for normal 2D displays.
     case selectedEye
     /// Render left and right eyes into a side-by-side packed frame.
@@ -117,6 +117,12 @@ public struct VideoDepthEstimationRequest {
 public protocol VideoDepthEstimationProvider: AnyObject {
     var providerID: String { get }
     func makeDepthMap(request: VideoDepthEstimationRequest) throws -> VideoDepthMap?
+}
+
+@MainActor
+public protocol KSDepth3DPlugin: VideoDepthEstimationProvider {
+    var displayName: String { get }
+    var processingConfiguration: VideoDepthProcessingConfiguration { get }
 }
 
 public enum VideoDepthAspectPolicy: Equatable, Sendable {
@@ -502,6 +508,12 @@ public final class DepthAnythingDepthEstimationAdapter: VideoDepthEstimationProv
 }
 
 public typealias DepthAnythingV2DepthEstimationAdapter = DepthAnythingDepthEstimationAdapter
+
+extension DepthAnythingDepthEstimationAdapter: KSDepth3DPlugin {
+    public var displayName: String {
+        "\(modelFamily.displayName) \(modelVariant.rawValue) (\(runtime.rawValue))"
+    }
+}
 
 public struct DepthAnythingONNXTensorConfiguration: Equatable, Sendable {
     public enum Layout: String, Equatable, Sendable {
@@ -1169,14 +1181,43 @@ private final class DepthAnythingV2CoreMLInference {
 }
 #endif
 
+public struct Video2DTo3DRenderMetrics: Equatable, Sendable {
+    public let timestamp: TimeInterval
+    public let depthTextureUploadDuration: TimeInterval?
+    public let depthSmoothingDuration: TimeInterval?
+    public let renderDuration: TimeInterval
+    public let stereoPassCount: Int
+    public let usesDepthMap: Bool
+    public let outputLayout: Video2DTo3DOutputLayout
+
+    public init(
+        timestamp: TimeInterval,
+        depthTextureUploadDuration: TimeInterval?,
+        depthSmoothingDuration: TimeInterval?,
+        renderDuration: TimeInterval,
+        stereoPassCount: Int,
+        usesDepthMap: Bool,
+        outputLayout: Video2DTo3DOutputLayout
+    ) {
+        self.timestamp = timestamp
+        self.depthTextureUploadDuration = depthTextureUploadDuration
+        self.depthSmoothingDuration = depthSmoothingDuration
+        self.renderDuration = renderDuration
+        self.stereoPassCount = stereoPassCount
+        self.usesDepthMap = usesDepthMap
+        self.outputLayout = outputLayout
+    }
+}
+
 public struct Video2DTo3DRenderConfiguration: Equatable, Sendable {
-    static let disabled = Video2DTo3DRenderConfiguration(
+    public static let disabled = Video2DTo3DRenderConfiguration(
         isEnabled: false,
         outputLayout: .selectedEye,
         selectedEye: .left,
         depthStrength: 0,
         depthDistance: 1,
         depthCurvature: 1,
+        depthSmoothingFactor: 0,
         usesDepthMap: false
     )
 
@@ -1186,6 +1227,7 @@ public struct Video2DTo3DRenderConfiguration: Equatable, Sendable {
     public let depthStrength: Float
     public let depthDistance: Float
     public let depthCurvature: Float
+    public let depthSmoothingFactor: Float
     public let usesDepthMap: Bool
 
     func drawableSize(for baseSize: CGSize) -> CGSize {
@@ -1195,7 +1237,19 @@ public struct Video2DTo3DRenderConfiguration: Equatable, Sendable {
         return outputLayout.drawableSize(for: baseSize)
     }
 
-    func fragmentUniform(for eye: StereoscopicVideoEye) -> SIMD4<Float> {
+    var stereoPassCount: Int {
+        guard isEnabled else {
+            return 1
+        }
+        switch outputLayout {
+        case .selectedEye:
+            return 1
+        case .sideBySide, .topAndBottom:
+            return 2
+        }
+    }
+
+    public func fragmentUniform(for eye: StereoscopicVideoEye) -> SIMD4<Float> {
         guard isEnabled else {
             return SIMD4<Float>(0, 0, 0, 0)
         }
@@ -1203,11 +1257,11 @@ public struct Video2DTo3DRenderConfiguration: Equatable, Sendable {
         return SIMD4<Float>(1, depthStrength, usesDepthMap ? 1 : 0, eyeSign)
     }
 
-    func shapeUniform() -> SIMD4<Float> {
+    public func shapeUniform() -> SIMD4<Float> {
         guard isEnabled else {
             return SIMD4<Float>(1, 1, 0, 0)
         }
-        return SIMD4<Float>(depthDistance, depthCurvature, 0, 0)
+        return SIMD4<Float>(depthDistance, depthCurvature, depthSmoothingFactor, 0)
     }
 }
 
@@ -1218,6 +1272,8 @@ public enum Video2DTo3DPolicy {
     public static let depthDistanceRange: ClosedRange<Float> = 0 ... 2
     public static let defaultDepthCurvature: Float = 1
     public static let depthCurvatureRange: ClosedRange<Float> = 0.25 ... 3
+    public static let defaultDepthSmoothingFactor: Float = 0.6
+    public static let depthSmoothingFactorRange: ClosedRange<Float> = 0 ... 0.95
     public static let unavailablePlatformReason = "2D-to-3D conversion is available only on visionOS / Apple Vision Pro."
 
     public static var isSupportedPlatform: Bool {
@@ -1249,6 +1305,13 @@ public enum Video2DTo3DPolicy {
         return min(max(value, depthCurvatureRange.lowerBound), depthCurvatureRange.upperBound)
     }
 
+    public static func validatedDepthSmoothingFactor(_ value: Float) -> Float {
+        guard value.isFinite else {
+            return defaultDepthSmoothingFactor
+        }
+        return min(max(value, depthSmoothingFactorRange.lowerBound), depthSmoothingFactorRange.upperBound)
+    }
+
     public static func unavailableReason(mode: Video2DTo3DMode) -> String? {
         guard mode.isEnabled, !isSupportedPlatform else {
             return nil
@@ -1265,6 +1328,7 @@ public enum Video2DTo3DPolicy {
         depthStrength: Float,
         depthDistance: Float,
         depthCurvature: Float,
+        depthSmoothingFactor: Float,
         outputLayout: Video2DTo3DOutputLayout,
         selectedEye: StereoscopicVideoEye,
         display: DisplayEnum,
@@ -1281,6 +1345,7 @@ public enum Video2DTo3DPolicy {
             depthStrength: validatedDepthStrength(depthStrength),
             depthDistance: validatedDepthDistance(depthDistance),
             depthCurvature: validatedDepthCurvature(depthCurvature),
+            depthSmoothingFactor: validatedDepthSmoothingFactor(depthSmoothingFactor),
             usesDepthMap: mode == .depthMapPreferred && hasDepthMap
         )
     }

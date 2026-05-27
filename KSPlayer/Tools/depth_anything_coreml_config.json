@@ -1,14 +1,22 @@
 {
   "modelFamily": "depthAnything3",
   "runtime": "coreML",
-  "preferredVisionOSRuntime": "Core ML with MLModelConfiguration.computeUnits = .cpuAndNeuralEngine",
+  "preferredVisionOSRuntime": "Core ML with MLModelConfiguration.computeUnits = .cpuAndNeuralEngine (ANE-preferred). Use DA3_COMPUTE_UNITS=strict_ane in the demo to fail load instead of falling back to .all.",
+  "currentCompiledArtifact": {
+    "path": "PrivateArtifacts/DepthAnything3/coreml/DA3-SMALL/compiled/da3-small.mlmodelc",
+    "inputShape": "1x1x3x336x336",
+    "outputShape": "1x1x336x336",
+    "hasShapeFlexibility": false,
+    "note": "The checked-in compiled model is fixed at 336x336. Do not request 384x216 at runtime unless a new flexible or fixed 384x216 model is compiled and bundled."
+  },
   "input": {
     "name": "image",
-    "kind": "image",
+    "kind": "multiArray",
     "colorLayout": "RGB",
-    "width": 518,
-    "height": 518,
-    "note": "Include model-specific mean/std preprocessing in the exported graph or Core ML image preprocessing. KSPlayer resizes frames and passes a Core ML image input."
+    "width": 384,
+    "height": 216,
+    "shape": "1x1x3xHxW for the DA3 Small wrapper used by this demo",
+    "note": "384x216 is a future export target for lower latency. Include model-specific mean/std preprocessing in the exported graph or Core ML preprocessing."
   },
   "output": {
     "preferredName": "depth",
@@ -18,10 +26,14 @@
     "normalization": "Finite values are min/max normalized per frame unless VideoDepthProcessingConfiguration.normalization is .none. Larger normalized values are treated as closer to the viewer."
   },
   "processing": {
-    "inputSize": {"width": 518, "height": 518},
+    "inputSize": {"width": 384, "height": 216},
     "maximumInferenceFPS": 12,
     "temporalSmoothingFactor": 0.6,
     "invertDepth": false
+  },
+  "conversion": {
+    "source": "PyTorch TorchScript or torch.export ExportedProgram",
+    "note": "Export DA3-Small depth branch only (no ray-map head). Convert with FP16 and compute_units cpuAndNeuralEngine. Profile in Xcode Core ML Instruments — CPU transformer layers indicate ANE fallback (~5 fps). Temporary fallback: Depth Anything V2 Small Core ML via KSPlayer DepthAnythingV2DepthEstimationAdapter."
   },
   "onnxRuntimeFallback": {
     "enabledOnlyWhenAppBundlesVisionOSRuntime": true,

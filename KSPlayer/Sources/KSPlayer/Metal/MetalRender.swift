@@ -14,12 +14,28 @@ import simd
 class MetalRender {
     static let device = MTLCreateSystemDefaultDevice()!
     static let library: MTLLibrary = {
-        var library: MTLLibrary!
-        library = device.makeDefaultLibrary()
-        if library == nil {
-            library = try? device.makeDefaultLibrary(bundle: .module)
+        func hasCoreVideoShaders(_ library: MTLLibrary) -> Bool {
+            library.makeFunction(name: "mapTexture") != nil &&
+                library.makeFunction(name: "displayNV12Texture") != nil
         }
-        return library
+
+        // Prefer the KSPlayer module metallib. Host apps that compile their own .metal
+        // files become the process default library and would shadow KSPlayer shaders.
+        if let moduleLibrary = try? device.makeDefaultLibrary(bundle: .module),
+           hasCoreVideoShaders(moduleLibrary) {
+            return moduleLibrary
+        }
+        if let defaultLibrary = device.makeDefaultLibrary(),
+           hasCoreVideoShaders(defaultLibrary) {
+            return defaultLibrary
+        }
+        if let moduleLibrary = try? device.makeDefaultLibrary(bundle: .module) {
+            return moduleLibrary
+        }
+        if let defaultLibrary = device.makeDefaultLibrary() {
+            return defaultLibrary
+        }
+        fatalError("Unable to load KSPlayer Metal shader library")
     }()
     private static let colorMatrix601 = kvImage_YpCbCrToARGBMatrix_ITU_R_601_4.pointee
     private static let colorMatrix709 = kvImage_YpCbCrToARGBMatrix_ITU_R_709_2.pointee
@@ -89,18 +105,33 @@ class MetalRender {
         return texture
     }()
 
+    private lazy var disabledHDR10PlusWindowBuffer: MTLBuffer? = {
+        var window = HDR10PlusMetalToneMappingWindow(
+            control: SIMD4<Float>(repeating: 0),
+            scene: SIMD4<Float>(repeating: 0),
+            region: SIMD4<Float>(repeating: 0),
+            extra: SIMD4<Float>(repeating: 0),
+            selector: SIMD4<Float>(repeating: 0),
+            selectorAxes: SIMD4<Float>(repeating: 0)
+        )
+        let buffer = MetalRender.device.makeBuffer(bytes: &window, length: MemoryLayout<HDR10PlusMetalToneMappingWindow>.stride)
+        buffer?.label = "disabledHDR10PlusWindow"
+        return buffer
+    }()
+
     func clear(drawable: MTLDrawable) {
         renderPassDescriptor.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
         renderPassDescriptor.colorAttachments[0].loadAction = .clear
         guard let commandBuffer = commandQueue?.makeCommandBuffer(),
               let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor)
         else {
+            Depth3DDebug.warn("Unable to create Metal clear command buffer or encoder", phase: "metal-clear")
             return
         }
         encoder.endEncoding()
+        Depth3DDebug.logCommandBuffer(commandBuffer, label: "clear", phase: "metal-clear")
         commandBuffer.present(drawable)
         commandBuffer.commit()
-        commandBuffer.waitUntilCompleted()
     }
 
     @MainActor
@@ -121,7 +152,11 @@ class MetalRender {
         let inputTextures = pixelBuffer.textures()
         renderPassDescriptor.colorAttachments[0].texture = drawable.texture
         guard !inputTextures.isEmpty, let commandBuffer = commandQueue?.makeCommandBuffer(), let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor) else {
+            Depth3DDebug.warn("Unable to render frame: inputTextures=\(inputTextures.count) drawable=\(drawable.texture.width)x\(drawable.texture.height)", phase: "metal-render")
             return
+        }
+        if video2DTo3D.usesDepthMap {
+            Depth3DDebug.assertTexture(depthTexture, label: "render depth", expectedPixelFormat: .r32Float, phase: "metal-render")
         }
         encoder.pushDebugGroup("RenderFrame")
         let state = display.pipeline(planeCount: pixelBuffer.planeCount, bitDepth: pixelBuffer.bitDepth)
@@ -146,9 +181,9 @@ class MetalRender {
         )
         encoder.popDebugGroup()
         encoder.endEncoding()
+        Depth3DDebug.logCommandBuffer(commandBuffer, label: "render frame", phase: "metal-render")
         commandBuffer.present(drawable)
         commandBuffer.commit()
-        commandBuffer.waitUntilCompleted()
     }
 
     private func setFragmentBuffer(pixelBuffer: PixelBufferProtocol, encoder: MTLRenderCommandEncoder) {
@@ -186,6 +221,20 @@ class MetalRender {
 
     private func setHDR10PlusToneMapping(_ toneMapping: HDR10PlusMetalToneMappingUniform?, encoder: MTLRenderCommandEncoder) {
         var global = HDR10PlusMetalToneMappingUniform.disabled.global
+        if let disabledHDR10PlusWindowBuffer {
+            encoder.setFragmentBuffer(disabledHDR10PlusWindowBuffer, offset: 0, index: 5)
+        } else {
+            var disabledWindow = HDR10PlusMetalToneMappingWindow(
+                control: SIMD4<Float>(repeating: 0),
+                scene: SIMD4<Float>(repeating: 0),
+                region: SIMD4<Float>(repeating: 0),
+                extra: SIMD4<Float>(repeating: 0),
+                selector: SIMD4<Float>(repeating: 0),
+                selectorAxes: SIMD4<Float>(repeating: 0)
+            )
+            Depth3DDebug.warn("Falling back to setFragmentBytes for disabled HDR10+ windows", phase: "metal-render")
+            encoder.setFragmentBytes(&disabledWindow, length: MemoryLayout<HDR10PlusMetalToneMappingWindow>.stride, index: 5)
+        }
         if let toneMapping, !toneMapping.windows.isEmpty {
             let windowBuffer = toneMapping.windows.withUnsafeBytes { rawBuffer -> MTLBuffer? in
                 guard let baseAddress = rawBuffer.baseAddress else {
@@ -196,6 +245,8 @@ class MetalRender {
             if let windowBuffer {
                 global = toneMapping.global
                 encoder.setFragmentBuffer(windowBuffer, offset: 0, index: 5)
+            } else {
+                Depth3DDebug.warn("HDR10+ metadata was present but Metal window buffer allocation failed; rendering without HDR10+ tone mapping", phase: "metal-render")
             }
         }
         encoder.setFragmentBytes(&global, length: MemoryLayout<SIMD4<Float>>.stride, index: 4)
@@ -210,10 +261,17 @@ class MetalRender {
     }
 
     static func makePipelineState(fragmentFunction: String, isSphere: Bool = false, bitDepth: Int32 = 8) -> MTLRenderPipelineState {
+        let vertexName = isSphere ? "mapSphereTexture" : "mapTexture"
+        guard let vertexFunction = library.makeFunction(name: vertexName) else {
+            fatalError("Missing Metal vertex function \(vertexName) in KSPlayer shader library")
+        }
+        guard let fragmentFunction = library.makeFunction(name: fragmentFunction) else {
+            fatalError("Missing Metal fragment function \(fragmentFunction) in KSPlayer shader library")
+        }
         let descriptor = MTLRenderPipelineDescriptor()
         descriptor.colorAttachments[0].pixelFormat = KSOptions.colorPixelFormat(bitDepth: bitDepth)
-        descriptor.vertexFunction = library.makeFunction(name: isSphere ? "mapSphereTexture" : "mapTexture")
-        descriptor.fragmentFunction = library.makeFunction(name: fragmentFunction)
+        descriptor.vertexFunction = vertexFunction
+        descriptor.fragmentFunction = fragmentFunction
         let vertexDescriptor = MTLVertexDescriptor()
         vertexDescriptor.attributes[0].format = .float4
         vertexDescriptor.attributes[0].bufferIndex = 0
@@ -224,13 +282,16 @@ class MetalRender {
         vertexDescriptor.layouts[0].stride = MemoryLayout<simd_float4>.stride
         vertexDescriptor.layouts[1].stride = MemoryLayout<simd_float2>.stride
         descriptor.vertexDescriptor = vertexDescriptor
-        // swiftlint:disable force_try
-        return try! library.device.makeRenderPipelineState(descriptor: descriptor)
-        // swftlint:enable force_try
+        do {
+            return try library.device.makeRenderPipelineState(descriptor: descriptor)
+        } catch {
+            fatalError("Unable to create Metal pipeline \(fragmentFunction): \(error)")
+        }
     }
 
     static func texture(pixelBuffer: CVPixelBuffer) -> [MTLTexture] {
         guard let iosurface = CVPixelBufferGetIOSurface(pixelBuffer)?.takeUnretainedValue() else {
+            Depth3DDebug.warn("CVPixelBuffer has no IOSurface for Metal texture creation \(CVPixelBufferGetWidth(pixelBuffer))x\(CVPixelBufferGetHeight(pixelBuffer)) format \(CVPixelBufferGetPixelFormatType(pixelBuffer))", phase: "pixelbuffer-texture")
             return []
         }
         let formats = KSOptions.pixelFormat(planeCount: pixelBuffer.planeCount, bitDepth: pixelBuffer.bitDepth)
@@ -238,7 +299,13 @@ class MetalRender {
             let width = pixelBuffer.widthOfPlane(at: index)
             let height = pixelBuffer.heightOfPlane(at: index)
             let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: formats[index], width: width, height: height, mipmapped: false)
-            return device.makeTexture(descriptor: descriptor, iosurface: iosurface, plane: index)
+            let texture = device.makeTexture(descriptor: descriptor, iosurface: iosurface, plane: index)
+            if let texture {
+                Depth3DDebug.log("Created pixel-buffer texture plane \(index) \(width)x\(height) format \(texture.pixelFormat)", phase: "pixelbuffer-texture", verboseOnly: true)
+            } else {
+                Depth3DDebug.warn("Failed pixel-buffer texture plane \(index) \(width)x\(height) format \(formats[index])", phase: "pixelbuffer-texture")
+            }
+            return texture
         }
     }
 

@@ -4,6 +4,21 @@
 This script intentionally does not download model weights. Point it at a
 TorchScript or torch.export artifact that your app team has already produced
 from Depth Anything V2/V3, then validate the generated model on Vision Pro.
+coremltools 9 converts PyTorch programs; it does not provide a direct ONNX
+converter path.
+
+Vision Pro performance checklist (DA3):
+- Export **DA3-Small** only; Base/Large will not hit 24–60 depth fps on device.
+- Strip the **ray-map / pose head** in PyTorch before export — single-view stereo
+  reprojection only needs relative depth (roughly halves decoder work).
+- Convert with **FP16** weights (`--compute-precision` default) and
+  `--compute-unit cpuAndNeuralEngine`.
+- Profile the compiled `.mlmodelc` in Xcode Instruments (Core ML template). If
+  transformer blocks show CPU, the graph has ANE-incompatible ops (attention /
+  custom fusion) and will stall around ~5 fps until the export is fixed.
+- For immediate smooth playback while retuning DA3, bundle Apple's optimized
+  Depth Anything V2 Small Core ML model and use KSPlayer's
+  `DepthAnythingV2DepthEstimationAdapter` (see demo README).
 """
 
 from __future__ import annotations
@@ -21,10 +36,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("source_model", type=pathlib.Path, help="TorchScript .pt/.pth or torch.export artifact")
     parser.add_argument("output_model", type=pathlib.Path, help="Output .mlpackage or .mlmodel path")
     parser.add_argument("--source-format", choices=("torchscript", "exportedprogram"), default="torchscript")
-    parser.add_argument("--input-name", default="image", help="Core ML image input feature name")
+    parser.add_argument("--input-name", default="image", help="Core ML input feature name")
     parser.add_argument("--output-name", default="depth", help="Rename the first model output to this feature")
-    parser.add_argument("--width", type=int, default=518, help="Model input width")
-    parser.add_argument("--height", type=int, default=518, help="Model input height")
+    parser.add_argument("--width", type=int, default=384, help="Model input width")
+    parser.add_argument("--height", type=int, default=216, help="Model input height")
+    parser.add_argument(
+        "--input-kind",
+        choices=("multiarray", "image"),
+        default="multiarray",
+        help="Use multiarray for the DA3 Small 1x1x3xHxW wrapper, or image for Core ML image-input wrappers.",
+    )
     parser.add_argument("--image-scale", type=float, default=1.0 / 255.0, help="Core ML image scale")
     parser.add_argument(
         "--image-bias",
@@ -38,7 +59,18 @@ def parse_args() -> argparse.Namespace:
         "--compute-unit",
         choices=("all", "cpuOnly", "cpuAndGPU", "cpuAndNeuralEngine"),
         default="cpuAndNeuralEngine",
-        help="Compute unit hint used when saving/checking the model.",
+        help="Compute unit hint used when saving/checking the model (ANE-preferred on Apple Silicon).",
+    )
+    parser.add_argument(
+        "--compute-precision",
+        choices=("FLOAT16", "FLOAT32"),
+        default="FLOAT16",
+        help="Weight/activation precision for the mlprogram (FP16 is ANE-friendly).",
+    )
+    parser.add_argument(
+        "--palettize-weights",
+        action="store_true",
+        help="Apply coremltools weight palettization after conversion (optional extra compression).",
     )
     parser.add_argument(
         "--minimum-deployment-target",
@@ -81,12 +113,20 @@ def deployment_target(coremltools_module, name: str | None):
 
 def convert_model(args: argparse.Namespace) -> None:
     import coremltools as ct
+    import numpy as np
 
     source = load_source_model(args)
     target = deployment_target(ct, args.minimum_deployment_target)
-    convert_options = {
-        "source": "pytorch",
-        "inputs": [
+    if args.input_kind == "multiarray":
+        inputs = [
+            ct.TensorType(
+                name=args.input_name,
+                shape=(1, 1, 3, args.height, args.width),
+                dtype=np.float16,
+            )
+        ]
+    else:
+        inputs = [
             ct.ImageType(
                 name=args.input_name,
                 shape=(1, 3, args.height, args.width),
@@ -94,9 +134,13 @@ def convert_model(args: argparse.Namespace) -> None:
                 bias=list(args.image_bias),
                 color_layout=ct.colorlayout.RGB,
             )
-        ],
+        ]
+    precision = ct.precision.FLOAT16 if args.compute_precision == "FLOAT16" else ct.precision.FLOAT32
+    convert_options = {
+        "source": "pytorch",
+        "inputs": inputs,
         "compute_units": compute_unit(ct, args.compute_unit),
-        "compute_precision": ct.precision.FLOAT16,
+        "compute_precision": precision,
         "convert_to": "mlprogram",
     }
     if target is not None:
@@ -111,6 +155,19 @@ def convert_model(args: argparse.Namespace) -> None:
             model = ct.models.MLModel(spec, compute_units=compute_unit(ct, args.compute_unit))
 
     args.output_model.parent.mkdir(parents=True, exist_ok=True)
+    if args.palettize_weights:
+        try:
+            from coremltools.optimize.coreml import (
+                OpPalettizerConfig,
+                OptimizationConfig,
+                palettize_weights,
+            )
+
+            palettizer_config = OpPalettizerConfig(mode="uniform", nbits=8)
+            model = palettize_weights(model, config=OptimizationConfig(global_config=palettizer_config))
+            print("Applied 8-bit weight palettization")
+        except Exception as error:
+            print(f"Palettization skipped: {error}", file=sys.stderr)
     model.save(args.output_model)
 
 

@@ -35,6 +35,9 @@ final class VideoToolboxDecode: DecodeProtocol, @unchecked Sendable {
     private var startTime = Int64(0)
     private var lastPosition = Int64(0)
     private var needReconfig = false
+    private var consecutiveNullOutputCount = 0
+    private static let maxConsecutiveNullOutputBeforeFallback = 8
+    private static let vtNullImageBufferStatus: OSStatus = -12_909
 
     init(options: KSOptions, session: DecompressionSession) {
         self.options = options
@@ -42,6 +45,19 @@ final class VideoToolboxDecode: DecodeProtocol, @unchecked Sendable {
         lowLatencyAsyncSemaphore = options.lowLatencyLiveProfile == nil
             ? nil
             : DispatchSemaphore(value: Self.lowLatencyAsyncFrameLimit)
+    }
+
+    /// Recreates the VT session after adaptive stream / resolution changes without waiting for decode failures.
+    func invalidateForStreamChange() {
+        markNeedsReconfig()
+        guard let newSession = DecompressionSession(assetTrack: session.assetTrack, options: options) else {
+            return
+        }
+        session = newSession
+        resetTiming()
+        stateLock.lock()
+        consecutiveNullOutputCount = 0
+        stateLock.unlock()
     }
 
     func decodeFrame(from packet: Packet, completionHandler: @escaping (Result<MEFrame, Error>) -> Void) {
@@ -104,6 +120,29 @@ final class VideoToolboxDecode: DecodeProtocol, @unchecked Sendable {
                     }
                     return
                 }
+                guard let imageBuffer else {
+                    let shouldFail: Bool
+                    stateLock.lock()
+                    consecutiveNullOutputCount += 1
+                    let nullCount = consecutiveNullOutputCount
+                    if nullCount >= Self.maxConsecutiveNullOutputBeforeFallback {
+                        consecutiveNullOutputCount = 0
+                    }
+                    stateLock.unlock()
+                    let nullOutputLimit = options.requiresDecodedVideoFrameOutput
+                        ? 3
+                        : Self.maxConsecutiveNullOutputBeforeFallback
+                    shouldFail = isKeyFrame || nullCount >= nullOutputLimit
+                    if shouldFail {
+                        completion(.failure(NSError(errorCode: .codecVideoReceiveFrame, avErrorCode: Self.vtNullImageBufferStatus)))
+                    } else {
+                        markNeedsReconfig()
+                    }
+                    return
+                }
+                stateLock.lock()
+                consecutiveNullOutputCount = 0
+                stateLock.unlock()
                 let frame = VideoVTBFrame(
                     fps: nominalFrameRate,
                     isDovi: isDovi,

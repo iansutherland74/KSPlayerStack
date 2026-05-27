@@ -109,6 +109,41 @@ class SyncPlayerItemTrack<Frame: MEFrame>: PlayerItemTrackProtocol, CustomString
         outputRenderQueue.shutdown()
     }
 
+    /// Recreates VideoToolbox sessions after ABR / resolution switches (FFmpeg may log `output image buffer is null: -12909`).
+    func resetVideoToolboxDecodersIfNeeded() {
+        guard mediaType == .video else {
+            return
+        }
+        for decoder in decoderMap.values {
+            (decoder as? VideoToolboxDecode)?.invalidateForStreamChange()
+        }
+    }
+
+    /// Removes VideoToolbox decoders from the cache so subsequent packets create `FFmpegDecode`.
+    func replaceVideoToolboxDecodersWithSoftware() {
+        guard mediaType == .video else {
+            return
+        }
+        let requiresSoftwarePath = !options.hardwareDecode
+            || options.requiresDecodedVideoFrameOutput
+            || options.videoFrameOutput != nil
+        guard requiresSoftwarePath else {
+            return
+        }
+        let videoToolboxTrackIDs = decoderMap.compactMap { trackID, decoder -> Int32? in
+            decoder is VideoToolboxDecode ? trackID : nil
+        }
+        guard !videoToolboxTrackIDs.isEmpty else {
+            return
+        }
+        for trackID in videoToolboxTrackIDs {
+            decoderMap[trackID]?.shutdown()
+            decoderMap.removeValue(forKey: trackID)
+        }
+        outputRenderQueue.flush()
+        KSLog("[video] Replaced \(videoToolboxTrackIDs.count) VideoToolbox decoder(s) with software decode path")
+    }
+
     private var lastPacketBytes = Int32(0)
     private var lastPacketSeconds = Double(-1)
     var bitrate = Double(0)
@@ -153,13 +188,12 @@ class SyncPlayerItemTrack<Frame: MEFrame>: PlayerItemTrackProtocol, CustomString
                 }
                 if let frame = frame as? Frame {
                     if self.mediaType == .video,
-                       let videoFrame = frame as? VideoVTBFrame,
-                       let pixelBuffer = videoFrame.corePixelBuffer?.cvPixelBuffer
+                       let videoFrame = frame as? VideoVTBFrame
                     {
-                        self.options.videoFrameOutput?.enqueue(
-                            pixelBuffer,
-                            presentationTime: videoFrame.timebase.cmtime(for: videoFrame.timestamp)
-                        )
+                        self.enqueueDecodedVideoFrameOutput(from: videoFrame)
+                        if self.options.videoFrameOutput != nil, self.frameCount >= self.frameMaxCount {
+                            _ = self.outputRenderQueue.pop(where: nil)
+                        }
                     }
                     self.outputRenderQueue.push(frame)
                     self.outputRenderQueue.fps = packet.assetTrack.nominalFrameRate
@@ -310,19 +344,50 @@ protocol DecodeProtocol {
 }
 
 extension SyncPlayerItemTrack {
+    fileprivate func enqueueDecodedVideoFrameOutput(from videoFrame: VideoVTBFrame) {
+        guard mediaType == .video,
+              let output = options.videoFrameOutput,
+              let pixelBuffer = videoFrame.corePixelBuffer?.cvPixelBuffer
+        else {
+            return
+        }
+        if options.suppressWindowVideoPresentationWhileImmersiveCompositorActive,
+           options.immersivePresentVideoFrame != nil
+        {
+            // Immersive color is delivered from MetalPlayView using audio clock sync.
+            return
+        }
+        output.enqueue(
+            pixelBuffer,
+            presentationTime: videoFrame.timebase.cmtime(for: videoFrame.timestamp)
+        )
+    }
+
     func makeDecode(assetTrack: FFmpegAssetTrack) -> DecodeProtocol {
         autoreleasepool {
             if mediaType == .subtitle {
                 return SubtitleDecode(assetTrack: assetTrack, options: options)
             } else {
-                if mediaType == .video, options.asynchronousDecompression, options.hardwareDecode,
+                let useVideoToolbox = mediaType == .video
+                    && !requiresSoftwareVideoDecodeForFrameOutput
+                    && options.asynchronousDecompression
+                    && options.hardwareDecode
+                if useVideoToolbox,
                    let session = DecompressionSession(assetTrack: assetTrack, options: options)
                 {
                     return VideoToolboxDecode(options: options, session: session)
                 } else {
+                    if mediaType == .video, requiresSoftwareVideoDecodeForFrameOutput {
+                        KSLog("[video] Using FFmpeg decode for frame-output path (track \(assetTrack.trackID))")
+                    }
                     return FFmpegDecode(assetTrack: assetTrack, options: options)
                 }
             }
         }
+    }
+
+    /// `KSVideoFrameOutput` / immersive compositor require stable NV12 from FFmpeg; VideoToolbox often -12909 on HLS.
+    private var requiresSoftwareVideoDecodeForFrameOutput: Bool {
+        options.requiresDecodedVideoFrameOutput || options.videoFrameOutput != nil
     }
 }

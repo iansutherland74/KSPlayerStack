@@ -176,6 +176,11 @@ public final class MetalPlayView: UIView, @preconcurrency VideoOutput, @preconcu
     public func flush() {
         pixelBuffer = nil
         resetUpscalingState()
+        clearWindowPresentation()
+    }
+
+    private func clearWindowPresentation() {
+        pixelBuffer = nil
         if displayView.isHidden {
             metalView.clear()
         } else {
@@ -193,6 +198,10 @@ public final class MetalPlayView: UIView, @preconcurrency VideoOutput, @preconcu
         draw(force: true)
     }
 
+    public func readNextFrame(force: Bool) {
+        draw(force: force)
+    }
+
 //    deinit {
 //        print()
 //    }
@@ -206,6 +215,14 @@ extension MetalPlayView {
     private func draw(force: Bool) {
         autoreleasepool {
             guard let frame = renderSource?.getVideoOutputRender(force: force) else {
+                return
+            }
+            if options.suppressWindowVideoPresentationWhileImmersiveCompositorActive {
+                // Present immersive video from the same audio-synced frame the window would have shown.
+                if let pixelBuffer = frame.corePixelBuffer?.cvPixelBuffer {
+                    options.immersivePresentVideoFrame?(pixelBuffer, frame.seconds)
+                }
+                clearWindowPresentation()
                 return
             }
             pixelBuffer = frame.corePixelBuffer
@@ -317,7 +334,7 @@ extension MetalPlayView {
                     metalView.metalLayer.edrMetadata = frame.edrMetadata
                 }
                 #endif
-                metalView.draw(
+                let renderMetrics = metalView.draw(
                     pixelBuffer: renderPixelBuffer,
                     display: options.display,
                     size: size,
@@ -331,6 +348,9 @@ extension MetalPlayView {
                     panoramaStereoLayout: options.panoramaStereoLayout,
                     panoramaFieldOfView: options.panoramaFieldOfView
                 )
+                if let renderMetrics {
+                    options.video2DTo3DRenderMetricsHandler?(renderMetrics)
+                }
             }
             renderSource?.setVideo(time: cmtime, position: frame.position)
         }
@@ -482,6 +502,8 @@ extension MetalPlayView {
 class MetalView: UIView {
     private let render = MetalRender()
     private var neutralDepthTexture: MTLTexture?
+    private let depthTextureCache = ReusableDepthTextureCache(device: MetalRender.device, usage: [.shaderRead])
+    private lazy var temporalDepthSmoother = MetalTemporalDepthSmoother(device: MetalRender.device, library: MetalRender.library)
     #if canImport(UIKit)
     override public class var layerClass: AnyClass { CAMetalLayer.self }
     #endif
@@ -525,7 +547,7 @@ class MetalView: UIView {
         stereoscopicVideoEye: StereoscopicVideoEye,
         panoramaStereoLayout: PanoramaStereoLayout,
         panoramaFieldOfView: PanoramaFieldOfView
-    ) {
+    ) -> Video2DTo3DRenderMetrics? {
         metalLayer.drawableSize = size
         metalLayer.pixelFormat = KSOptions.colorPixelFormat(bitDepth: pixelBuffer.bitDepth)
         let colorspace = pixelBuffer.colorspace
@@ -549,8 +571,31 @@ class MetalView: UIView {
         }
         guard let drawable = metalLayer.nextDrawable() else {
             KSLog("[video] CAMetalLayer not readyForMoreMediaData")
-            return
+            Depth3DDebug.warn("CAMetalLayer returned no drawable for size \(size.width)x\(size.height)", phase: "renderer-draw")
+            return nil
         }
+        let uploadStart = Date().timeIntervalSinceReferenceDate
+        var preparedDepthTexture = makeDepthTexture(depthMap: depthMap)
+        let uploadDuration = depthMap == nil ? nil : Date().timeIntervalSinceReferenceDate - uploadStart
+        if video2DTo3D.isEnabled, depthMap == nil {
+            Depth3DDebug.log("Rendering 2D-to-3D without DA3 depth frame; shader will use pseudo/neutral fallback", phase: "renderer-draw", verboseOnly: true)
+        }
+        if video2DTo3D.usesDepthMap, preparedDepthTexture == nil {
+            Depth3DDebug.warn("DA3 depth map exists but Metal texture creation returned nil", phase: "renderer-draw")
+        }
+        var smoothingDuration: TimeInterval?
+        if let depthMap, let depthTexture = preparedDepthTexture, video2DTo3D.depthSmoothingFactor > 0 {
+            let smoothingStart = Date().timeIntervalSinceReferenceDate
+            Depth3DDebug.assertTexture(depthTexture, label: "pre-smoothing depth", expectedPixelFormat: .r32Float, phase: "depth-smoothing")
+            preparedDepthTexture = temporalDepthSmoother.smoothedTexture(
+                current: depthTexture,
+                factor: video2DTo3D.depthSmoothingFactor
+            ) ?? depthTexture
+            smoothingDuration = Date().timeIntervalSinceReferenceDate - smoothingStart
+        } else if depthMap == nil || video2DTo3D.depthSmoothingFactor <= 0 {
+            temporalDepthSmoother.reset()
+        }
+        let renderStart = Date().timeIntervalSinceReferenceDate
         render.draw(
             pixelBuffer: pixelBuffer,
             display: display,
@@ -559,11 +604,24 @@ class MetalView: UIView {
             dynamicRange: dynamicRange,
             hdr10PlusToneMapping: hdr10PlusToneMapping,
             video2DTo3D: video2DTo3D,
-            depthTexture: makeDepthTexture(depthMap: depthMap),
+            depthTexture: preparedDepthTexture,
             stereoscopicVideoLayout: stereoscopicVideoLayout,
             stereoscopicVideoEye: stereoscopicVideoEye,
             panoramaStereoLayout: panoramaStereoLayout,
             panoramaFieldOfView: panoramaFieldOfView
+        )
+        let renderDuration = Date().timeIntervalSinceReferenceDate - renderStart
+        guard video2DTo3D.isEnabled else {
+            return nil
+        }
+        return Video2DTo3DRenderMetrics(
+            timestamp: Date().timeIntervalSinceReferenceDate,
+            depthTextureUploadDuration: uploadDuration,
+            depthSmoothingDuration: smoothingDuration,
+            renderDuration: renderDuration,
+            stereoPassCount: video2DTo3D.stereoPassCount,
+            usesDepthMap: depthMap != nil,
+            outputLayout: video2DTo3D.outputLayout
         )
     }
 
@@ -584,14 +642,22 @@ class MetalView: UIView {
     }
 
     private func makeDepthTexture(width: Int, height: Int, values: [Float], label: String) -> MTLTexture? {
-        let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .r32Float, width: width, height: height, mipmapped: false)
-        descriptor.usage = [.shaderRead]
-        guard let texture = MetalRender.device.makeTexture(descriptor: descriptor) else {
+        guard width > 0, height > 0 else {
+            Depth3DDebug.fail("Invalid renderer depth texture size \(width)x\(height)", phase: "renderer-depth-texture")
             return nil
         }
-        texture.label = label
+        guard values.count == width * height else {
+            Depth3DDebug.fail("Invalid renderer depth value count \(values.count), expected \(width * height)", phase: "renderer-depth-texture")
+            return nil
+        }
+        guard let texture = depthTextureCache.texture(width: width, height: height, label: label) else {
+            Depth3DDebug.fail("Reusable renderer depth texture cache returned nil for \(width)x\(height)", phase: "renderer-depth-texture")
+            return nil
+        }
+        Depth3DDebug.assertTexture(texture, label: label, expectedPixelFormat: .r32Float, phase: "renderer-depth-texture")
         values.withUnsafeBytes { rawBuffer in
             guard let baseAddress = rawBuffer.baseAddress else {
+                Depth3DDebug.fail("Depth values for \(label) had no base address", phase: "renderer-depth-texture")
                 return
             }
             texture.replace(
@@ -602,6 +668,134 @@ class MetalView: UIView {
             )
         }
         return texture
+    }
+}
+
+private final class ReusableDepthTextureCache {
+    private let device: MTLDevice
+    private let usage: MTLTextureUsage
+    private let textureCount = 3
+    private var width = 0
+    private var height = 0
+    private var textures: [MTLTexture] = []
+    private var nextIndex = 0
+
+    init(device: MTLDevice, usage: MTLTextureUsage) {
+        self.device = device
+        self.usage = usage
+    }
+
+    func texture(width: Int, height: Int, label: String) -> MTLTexture? {
+        guard width > 0, height > 0 else {
+            Depth3DDebug.fail("Invalid cached depth texture request \(width)x\(height)", phase: "renderer-depth-cache")
+            return nil
+        }
+        if self.width != width || self.height != height || textures.isEmpty {
+            let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+                pixelFormat: .r32Float,
+                width: width,
+                height: height,
+                mipmapped: false
+            )
+            descriptor.usage = usage
+            descriptor.storageMode = .shared
+            textures = (0 ..< textureCount).compactMap { index in
+                let texture = device.makeTexture(descriptor: descriptor)
+                texture?.label = "\(label)-\(index)"
+                return texture
+            }
+            if textures.count != textureCount {
+                Depth3DDebug.warn("Allocated \(textures.count)/\(textureCount) cached depth textures for \(width)x\(height)", phase: "renderer-depth-cache")
+            } else {
+                Depth3DDebug.log("Allocated cached depth textures \(width)x\(height) format \(descriptor.pixelFormat)", phase: "renderer-depth-cache", verboseOnly: true)
+            }
+            self.width = width
+            self.height = height
+            nextIndex = 0
+        }
+        guard !textures.isEmpty else {
+            return nil
+        }
+        let texture = textures[nextIndex]
+        texture.label = label
+        nextIndex = (nextIndex + 1) % textures.count
+        return texture
+    }
+}
+
+private final class MetalTemporalDepthSmoother {
+    private let commandQueue: MTLCommandQueue?
+    private let pipelineState: MTLComputePipelineState?
+    private let outputTextureCache: ReusableDepthTextureCache
+    private var previousTexture: MTLTexture?
+
+    init(device: MTLDevice, library: MTLLibrary) {
+        commandQueue = device.makeCommandQueue()
+        if let function = library.makeFunction(name: "smoothDepthTexture") {
+            pipelineState = try? device.makeComputePipelineState(function: function)
+        } else {
+            pipelineState = nil
+        }
+        outputTextureCache = ReusableDepthTextureCache(device: device, usage: [.shaderRead, .shaderWrite])
+    }
+
+    func reset() {
+        previousTexture = nil
+    }
+
+    func smoothedTexture(current: MTLTexture, factor: Float) -> MTLTexture? {
+        guard Depth3DDebug.assertTexture(current, label: "smoothing current", expectedPixelFormat: .r32Float, phase: "depth-smoothing") else {
+            previousTexture = current
+            return nil
+        }
+        guard let commandBuffer = commandQueue?.makeCommandBuffer(),
+              let pipelineState,
+              let output = outputTextureCache.texture(width: current.width, height: current.height, label: "videoDepthSmoothed"),
+              let encoder = commandBuffer.makeComputeCommandEncoder()
+        else {
+            Depth3DDebug.warn("Unable to create depth smoothing command buffer, pipeline, output texture, or encoder", phase: "depth-smoothing")
+            previousTexture = current
+            return nil
+        }
+
+        let previous = compatiblePreviousTexture(for: current) ?? current
+        Depth3DDebug.assertTexture(previous, label: "smoothing previous", expectedPixelFormat: current.pixelFormat, phase: "depth-smoothing")
+        Depth3DDebug.assertTexture(output, label: "smoothing output", expectedPixelFormat: .r32Float, phase: "depth-smoothing")
+        var previousWeight = min(max(factor, 0), 0.95)
+        encoder.setComputePipelineState(pipelineState)
+        encoder.setTexture(current, index: 0)
+        encoder.setTexture(previous, index: 1)
+        encoder.setTexture(output, index: 2)
+        encoder.setBytes(&previousWeight, length: MemoryLayout<Float>.stride, index: 0)
+        let width = pipelineState.threadExecutionWidth
+        let height = max(1, pipelineState.maxTotalThreadsPerThreadgroup / width)
+        let threadsPerThreadgroup = MTLSize(width: width, height: height, depth: 1)
+        let threadsPerGrid = MTLSize(width: current.width, height: current.height, depth: 1)
+        encoder.dispatchThreads(threadsPerGrid, threadsPerThreadgroup: threadsPerThreadgroup)
+        encoder.endEncoding()
+        Depth3DDebug.logCommandBuffer(commandBuffer, label: "depth smoothing", phase: "depth-smoothing")
+        commandBuffer.addCompletedHandler { [weak self, output] buffer in
+            guard buffer.error == nil else {
+                return
+            }
+            DispatchQueue.main.async {
+                self?.previousTexture = output
+            }
+        }
+        commandBuffer.commit()
+
+        return current
+    }
+
+    private func compatiblePreviousTexture(for texture: MTLTexture) -> MTLTexture? {
+        guard let previousTexture,
+              previousTexture.width == texture.width,
+              previousTexture.height == texture.height,
+              previousTexture.pixelFormat == texture.pixelFormat
+        else {
+            return nil
+        }
+        return previousTexture
     }
 }
 

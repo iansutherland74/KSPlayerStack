@@ -1,14 +1,74 @@
 import KSPlayer
 import SwiftUI
+#if os(visionOS)
+import CompositorServices
+import _CompositorServices_SwiftUI
+import os
+#endif
 
 @main
 struct VisionProDepthAnythingV3DemoApp: App {
     var body: some Scene {
         WindowGroup {
-            VisionProDepthAnythingV3DemoRootView()
+            ImmersiveLaunchGuard {
+                VisionProDepthAnythingV3DemoRootView()
+            }
         }
+
+        #if os(visionOS)
+        ImmersiveSpace(id: ImmersiveStereoSpace.id) {
+            CompositorLayer(configuration: ImmersiveStereoCompositorConfiguration()) { layerRenderer in
+                ImmersiveStereoCompositorLauncher.start(layerRenderer)
+            }
+        }
+        .immersionStyle(
+            selection: .constant(
+                ImmersiveStereoDebugPresentation.prefersMixedImmersion ? .mixed : .full
+            ),
+            in: .mixed,
+            .full
+        )
+        .upperLimbVisibility(.automatic)
+        #endif
     }
 }
+
+#if os(visionOS)
+/// Closes any immersive space restored from a previous session so launch stays in the window.
+private struct ImmersiveLaunchGuard<Content: View>: View {
+    @Environment(\.dismissImmersiveSpace) private var dismissImmersiveSpace
+    @ViewBuilder var content: () -> Content
+
+    var body: some View {
+        content()
+            .task {
+                #if DEBUG
+                if ImmersiveStereoDebugPresentation.enablesMagentaSolid {
+                    ImmersiveStereoCompositorLauncher.setDebugSolidPresentationEnabled(true)
+                }
+                #endif
+                guard !ImmersiveLaunchState.didDismissStaleSpace else {
+                    return
+                }
+                ImmersiveLaunchState.markDidDismissStaleSpace()
+                ImmersiveStereoSession.setUserRequestedActive(false)
+                await dismissImmersiveSpace()
+            }
+    }
+}
+
+private enum ImmersiveLaunchState: Sendable {
+    private static let dismissed = OSAllocatedUnfairLock(initialState: false)
+
+    static var didDismissStaleSpace: Bool {
+        dismissed.withLock { $0 }
+    }
+
+    static func markDidDismissStaleSpace() {
+        dismissed.withLock { $0 = true }
+    }
+}
+#endif
 
 private struct VisionProDepthAnythingV3DemoRootView: View {
     private struct DemoStream: Identifiable, Hashable {
@@ -34,6 +94,7 @@ private struct VisionProDepthAnythingV3DemoRootView: View {
     @State private var mediaURLString = Self.defaultStream.urlString
     @State private var committedURLString = Self.defaultStream.urlString
     @State private var loadErrorMessage: String?
+    @State private var lastLoadActionMessage = "Ready"
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -90,6 +151,10 @@ private struct VisionProDepthAnythingV3DemoRootView: View {
                     .truncationMode(.middle)
             }
 
+            Text("Load status: \(lastLoadActionMessage)")
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(.secondary)
+
             if let loadErrorMessage {
                 Text(loadErrorMessage)
                     .font(.caption)
@@ -139,6 +204,7 @@ private struct VisionProDepthAnythingV3DemoRootView: View {
 
     private func load(_ stream: DemoStream) {
         mediaURLString = stream.urlString
+        lastLoadActionMessage = "Loading preset: \(stream.name)"
         committedURLString = stream.urlString
         loadErrorMessage = nil
     }
@@ -146,10 +212,12 @@ private struct VisionProDepthAnythingV3DemoRootView: View {
     private func loadTypedURL() {
         let trimmedURLString = mediaURLString.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let url = URL(string: trimmedURLString), url.scheme != nil, url.host != nil else {
+            lastLoadActionMessage = "Load rejected: invalid URL"
             loadErrorMessage = "Enter a fully qualified media URL before loading."
             return
         }
         mediaURLString = url.absoluteString
+        lastLoadActionMessage = "Loading typed URL"
         committedURLString = url.absoluteString
         loadErrorMessage = nil
     }
@@ -158,10 +226,12 @@ private struct VisionProDepthAnythingV3DemoRootView: View {
         let options = KSOptions()
         options.video2DTo3DMode = .disabled
         options.videoDepthEstimationProvider = nil
-        options.video2DTo3DDepthStrength = 0.18
-        options.video2DTo3DDepthDistance = 0.65
+        options.video2DTo3DDepthStrength = 0.45
+        options.video2DTo3DDepthDistance = 1.15
         options.video2DTo3DDepthCurvature = 0.9
-        options.isLoopPlay = true
+        options.video2DTo3DOutputLayout = .selectedEye
+        // Loop seeks to 0 and fights immersive timeline sync; enable explicitly when testing loop.
+        options.isLoopPlay = ProcessInfo.processInfo.environment["DA3_LOOP_PLAY"] == "1"
         options.isSeamlessLoopEnabled = false
         return options
     }

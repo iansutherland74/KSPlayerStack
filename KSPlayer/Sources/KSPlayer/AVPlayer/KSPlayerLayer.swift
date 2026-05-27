@@ -413,6 +413,7 @@ open class KSPlayerLayer: NSObject, @unchecked Sendable {
         let previous2DTo3DDepthStrength = self.options.video2DTo3DDepthStrength
         let previous2DTo3DDepthDistance = self.options.video2DTo3DDepthDistance
         let previous2DTo3DDepthCurvature = self.options.video2DTo3DDepthCurvature
+        let previous2DTo3DDepthSmoothingFactor = self.options.video2DTo3DDepthSmoothingFactor
         let previous2DTo3DOutputLayout = self.options.video2DTo3DOutputLayout
         let previousDepthProvider = self.options.videoDepthEstimationProvider
         let previous2DTo3DRequiresMetal = Video2DTo3DPolicy.requiresMetalRenderPath(mode: previous2DTo3DMode)
@@ -430,6 +431,7 @@ open class KSPlayerLayer: NSObject, @unchecked Sendable {
                             previous2DTo3DDepthStrength != options.video2DTo3DDepthStrength ||
                             previous2DTo3DDepthDistance != options.video2DTo3DDepthDistance ||
                             previous2DTo3DDepthCurvature != options.video2DTo3DDepthCurvature ||
+                            previous2DTo3DDepthSmoothingFactor != options.video2DTo3DDepthSmoothingFactor ||
                             previous2DTo3DOutputLayout != options.video2DTo3DOutputLayout ||
                             !Self.sameDepthProvider(previousDepthProvider, options.videoDepthEstimationProvider)
                     )) ||
@@ -464,6 +466,7 @@ open class KSPlayerLayer: NSObject, @unchecked Sendable {
         let previous2DTo3DDepthStrength = self.options.video2DTo3DDepthStrength
         let previous2DTo3DDepthDistance = self.options.video2DTo3DDepthDistance
         let previous2DTo3DDepthCurvature = self.options.video2DTo3DDepthCurvature
+        let previous2DTo3DDepthSmoothingFactor = self.options.video2DTo3DDepthSmoothingFactor
         let previous2DTo3DOutputLayout = self.options.video2DTo3DOutputLayout
         let previousDepthProvider = self.options.videoDepthEstimationProvider
         let previous2DTo3DRequiresMetal = Video2DTo3DPolicy.requiresMetalRenderPath(mode: previous2DTo3DMode)
@@ -483,6 +486,7 @@ open class KSPlayerLayer: NSObject, @unchecked Sendable {
                             previous2DTo3DDepthStrength != options.video2DTo3DDepthStrength ||
                             previous2DTo3DDepthDistance != options.video2DTo3DDepthDistance ||
                             previous2DTo3DDepthCurvature != options.video2DTo3DDepthCurvature ||
+                            previous2DTo3DDepthSmoothingFactor != options.video2DTo3DDepthSmoothingFactor ||
                             previous2DTo3DOutputLayout != options.video2DTo3DOutputLayout ||
                             !Self.sameDepthProvider(previousDepthProvider, options.videoDepthEstimationProvider)
                     ))
@@ -783,6 +787,8 @@ extension KSPlayerLayer {
             options.panoramaMode != .disabled ||
             options.stereoscopicVideoMode != .disabled ||
             Video2DTo3DPolicy.requiresMetalRenderPath(mode: options.video2DTo3DMode) ||
+            options.requiresDecodedVideoFrameOutput ||
+            options.videoFrameOutput != nil ||
             url.isBluRayInputCandidate ||
             url.isFFmpegOnlyInputScheme ||
             url.isMatroskaContainer ||
