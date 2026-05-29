@@ -224,11 +224,14 @@ private struct VisionProDepthAnythingV3DemoRootView: View {
 
     private func playbackOptions() -> KSOptions {
         let options = KSOptions()
-        options.video2DTo3DMode = .disabled
-        options.videoDepthEstimationProvider = nil
-        options.video2DTo3DDepthStrength = 0.45
-        options.video2DTo3DDepthDistance = 1.15
-        options.video2DTo3DDepthCurvature = 0.9
+        let defaults = DA3VisionProPerformanceMode.maximum
+        options.prefersHighestVideoVariant = true
+        options.videoAdaptable = false
+        options.video2DTo3DMode = .depthMapPreferred
+        options.video2DTo3DDepthStrength = defaults.depthStrength
+        options.video2DTo3DDepthDistance = defaults.depthDistance
+        options.video2DTo3DDepthCurvature = defaults.depthCurvature
+        options.video2DTo3DDepthSmoothingFactor = defaults.temporalSmoothingFactor
         options.video2DTo3DOutputLayout = .selectedEye
         // Loop seeks to 0 and fights immersive timeline sync; enable explicitly when testing loop.
         options.isLoopPlay = ProcessInfo.processInfo.environment["DA3_LOOP_PLAY"] == "1"

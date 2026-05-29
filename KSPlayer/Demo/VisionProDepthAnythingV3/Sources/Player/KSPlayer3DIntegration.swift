@@ -67,17 +67,6 @@ public enum KSPlayer3DIntegrationError: Error, Equatable, LocalizedError, Sendab
     }
 }
 
-private enum DA3ActivationError: Error, LocalizedError, Sendable {
-    case timedOut(TimeInterval)
-
-    var errorDescription: String? {
-        switch self {
-        case let .timedOut(timeout):
-            return "Depth Anything V3 preparation timed out after \(Int(timeout)) seconds."
-        }
-    }
-}
-
 public enum DA3ProcessingState: Equatable, Sendable {
     case disabled
     case idle
@@ -410,6 +399,7 @@ public final class KSPlayer3DIntegrationViewModel: ObservableObject {
     @Published public private(set) var presentationMode: DA3PresentationMode
     @Published public private(set) var presentationModeStatus = "Native 2D playback"
     @Published public private(set) var immersiveTemporalStatusLine = ""
+    @Published public private(set) var immersiveScreenDistanceMeters: Float
     #if os(visionOS)
     @Published public private(set) var immersivePlaybackDiagnostics = ImmersivePlaybackDiagnostics.idle
     #endif
@@ -427,6 +417,7 @@ public final class KSPlayer3DIntegrationViewModel: ObservableObject {
     public var depthCurvatureRange: ClosedRange<Float> { DA3VisionProDemoTuning.depthCurvatureRange }
     public var depthContrastRange: ClosedRange<Float> { DA3VisionProDemoTuning.depthContrastRange }
     public var temporalSmoothingFactorRange: ClosedRange<Float> { DA3VisionProDemoTuning.temporalSmoothingFactorRange }
+    public var immersiveScreenDistanceRange: ClosedRange<Float> { ImmersiveScreenPlacement.distanceRangeMeters }
 
     private let pipeline: DA3VideoOutputPipeline
     private let videoFrameSink = DA3DecodedVideoFrameSink()
@@ -440,7 +431,6 @@ public final class KSPlayer3DIntegrationViewModel: ObservableObject {
     private var depthWarmupStartedAt: Date?
     private var wasMutedBeforeDepthWarmup = false
     private var activationSequence = 0
-    private let activationTimeout: TimeInterval = 10
     private let firstFrameTimeout: TimeInterval = 8
     private var openImmersiveStereo: (() async -> Bool)?
     private var dismissImmersiveStereo: (() async -> Void)?
@@ -455,6 +445,8 @@ public final class KSPlayer3DIntegrationViewModel: ObservableObject {
     #if os(visionOS)
     private var hasLoggedFirstImmersiveAudioSyncedFrame = false
     #endif
+    private var hasFinished3DPreviewActivation = false
+    private var didAttemptLaunch3DPreviewActivation = false
 
     public convenience init(
         url: URL,
@@ -508,6 +500,11 @@ public final class KSPlayer3DIntegrationViewModel: ObservableObject {
         options.video2DTo3DOutputLayout = initialOutputLayout
         self.depthContrast = initialDepthContrast
         self.isDepthInverted = initialDepthInverted
+        let initialScreenDistance = ImmersiveScreenPlacement.validatedDistance(
+            ImmersiveScreenPlacement.resolvedScreenDistanceMeters()
+        )
+        ImmersiveScreenPlacement.setDistanceMeters(initialScreenDistance)
+        self.immersiveScreenDistanceMeters = initialScreenDistance
         self.is3DPreviewRequested = options.video2DTo3DMode.isEnabled
         self.presentationMode = options.video2DTo3DMode.isEnabled
             ? Self.presentationMode(for: initialOutputLayout)
@@ -527,6 +524,7 @@ public final class KSPlayer3DIntegrationViewModel: ObservableObject {
             isDepthInverted: initialDepthInverted
         )
         self.pipeline = pipeline
+        pipeline.setTemporalSmoothingFactor(initialPerformanceMode.temporalSmoothingFactor)
         videoFrameSink.pipeline = pipeline
         let depthMapProvider = DA3CachedDepthMapProvider(pipeline: pipeline)
         self.depthMapProvider = depthMapProvider
@@ -675,16 +673,17 @@ public final class KSPlayer3DIntegrationViewModel: ObservableObject {
     public func handleStateChanged(layer: KSPlayerLayer, state: KSPlayerState) {
         playerState = state
         refreshSourceVideoFrameRate(from: layer)
+        syncImmersiveSourceDisplayAspect(from: layer)
         syncImmersivePlaybackTimeline(from: layer)
         lastPlayerStateMessage = state.description
         if state == .playedToTheEnd {
             lastActionMessage = "Playback finished - press Play to restart"
         }
-        if state == .bufferFinished {
-            startDepthWarmupPlaybackIfNeeded(on: layer)
-        }
         if state == .readyToPlay || state == .bufferFinished {
             prewireVideoOutputIfNeeded(on: layer)
+            if isDepthWarmupActive {
+                startDepthWarmupPlaybackIfNeeded(on: layer)
+            }
         }
         if shouldUseVideoOutput {
             let needsForceReconfigure = !isVideoOutputConfigured || state == .readyToPlay
@@ -776,18 +775,33 @@ public final class KSPlayer3DIntegrationViewModel: ObservableObject {
         enable3DPreview(source: "Enable 3D Preview button")
     }
 
+    /// Runs DA3 prepare + renderer switch when options start with 2D-to-3D enabled (demo default).
+    public func ensure3DPreviewActivatedOnLaunch() {
+        guard options.video2DTo3DMode.isEnabled else {
+            return
+        }
+        guard !hasFinished3DPreviewActivation, !didAttemptLaunch3DPreviewActivation else {
+            return
+        }
+        didAttemptLaunch3DPreviewActivation = true
+        enable3DPreview(source: "app launch")
+    }
+
     private func enable3DPreview(source: String) {
-        guard !is3DPreviewRequested, !isApplying2DTo3DMode else {
-            if isApplying2DTo3DMode {
-                lastActionMessage = "3D preview is preparing"
-            } else if is2DTo3DEnabled {
+        guard !isApplying2DTo3DMode else {
+            lastActionMessage = "3D preview is preparing"
+            Depth3DDebug.log("3D request ignored from \(source): already applying", phase: "control-event")
+            return
+        }
+        if hasFinished3DPreviewActivation {
+            if is2DTo3DEnabled {
                 lastActionMessage = "3D preview already enabled"
             } else if let lastErrorMessage {
                 lastActionMessage = "3D preview unavailable: \(lastErrorMessage)"
             } else {
-                lastActionMessage = "3D preview request already visible"
+                lastActionMessage = "3D preview already enabled"
             }
-            Depth3DDebug.log("3D request ignored from \(source): requested=\(is3DPreviewRequested) active=\(is2DTo3DEnabled) applying=\(isApplying2DTo3DMode)", phase: "control-event")
+            Depth3DDebug.log("3D request ignored from \(source): finished=\(hasFinished3DPreviewActivation) active=\(is2DTo3DEnabled)", phase: "control-event")
             return
         }
         if presentationMode == .native2D {
@@ -801,7 +815,6 @@ public final class KSPlayer3DIntegrationViewModel: ObservableObject {
         activationSequence += 1
         let sequence = activationSequence
         let pipeline = pipeline
-        let timeout = activationTimeout
 
         is3DPreviewRequested = true
         isApplying2DTo3DMode = true
@@ -823,9 +836,7 @@ public final class KSPlayer3DIntegrationViewModel: ObservableObject {
 
         activationTask = Task(priority: .userInitiated) { [weak self, pipeline] in
             do {
-                let diagnostics = try await Self.withTimeout(seconds: timeout) {
-                    try await pipeline.prepareForActivation()
-                }
+                let diagnostics = try await pipeline.prepareForActivation()
                 try Task.checkCancellation()
                 await MainActor.run {
                     self?.complete3DPreviewActivation(
@@ -859,6 +870,7 @@ public final class KSPlayer3DIntegrationViewModel: ObservableObject {
             || isOpeningImmersiveStereo
             || shouldSkipPlayerReloadForActiveKSMEPlayback()
         applyPrepared3DPreviewMode(skipPlayerReload: skipPlayerReload)
+        hasFinished3DPreviewActivation = true
         isApplying2DTo3DMode = false
         activationTask = nil
         startFirstFrameTimeout(sequence: sequence)
@@ -982,6 +994,7 @@ public final class KSPlayer3DIntegrationViewModel: ObservableObject {
         presentationModeStatus = "Native 2D playback"
         is3DPreviewRequested = false
         is2DTo3DEnabled = false
+        hasFinished3DPreviewActivation = false
         depthStrengthRampStartedAt = nil
         hasReceivedFirst3DFrame = false
         cancelDepthWarmup(restoreMute: true)
@@ -1078,24 +1091,26 @@ public final class KSPlayer3DIntegrationViewModel: ObservableObject {
         layer.player.isMuted = wasMutedBeforeDepthWarmup
         let startTime = DA3DemoEnvironment.startSecondsOverride
         let currentTime = layer.player.currentPlaybackTime
-        let immersiveActive = isImmersiveStereoPresented || isOpeningImmersiveStereo
-        let shouldSeek = !immersiveActive
-            && startTime.map { abs(currentTime - $0) > 0.35 } == true
-        lastActionMessage = shouldSeek
-            ? "Depth warmup finished (\(reason)) — starting at \(String(format: "%.1f", startTime ?? 0))s"
-            : "Depth warmup finished (\(reason)) — resuming playback"
+        let shouldSeekToStart = startTime.map { abs(currentTime - $0) > 0.35 } == true
+        lastActionMessage = shouldSeekToStart
+            ? "Depth warmup finished (\(reason)) — playing from \(String(format: "%.1f", startTime ?? 0))s"
+            : "Depth warmup finished (\(reason)) — playing"
         Depth3DDebug.log(
-            "Depth warmup complete: \(reason), seek=\(shouldSeek) target=\(startTime.map { String(format: "%.3f", $0) } ?? "none") current=\(currentTime)s",
+            "Depth warmup complete: \(reason), seek=\(shouldSeekToStart) target=\(startTime.map { String(format: "%.3f", $0) } ?? "none") current=\(currentTime)s",
             phase: "depth-warmup"
         )
-        if shouldSeek, let startTime {
+        if shouldSeekToStart, let startTime {
             layer.seek(time: startTime, autoPlay: true) { [weak self] finished in
-                guard let self, finished else {
+                guard let self else {
                     return
                 }
-                self.lastActionMessage = "Playback started after depth warmup"
+                if finished {
+                    self.lastActionMessage = "Playback started after depth warmup"
+                } else {
+                    self.lastActionMessage = "Depth warmup done — seek failed, tap Play"
+                }
             }
-        } else if !layer.player.isPlaying {
+        } else {
             layer.play()
         }
     }
@@ -1185,6 +1200,16 @@ public final class KSPlayer3DIntegrationViewModel: ObservableObject {
         depthDistance = validatedValue
         options.video2DTo3DDepthDistance = validatedValue
         lastActionMessage = String(format: "Depth distance %.2f", Double(validatedValue))
+    }
+
+    public func setImmersiveScreenDistanceMeters(_ value: Float) {
+        let validatedValue = ImmersiveScreenPlacement.validatedDistance(value)
+        guard immersiveScreenDistanceMeters != validatedValue else {
+            return
+        }
+        immersiveScreenDistanceMeters = validatedValue
+        ImmersiveScreenPlacement.setDistanceMeters(validatedValue)
+        lastActionMessage = String(format: "Screen distance %.1f m", Double(validatedValue))
     }
 
     public func setDepthCurvature(_ value: Float) {
@@ -1304,7 +1329,7 @@ public final class KSPlayer3DIntegrationViewModel: ObservableObject {
         if !is2DTo3DEnabled, !isApplying2DTo3DMode {
             is3DPreviewRequested = true
             begin3DPreviewActivation(source: "Immersive Stereo (pre-open)")
-            let ready = await waitFor3DPreviewReady(timeout: activationTimeout + 5)
+            let ready = await waitFor3DPreviewReady()
             guard ready else {
                 lastActionMessage = "Immersive stereo waiting for 3D — try again"
                 presentationModeStatus = "3D pipeline not ready for immersive"
@@ -1313,7 +1338,7 @@ public final class KSPlayer3DIntegrationViewModel: ObservableObject {
             }
         } else if !is2DTo3DEnabled {
             is3DPreviewRequested = true
-            let ready = await waitFor3DPreviewReady(timeout: activationTimeout + 5)
+            let ready = await waitFor3DPreviewReady()
             guard ready else {
                 lastActionMessage = "Immersive stereo waiting for 3D — try again"
                 presentationModeStatus = "3D pipeline not ready for immersive"
@@ -1406,7 +1431,7 @@ public final class KSPlayer3DIntegrationViewModel: ObservableObject {
         isImmersiveStereoPresented = true
         ImmersiveStereoCompositorStatus.reset()
 
-        let arReady = await ImmersiveStereoARTrackingBridge.ensureRunning(timeout: 10)
+        let arReady = await ImmersiveStereoARTrackingBridge.ensureRunning(timeout: nil)
         if !arReady {
             let arMessage = ImmersiveStereoARTrackingBridge.sessionErrorMessage
                 ?? "ARKit world tracking did not start in time"
@@ -1880,12 +1905,8 @@ public final class KSPlayer3DIntegrationViewModel: ObservableObject {
     }
     #endif
 
-    private func waitFor3DPreviewReady(timeout: TimeInterval) async -> Bool {
-        let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline {
-            if Task.isCancelled {
-                return false
-            }
+    private func waitFor3DPreviewReady() async -> Bool {
+        while !Task.isCancelled {
             if is2DTo3DEnabled,
                pipeline.hasReceivedVideoOutputCallback || hasReceivedFirst3DFrame || metrics.processedFrameCount > 0
             {
@@ -1893,8 +1914,7 @@ public final class KSPlayer3DIntegrationViewModel: ObservableObject {
             }
             try? await Task.sleep(nanoseconds: 50_000_000)
         }
-        return is2DTo3DEnabled
-            && (pipeline.hasReceivedVideoOutputCallback || hasReceivedFirst3DFrame || metrics.processedFrameCount > 0)
+        return false
     }
 
     private func waitForImmersiveRingBufferVideo(timeout: TimeInterval) async -> Bool {
@@ -2005,8 +2025,21 @@ public final class KSPlayer3DIntegrationViewModel: ObservableObject {
         guard let layer = installedLayer ?? coordinator.playerLayer else {
             return
         }
+        syncImmersiveSourceDisplayAspect(from: layer)
         syncImmersivePlaybackTimeline(from: layer)
     }
+
+    #if os(visionOS)
+    private func syncImmersiveSourceDisplayAspect(from layer: KSPlayerLayer) {
+        let naturalSize = layer.player.naturalSize
+        guard naturalSize.width > 0, naturalSize.height > 0 else {
+            return
+        }
+        ImmersiveVideoFeed.shared.setSourceDisplayAspectRatio(
+            Float(naturalSize.width / naturalSize.height)
+        )
+    }
+    #endif
 
     private func syncImmersivePresentationStateIfNeeded() {
         syncImmersivePlaybackTimelineIfPossible()
@@ -2178,27 +2211,6 @@ public final class KSPlayer3DIntegrationViewModel: ObservableObject {
         return ["m3u", "m3u8", "mpd", "ism", "isml"].contains(url.pathExtension.lowercased()) ||
             absoluteString.contains(".m3u8") ||
             absoluteString.contains(".mpd")
-    }
-
-    private static func withTimeout<T: Sendable>(
-        seconds: TimeInterval,
-        operation: @escaping @Sendable () async throws -> T
-    ) async throws -> T {
-        try await withThrowingTaskGroup(of: T.self) { group in
-            group.addTask {
-                try await operation()
-            }
-            group.addTask {
-                let nanoseconds = UInt64(max(seconds, 0) * 1_000_000_000)
-                try await Task.sleep(nanoseconds: nanoseconds)
-                throw DA3ActivationError.timedOut(seconds)
-            }
-            guard let result = try await group.next() else {
-                throw CancellationError()
-            }
-            group.cancelAll()
-            return result
-        }
     }
 
     private func reloadPlayerPreservingPlaybackTime(restartIfEnded: Bool) {

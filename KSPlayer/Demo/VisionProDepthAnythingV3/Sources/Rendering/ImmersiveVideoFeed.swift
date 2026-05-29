@@ -88,6 +88,8 @@ public final class ImmersiveVideoFeed: @unchecked Sendable {
     private var rejectedNotAccepting: Int = 0
     private var rejectedOutsideWindow: Int = 0
     private var rejectedOutOfOrder: Int = 0
+    /// Display aspect (width/height) from `MediaPlayerProtocol.naturalSize`, when known.
+    private var sourceDisplayAspectRatio: Float?
 
     public init(maxEntryCount: Int = 32) {
         self.maxEntryCount = max(4, maxEntryCount)
@@ -168,11 +170,31 @@ public final class ImmersiveVideoFeed: @unchecked Sendable {
         lastDepthTexture = nil
         lastDepthMediaTime = nil
         depthRing.removeAll()
+        sourceDisplayAspectRatio = nil
         appendedFrames = 0
         rejectedNotAccepting = 0
         rejectedOutsideWindow = 0
         rejectedOutOfOrder = 0
         lock.unlock()
+    }
+
+    public func setSourceDisplayAspectRatio(_ aspect: Float?) {
+        lock.lock()
+        if let aspect, aspect.isFinite, aspect > 0 {
+            sourceDisplayAspectRatio = aspect
+        } else {
+            sourceDisplayAspectRatio = nil
+        }
+        lock.unlock()
+    }
+
+    public func resolvedSourceDisplayAspectRatio(fallback: Float) -> Float {
+        lock.lock()
+        defer { lock.unlock() }
+        if let sourceDisplayAspectRatio, sourceDisplayAspectRatio.isFinite, sourceDisplayAspectRatio > 0 {
+            return sourceDisplayAspectRatio
+        }
+        return fallback
     }
 
     public func pruneEntriesFarFromPlayback() {

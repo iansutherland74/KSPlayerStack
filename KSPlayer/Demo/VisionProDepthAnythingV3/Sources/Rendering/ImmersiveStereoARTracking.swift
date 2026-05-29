@@ -52,7 +52,7 @@ final class ImmersiveStereoARTracking: @unchecked Sendable {
     }
 
     /// World tracking stays `.paused` until an ImmersiveSpace is open — call after `openImmersiveSpace`.
-    func ensureRunning(timeout: TimeInterval = 4) async -> Bool {
+    func ensureRunning(timeout: TimeInterval? = 4) async -> Bool {
         guard WorldTrackingProvider.isSupported else {
             lastSessionError.withLock {
                 $0 = "World tracking is not supported on this device."
@@ -65,14 +65,17 @@ final class ImmersiveStereoARTracking: @unchecked Sendable {
             return false
         }
 
-        let deadline = Date().timeIntervalSinceReferenceDate + timeout
-        while Date().timeIntervalSinceReferenceDate < deadline {
+        let deadline = timeout.map { Date().timeIntervalSinceReferenceDate + $0 }
+        while !Task.isCancelled {
             let running = await isWorldTrackingRunningOnMainActor()
             if running {
                 isProviderRunning.withLock { $0 = true }
                 lastSessionError.withLock { $0 = nil }
                 Depth3DDebug.log("ARKit world tracking provider running", phase: "immersive-ar")
                 return true
+            }
+            if let deadline, Date().timeIntervalSinceReferenceDate >= deadline {
+                break
             }
             try? await Task.sleep(nanoseconds: 50_000_000)
         }
@@ -191,7 +194,7 @@ enum ImmersiveStereoARTrackingBridge {
         ImmersiveStereoARTracking.shared.sessionErrorMessage
     }
 
-    static func ensureRunning(timeout: TimeInterval = 4) async -> Bool {
+    static func ensureRunning(timeout: TimeInterval? = 4) async -> Bool {
         await ImmersiveStereoARTracking.shared.ensureRunning(timeout: timeout)
     }
 

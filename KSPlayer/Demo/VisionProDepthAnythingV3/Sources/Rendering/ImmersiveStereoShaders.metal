@@ -88,7 +88,8 @@ fragment half4 immersiveBGRAFragment(ImmersiveVertexOut in [[stage_in]],
                                      sampler textureSampler [[sampler(0)]],
                                      constant ImmersiveStereoUniforms& uniforms [[buffer(0)]]) {
     float2 uv = immersiveStereoUV(in.uv, uniforms, depthTexture, textureSampler);
-    return colorTexture.sample(textureSampler, uv);
+    half4 rgba = colorTexture.sample(textureSampler, uv);
+    return half4(rgba.rgb, 1.0h);
 }
 
 fragment float4 immersiveRGBA16Fragment(ImmersiveVertexOut in [[stage_in]],
@@ -98,7 +99,7 @@ fragment float4 immersiveRGBA16Fragment(ImmersiveVertexOut in [[stage_in]],
                                         constant ImmersiveStereoUniforms& uniforms [[buffer(0)]]) {
     float2 uv = immersiveStereoUV(in.uv, uniforms, depthTexture, textureSampler);
     half4 srgb = colorTexture.sample(textureSampler, uv);
-    return float4(immersiveSDRToExtendedLinear(srgb.rgb), float(srgb.a));
+    return float4(immersiveSDRToExtendedLinear(srgb.rgb), 1.0);
 }
 
 fragment half4 immersiveNV12Fragment(ImmersiveVertexOut in [[stage_in]],
@@ -123,12 +124,9 @@ fragment half4 immersiveDebugSolidFragment(ImmersiveVertexOut in [[stage_in]]) {
 }
 
 half4 immersivePlaceholderColor(float2 uv) {
-    float vignette = smoothstep(0.0, 0.15, uv.x) * smoothstep(1.0, 0.85, uv.x)
-        * smoothstep(0.0, 0.15, uv.y) * smoothstep(1.0, 0.85, uv.y);
-    float3 base = float3(0.08, 0.10, 0.16);
-    float3 edge = float3(0.20, 0.35, 0.55);
-    float3 rgb = mix(base, edge, vignette);
-    return half4(half3(rgb), 0.95h);
+    (void)uv;
+    // Transparent placeholder so there is no visible border/frame before video.
+    return half4(half3(0.0h, 0.0h, 0.0h), 0.0h);
 }
 
 /// Visible standby screen while DA3 has not produced a frame yet.

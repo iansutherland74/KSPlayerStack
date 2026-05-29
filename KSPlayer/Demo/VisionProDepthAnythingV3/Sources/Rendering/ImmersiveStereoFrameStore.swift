@@ -73,6 +73,48 @@ public enum ImmersiveStereoSession: Sendable {
     }
 }
 
+/// Head-locked cinema screen distance (meters). Scale is compensated so apparent size stays constant.
+public enum ImmersiveScreenPlacement: Sendable {
+    /// Reference distance used when tuning contain-fit scale.
+    public static let referenceDistanceMeters: Float = 1.4
+    public static let defaultDistanceMeters: Float = 4.2
+    public static let distanceRangeMeters: ClosedRange<Float> = 1.0 ... 100.0
+
+    private static let distanceMeters = OSAllocatedUnfairLock(initialState: defaultDistanceMeters)
+
+    public static var currentDistanceMeters: Float {
+        distanceMeters.withLock { $0 }
+    }
+
+    public static func setDistanceMeters(_ value: Float) {
+        distanceMeters.withLock { $0 = validatedDistance(value) }
+    }
+
+    public static func validatedDistance(_ value: Float) -> Float {
+        guard value.isFinite else {
+            return defaultDistanceMeters
+        }
+        return min(max(value, distanceRangeMeters.lowerBound), distanceRangeMeters.upperBound)
+    }
+
+    /// Env `DA3_IMMERSIVE_SCREEN_METERS` overrides the UI slider when set.
+    public static func resolvedScreenDistanceMeters() -> Float {
+        if let raw = ProcessInfo.processInfo.environment["DA3_IMMERSIVE_SCREEN_METERS"],
+           let meters = Float(raw),
+           meters.isFinite,
+           meters > 0.5
+        {
+            return meters
+        }
+        return currentDistanceMeters
+    }
+
+    /// Multiply screen scale by this to preserve angular size when distance changes.
+    public static func sizeCompensation(for distanceMeters: Float) -> Float {
+        distanceMeters / referenceDistanceMeters
+    }
+}
+
 public struct ImmersiveStereoFrame: @unchecked Sendable {
     public let pixelBuffer: CVPixelBuffer
     public let depthTexture: (any MTLTexture)?

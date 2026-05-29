@@ -8,6 +8,7 @@ public struct ThreeDPlayerRootView: View {
     @Environment(\.openImmersiveSpace) private var openImmersiveSpace
     @Environment(\.dismissImmersiveSpace) private var dismissImmersiveSpace
     @StateObject private var viewModel: KSPlayer3DIntegrationViewModel
+    @State private var windowVideoAspect: CGFloat = 16.0 / 9.0
 
     public init(viewModel: KSPlayer3DIntegrationViewModel) {
         _viewModel = StateObject(wrappedValue: viewModel)
@@ -48,6 +49,7 @@ public struct ThreeDPlayerRootView: View {
         }
         .onAppear {
             viewModel.resetImmersivePresentationForWindowLaunch()
+            viewModel.ensure3DPreviewActivatedOnLaunch()
             viewModel.bindImmersiveStereo(
                 open: {
                     await MainActor.run {
@@ -111,7 +113,7 @@ public struct ThreeDPlayerRootView: View {
         .onDisappear {
             viewModel.stop()
         }
-        .aspectRatio(16.0 / 9.0, contentMode: .fit)
+        .aspectRatio(windowVideoAspect, contentMode: .fit)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(.black, in: RoundedRectangle(cornerRadius: 28))
         .clipShape(RoundedRectangle(cornerRadius: 28))
@@ -307,6 +309,13 @@ private struct DA3PlaybackControlsView: View {
                 title: "Metal smoothing",
                 value: temporalSmoothingBinding,
                 range: doubleRange(viewModel.temporalSmoothingFactorRange)
+            )
+
+            DA3SliderRow(
+                title: "Screen distance",
+                value: immersiveScreenDistanceBinding,
+                range: doubleRange(viewModel.immersiveScreenDistanceRange),
+                valueLabel: { String(format: "%.1f m", $0) }
             )
 
             Toggle(
@@ -579,6 +588,13 @@ private struct DA3PlaybackControlsView: View {
         )
     }
 
+    private var immersiveScreenDistanceBinding: Binding<Double> {
+        Binding(
+            get: { Double(viewModel.immersiveScreenDistanceMeters) },
+            set: { viewModel.setImmersiveScreenDistanceMeters(Float($0)) }
+        )
+    }
+
     private func doubleRange(_ range: ClosedRange<Float>) -> ClosedRange<Double> {
         Double(range.lowerBound) ... Double(range.upperBound)
     }
@@ -700,6 +716,9 @@ private struct DA3SliderRow: View {
     let title: String
     @Binding var value: Double
     let range: ClosedRange<Double>
+    var valueLabel: (Double) -> String = { value in
+        value.formatted(.number.precision(.fractionLength(2)))
+    }
 
     var body: some View {
         HStack(spacing: 14) {
@@ -709,10 +728,10 @@ private struct DA3SliderRow: View {
 
             Slider(value: $value, in: range)
 
-            Text(value, format: .number.precision(.fractionLength(2)))
+            Text(valueLabel(value))
                 .font(.subheadline.monospacedDigit())
                 .foregroundStyle(.secondary)
-                .frame(width: 48, alignment: .trailing)
+                .frame(width: 56, alignment: .trailing)
         }
     }
 }

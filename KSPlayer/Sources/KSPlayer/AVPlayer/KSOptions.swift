@@ -900,6 +900,8 @@ open class KSOptions {
     public var autoRotate = true
     public var destinationDynamicRange: DynamicRange?
     public var videoAdaptable = true
+    /// When true, FFmpeg multi-track adaptive streams open on the highest declared bitrate/resolution variant.
+    public var prefersHighestVideoVariant = false
     public var videoFilters = [String]()
     /// GPU-side VideoToolbox upscaling for the MEPlayer/Metal path. `.none` preserves the native AVPlayer path.
     public var videoUpscaling = VideoUpscalingMode.none
@@ -1145,6 +1147,9 @@ open class KSOptions {
     }
 
     open func adaptable(state: VideoAdaptationState?) -> (Int64, Int64)? {
+        if prefersHighestVideoVariant {
+            return highestVideoVariantAdaptation(state: state)
+        }
         guard let state, let last = state.bitRateStates.last, CACurrentMediaTime() - last.time > maxBufferDuration / 2, let index = state.bitRates.firstIndex(of: last.bitRate) else {
             return nil
         }
@@ -1167,8 +1172,44 @@ open class KSOptions {
     ///  wanted video stream index, or nil for automatic selection
     /// - Parameter : video track
     /// - Returns: The index of the track
-    open func wantedVideo(tracks _: [MediaPlayerTrack]) -> Int? {
-        nil
+    open func wantedVideo(tracks: [MediaPlayerTrack]) -> Int? {
+        guard prefersHighestVideoVariant else {
+            return nil
+        }
+        return Self.highestQualityVideoTrackIndex(in: tracks)
+    }
+
+    /// Picks the highest FFmpeg HLS/DASH variant by bitrate, then pixel count, then frame rate.
+    public static func highestQualityVideoTrackIndex(in tracks: [MediaPlayerTrack]) -> Int? {
+        guard !tracks.isEmpty else {
+            return nil
+        }
+        var bestIndex = 0
+        var bestRanking = VideoVariantQualityRanking.min
+        for (index, track) in tracks.enumerated() {
+            let ranking = VideoVariantQualityRanking(track: track)
+            if ranking > bestRanking {
+                bestRanking = ranking
+                bestIndex = index
+            }
+        }
+        return bestIndex
+    }
+
+    private func highestVideoVariantAdaptation(state: VideoAdaptationState?) -> (Int64, Int64)? {
+        guard let state,
+              let last = state.bitRateStates.last,
+              CACurrentMediaTime() - last.time > maxBufferDuration / 2,
+              let peakBitRate = state.bitRates.last,
+              last.bitRate < peakBitRate
+        else {
+            return nil
+        }
+        let isUp = state.loadedCount > Int(Double(state.fps) * maxBufferDuration / 2)
+        guard isUp, state.isPlayable else {
+            return nil
+        }
+        return (last.bitRate, peakBitRate)
     }
 
     /// wanted audio stream index, or nil for automatic selection
@@ -1176,6 +1217,44 @@ open class KSOptions {
     /// - Returns: The index of the track
     open func wantedAudio(tracks _: [MediaPlayerTrack]) -> Int? {
         nil
+    }
+
+    private struct VideoVariantQualityRanking: Comparable {
+        let bitRate: Int64
+        let pixelCount: Int64
+        let frameRate: Float
+
+        static let min = VideoVariantQualityRanking(bitRate: -1, pixelCount: -1, frameRate: 0)
+
+        init(bitRate: Int64, pixelCount: Int64, frameRate: Float) {
+            self.bitRate = bitRate
+            self.pixelCount = pixelCount
+            self.frameRate = frameRate
+        }
+
+        init(track: MediaPlayerTrack) {
+            self.init(
+                bitRate: track.bitRate,
+                pixelCount: {
+                    if let formatDescription = track.formatDescription {
+                        let naturalSize = formatDescription.naturalSize
+                        return Int64(max(1, abs(naturalSize.width * naturalSize.height)))
+                    }
+                    return 0
+                }(),
+                frameRate: track.nominalFrameRate
+            )
+        }
+
+        static func < (lhs: Self, rhs: Self) -> Bool {
+            if lhs.bitRate != rhs.bitRate {
+                return lhs.bitRate < rhs.bitRate
+            }
+            if lhs.pixelCount != rhs.pixelCount {
+                return lhs.pixelCount < rhs.pixelCount
+            }
+            return lhs.frameRate < rhs.frameRate
+        }
     }
 
     open func videoFrameMaxCount(fps: Float, naturalSize: CGSize, isLive: Bool) -> UInt8 {

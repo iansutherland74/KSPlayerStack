@@ -348,7 +348,8 @@ final class ImmersiveStereoCompositor: @unchecked Sendable {
             renderPassDescriptor.colorAttachments[0].texture = colorTexture
             renderPassDescriptor.colorAttachments[0].loadAction = .clear
             renderPassDescriptor.colorAttachments[0].storeAction = .store
-            renderPassDescriptor.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
+            // Transparent background: no visible letterbox/pillarbox frame around the screen quad.
+            renderPassDescriptor.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
 
             if viewIndex < drawable.depthTextures.count {
                 renderPassDescriptor.depthAttachment.texture = drawable.depthTextures[viewIndex]
@@ -367,7 +368,18 @@ final class ImmersiveStereoCompositor: @unchecked Sendable {
 
             switch mode {
             case .warmupClear:
-                break
+                if let pipelines = pipeline(for: colorTexture.pixelFormat) {
+                    encoder.setFragmentTexture(neutralDepthTexture, index: 0)
+                    encoder.setFragmentSamplerState(samplerState, index: 0)
+                    var uniforms = Self.placeholderUniforms(eye: eye)
+                    encoder.setFragmentBytes(&uniforms, length: MemoryLayout<ImmersiveStereoUniforms>.stride, index: 0)
+                    drawScreenQuad(
+                        encoder: encoder,
+                        pipeline: pipelines.placeholder,
+                        modelViewProjection: modelViewProjection
+                    )
+                    drewPlaceholder = true
+                }
             case .debugSolid:
                 if let pipelines = pipeline(for: colorTexture.pixelFormat) {
                     drawScreenQuad(
@@ -462,7 +474,7 @@ final class ImmersiveStereoCompositor: @unchecked Sendable {
         let drawableAspect = drawableAspectRatio(drawable: drawable, viewIndex: resolvedViewIndex)
         let modelMatrix = Self.makeScreenModelMatrix(
             headTransform: deviceTransform,
-            videoAspect: videoAspectRatio(for: stereoFrame),
+            videoAspect: videoDisplayAspectRatio(for: stereoFrame),
             drawableAspect: drawableAspect
         )
         return projectionMatrix * viewMatrix * modelMatrix
@@ -480,16 +492,21 @@ final class ImmersiveStereoCompositor: @unchecked Sendable {
         return Float(texture.width) / height
     }
 
-    private func videoAspectRatio(for stereoFrame: ImmersiveStereoFrame?) -> Float {
-        guard let stereoFrame else {
-            return 16.0 / 9.0
-        }
-        let width = CVPixelBufferGetWidth(stereoFrame.pixelBuffer)
-        let height = CVPixelBufferGetHeight(stereoFrame.pixelBuffer)
+    private func videoDisplayAspectRatio(for stereoFrame: ImmersiveStereoFrame?) -> Float {
+        let bufferAspect = stereoFrame.map { Self.displayAspectRatio(for: $0.pixelBuffer) } ?? (16.0 / 9.0)
+        return ImmersiveVideoFeed.shared.resolvedSourceDisplayAspectRatio(fallback: bufferAspect)
+    }
+
+    /// Display aspect (SAR-aware) of a decoded frame buffer.
+    fileprivate static func displayAspectRatio(for pixelBuffer: CVPixelBuffer) -> Float {
+        let width = Float(CVPixelBufferGetWidth(pixelBuffer))
+        let height = Float(CVPixelBufferGetHeight(pixelBuffer))
         guard width > 0, height > 0 else {
             return 16.0 / 9.0
         }
-        return Float(width) / Float(height)
+        let sar = pixelBuffer.aspectRatio
+        let displayWidth = width * Float(sar.width / max(sar.height, 1))
+        return max(displayWidth / height, 0.1)
     }
 
     private func drawVideo(
@@ -699,15 +716,16 @@ private struct ImmersiveStereoUniforms {
 }
 
 extension ImmersiveStereoCompositor {
-    /// Head-locked cinema screen ~1.4 m in front of the user (meters, ARKit world space).
-    /// Scales to the decoded video aspect and expands to cover the compositor eye texture so clear-black matting is not visible on the virtual screen.
+    /// Head-locked cinema screen in ARKit world space.
+    /// Fits the original display aspect inside the compositor eye buffer (same framing as 2D `.fit`).
     fileprivate static func makeScreenModelMatrix(
         headTransform: simd_float4x4,
         videoAspect: Float,
         drawableAspect: Float?
     ) -> simd_float4x4 {
+        let distanceMeters = ImmersiveScreenPlacement.resolvedScreenDistanceMeters()
         var translation = matrix_identity_float4x4
-        translation.columns.3.z = -1.4
+        translation.columns.3.z = -distanceMeters
 
         let safeVideoAspect = max(videoAspect, 0.1)
         var scaleX: Float = 1.0
@@ -715,11 +733,17 @@ extension ImmersiveStereoCompositor {
 
         if let drawableAspect, drawableAspect > 0 {
             if safeVideoAspect > drawableAspect {
-                scaleY *= drawableAspect / safeVideoAspect
+                scaleX = 1.0
+                scaleY = 1.0 / safeVideoAspect
             } else {
-                scaleX *= safeVideoAspect / drawableAspect
+                scaleX = safeVideoAspect / drawableAspect
+                scaleY = 1.0 / drawableAspect
             }
         }
+
+        let sizeCompensation = ImmersiveScreenPlacement.sizeCompensation(for: distanceMeters)
+        scaleX *= sizeCompensation
+        scaleY *= sizeCompensation
 
         var scale = matrix_identity_float4x4
         scale.columns.0.x = scaleX
