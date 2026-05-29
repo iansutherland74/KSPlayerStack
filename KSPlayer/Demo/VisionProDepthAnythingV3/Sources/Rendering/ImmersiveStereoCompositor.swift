@@ -45,10 +45,6 @@ final class ImmersiveStereoCompositor: @unchecked Sendable {
     private let worldVertexFunction: MTLFunction
     private let samplerState: MTLSamplerState
     private let neutralDepthTexture: MTLTexture
-    private let yuvMatrix709VideoRangeBuffer: MTLBuffer
-    private let yuvMatrix709FullRangeBuffer: MTLBuffer
-    private let colorOffsetVideoRangeBuffer: MTLBuffer
-    private let colorOffsetFullRangeBuffer: MTLBuffer
     /// Compositor Services uses reverse-Z (near = 1, far = 0); default `less` rejects our fullscreen draws.
     private let reverseZDepthStencilState: MTLDepthStencilState
     private var pipelineCache: [MTLPixelFormat: ImmersiveStereoPipelinePair] = [:]
@@ -114,34 +110,6 @@ final class ImmersiveStereoCompositor: @unchecked Sendable {
             bytesPerRow: MemoryLayout<Float>.stride
         )
         self.neutralDepthTexture = neutralDepthTexture
-
-        guard let yuvMatrix709VideoRangeBuffer = Self.makeMatrixBuffer(
-            Self.yuvMatrix709VideoRange,
-            device: device,
-            label: "immersiveYUV709VideoRange"
-        ),
-            let yuvMatrix709FullRangeBuffer = Self.makeMatrixBuffer(
-                Self.yuvMatrix709FullRange,
-                device: device,
-                label: "immersiveYUV709FullRange"
-            ),
-            let colorOffsetVideoRangeBuffer = Self.makeColorOffsetBuffer(
-                Self.colorOffsetVideoRange,
-                device: device,
-                label: "immersiveOffsetVideoRange"
-            ),
-            let colorOffsetFullRangeBuffer = Self.makeColorOffsetBuffer(
-                Self.colorOffsetFullRange,
-                device: device,
-                label: "immersiveOffsetFullRange"
-            )
-        else {
-            fatalError("Unable to create immersive YUV conversion buffers.")
-        }
-        self.yuvMatrix709VideoRangeBuffer = yuvMatrix709VideoRangeBuffer
-        self.yuvMatrix709FullRangeBuffer = yuvMatrix709FullRangeBuffer
-        self.colorOffsetVideoRangeBuffer = colorOffsetVideoRangeBuffer
-        self.colorOffsetFullRangeBuffer = colorOffsetFullRangeBuffer
 
         let depthStencilDescriptor = MTLDepthStencilDescriptor()
         depthStencilDescriptor.depthCompareFunction = .greaterEqual
@@ -517,8 +485,11 @@ final class ImmersiveStereoCompositor: @unchecked Sendable {
         modelViewProjection: simd_float4x4
     ) -> Bool {
         let configuration = stereoFrame.configuration
-        let usesDepthMap = (configuration.usesDepthMap || stereoFrame.depthTexture != nil)
-            && !stereoFrame.isDepthStaleForPresentation
+        let usesDepthMap = ImmersiveStereoShaderUniforms.effectiveUsesDepthMap(
+            configuration: configuration,
+            depthTexture: stereoFrame.depthTexture,
+            isDepthStaleForPresentation: stereoFrame.isDepthStaleForPresentation
+        )
         var uniforms = Self.makeUniforms(
             configuration: configuration,
             eye: eye,
@@ -532,14 +503,12 @@ final class ImmersiveStereoCompositor: @unchecked Sendable {
         if isNV12(pixelFormat),
            let lumaTexture = makeTexture(from: stereoFrame.pixelBuffer, planeIndex: 0, pixelFormat: .r8Unorm),
            let chromaTexture = makeTexture(from: stereoFrame.pixelBuffer, planeIndex: 1, pixelFormat: .rg8Unorm) {
-            let yuvBuffers = yuvConversionBuffers(for: stereoFrame.pixelBuffer)
             encoder.setFragmentTexture(lumaTexture, index: 0)
             encoder.setFragmentTexture(chromaTexture, index: 1)
             encoder.setFragmentTexture(depthTexture, index: 2)
             encoder.setFragmentSamplerState(samplerState, index: 0)
-            encoder.setFragmentBuffer(yuvBuffers.matrix, offset: 0, index: 0)
-            encoder.setFragmentBuffer(yuvBuffers.offset, offset: 0, index: 1)
-            encoder.setFragmentBytes(&uniforms, length: MemoryLayout<ImmersiveStereoUniforms>.stride, index: 2)
+            ImmersiveStereoYUVConversion.bind(to: encoder, pixelBuffer: stereoFrame.pixelBuffer)
+            encoder.setFragmentBytes(&uniforms, length: MemoryLayout<ImmersiveStereoUniforms>.stride, index: 3)
             drawScreenQuad(encoder: encoder, pipeline: pipelines.nv12, modelViewProjection: modelViewProjection)
             return true
         }
@@ -629,54 +598,6 @@ final class ImmersiveStereoCompositor: @unchecked Sendable {
             pixelFormat == kCVPixelFormatType_420YpCbCr8PlanarFullRange
     }
 
-    private func yuvConversionBuffers(for pixelBuffer: CVPixelBuffer) -> (matrix: MTLBuffer, offset: MTLBuffer) {
-        let isFullRange = CVPixelBufferGetPixelFormatType(pixelBuffer)
-            == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
-        if isFullRange {
-            return (yuvMatrix709FullRangeBuffer, colorOffsetFullRangeBuffer)
-        }
-        return (yuvMatrix709VideoRangeBuffer, colorOffsetVideoRangeBuffer)
-    }
-
-    /// BT.709 full-range (matches KSPlayer `MetalRender` full-range path).
-    private static let yuvMatrix709FullRange = simd_float3x3(
-        SIMD3<Float>(1, 1, 1),
-        SIMD3<Float>(0, -0.187_324, 1.8556),
-        SIMD3<Float>(1.5748, -0.468_124, 0)
-    )
-
-    /// BT.709 video-range scale factors (matches KSPlayer `MetalRender.videoRange`).
-    private static let yuvMatrix709VideoRange = simd_float3x3(
-        SIMD3<Float>(255.0 / 219.0, 255.0 / 219.0, 255.0 / 219.0),
-        SIMD3<Float>(0, -0.187_324 * 255.0 / 224.0, 1.8556 * 255.0 / 224.0),
-        SIMD3<Float>(1.5748 * 255.0 / 224.0, -0.468_124 * 255.0 / 224.0, 0)
-    )
-
-    private static let colorOffsetVideoRange = SIMD3<Float>(-16.0 / 255.0, -128.0 / 255.0, -128.0 / 255.0)
-    private static let colorOffsetFullRange = SIMD3<Float>(0, -128.0 / 255.0, -128.0 / 255.0)
-
-    private static func makeMatrixBuffer(
-        _ matrix: simd_float3x3,
-        device: MTLDevice,
-        label: String
-    ) -> MTLBuffer? {
-        var copy = matrix
-        let buffer = device.makeBuffer(bytes: &copy, length: MemoryLayout<simd_float3x3>.stride)
-        buffer?.label = label
-        return buffer
-    }
-
-    private static func makeColorOffsetBuffer(
-        _ offset: SIMD3<Float>,
-        device: MTLDevice,
-        label: String
-    ) -> MTLBuffer? {
-        var copy = offset
-        let buffer = device.makeBuffer(bytes: &copy, length: MemoryLayout<SIMD3<Float>>.stride)
-        buffer?.label = label
-        return buffer
-    }
-
     private func makeTexture(
         from pixelBuffer: CVPixelBuffer,
         planeIndex: Int,
@@ -724,8 +645,6 @@ extension ImmersiveStereoCompositor {
         drawableAspect: Float?
     ) -> simd_float4x4 {
         let distanceMeters = ImmersiveScreenPlacement.resolvedScreenDistanceMeters()
-        var translation = matrix_identity_float4x4
-        translation.columns.3.z = -distanceMeters
 
         let safeVideoAspect = max(videoAspect, 0.1)
         var scaleX: Float = 1.0
@@ -749,7 +668,18 @@ extension ImmersiveStereoCompositor {
         scale.columns.0.x = scaleX
         scale.columns.1.y = scaleY
 
-        return headTransform * translation * scale
+        var translation = matrix_identity_float4x4
+        translation.columns.3.x = ImmersiveScreenPlacement.currentOffsetRightMeters
+        translation.columns.3.y = ImmersiveScreenPlacement.defaultCenterHeightMeters
+            + ImmersiveScreenPlacement.currentOffsetUpMeters
+        translation.columns.3.z = -distanceMeters
+
+        switch ImmersiveScreenPlacement.currentAnchoringMode {
+        case .worldAnchored:
+            return translation * scale
+        case .headLocked:
+            return headTransform * translation * scale
+        }
     }
 
     fileprivate static func makeUniforms(
@@ -757,30 +687,26 @@ extension ImmersiveStereoCompositor {
         eye: StereoscopicVideoEye,
         usesDepthMap: Bool? = nil
     ) -> ImmersiveStereoUniforms {
-        let depthMapActive = usesDepthMap ?? configuration.usesDepthMap
-        guard configuration.isEnabled else {
-            return ImmersiveStereoUniforms(
-                video2DTo3D: SIMD4<Float>(1, 0.45, 0, 0),
-                video2DTo3DShape: SIMD4<Float>(1.1, 0.9, 0, 0)
-            )
-        }
-        let eyeSign: Float = eye == .left ? -1 : 1
+        let uniforms = ImmersiveStereoShaderUniforms.make(
+            configuration: configuration,
+            eye: eye,
+            usesDepthMap: usesDepthMap ?? configuration.usesDepthMap
+        )
         return ImmersiveStereoUniforms(
-            video2DTo3D: SIMD4<Float>(1, configuration.depthStrength, depthMapActive ? 1 : 0, eyeSign),
-            video2DTo3DShape: SIMD4<Float>(
-                configuration.depthDistance,
-                configuration.depthCurvature,
-                configuration.depthSmoothingFactor,
-                0
-            )
+            video2DTo3D: uniforms.video2DTo3D,
+            video2DTo3DShape: uniforms.video2DTo3DShape
         )
     }
 
     fileprivate static func placeholderUniforms(eye: StereoscopicVideoEye) -> ImmersiveStereoUniforms {
-        let eyeSign: Float = eye == .left ? -1 : 1
+        let uniforms = ImmersiveStereoShaderUniforms.make(
+            configuration: .disabled,
+            eye: eye,
+            usesDepthMap: false
+        )
         return ImmersiveStereoUniforms(
-            video2DTo3D: SIMD4<Float>(1, 0.45, 0, eyeSign),
-            video2DTo3DShape: SIMD4<Float>(1.1, 0.9, 0, 0)
+            video2DTo3D: uniforms.video2DTo3D,
+            video2DTo3DShape: uniforms.video2DTo3DShape
         )
     }
 }

@@ -885,6 +885,8 @@ open class KSOptions {
     public var immersiveAudioPlaybackSeconds: TimeInterval = 0
     /// Delivers audio-synced video frames from `MetalPlayView` to the immersive compositor (not decode-live-edge).
     public var immersivePresentVideoFrame: (@Sendable (CVPixelBuffer, TimeInterval) -> Void)?
+    /// When true, `MetalPlayView` also forwards presented frames to `immersivePresentVideoFrame` while the flat window keeps displaying.
+    public var deliverDecodedVideoFrameToStereoCompositorWhileWindowVisible = false
     /// Controls MEPlayer deinterlacing on the FFmpeg software filter path.
     /// Native AVPlayer output keeps Apple's system-managed handling.
     public var deinterlaceMode = KSOptions.deinterlaceMode

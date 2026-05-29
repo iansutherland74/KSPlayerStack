@@ -400,6 +400,8 @@ public final class KSPlayer3DIntegrationViewModel: ObservableObject {
     @Published public private(set) var presentationModeStatus = "Native 2D playback"
     @Published public private(set) var immersiveTemporalStatusLine = ""
     @Published public private(set) var immersiveScreenDistanceMeters: Float
+    @Published public private(set) var immersiveScreenOffsetRightMeters: Float
+    @Published public private(set) var immersiveScreenOffsetUpMeters: Float
     #if os(visionOS)
     @Published public private(set) var immersivePlaybackDiagnostics = ImmersivePlaybackDiagnostics.idle
     #endif
@@ -418,6 +420,8 @@ public final class KSPlayer3DIntegrationViewModel: ObservableObject {
     public var depthContrastRange: ClosedRange<Float> { DA3VisionProDemoTuning.depthContrastRange }
     public var temporalSmoothingFactorRange: ClosedRange<Float> { DA3VisionProDemoTuning.temporalSmoothingFactorRange }
     public var immersiveScreenDistanceRange: ClosedRange<Float> { ImmersiveScreenPlacement.distanceRangeMeters }
+    public var immersiveScreenHorizontalOffsetRange: ClosedRange<Float> { ImmersiveScreenPlacement.horizontalOffsetRangeMeters }
+    public var immersiveScreenVerticalOffsetRange: ClosedRange<Float> { ImmersiveScreenPlacement.verticalOffsetRangeMeters }
 
     private let pipeline: DA3VideoOutputPipeline
     private let videoFrameSink = DA3DecodedVideoFrameSink()
@@ -505,6 +509,8 @@ public final class KSPlayer3DIntegrationViewModel: ObservableObject {
         )
         ImmersiveScreenPlacement.setDistanceMeters(initialScreenDistance)
         self.immersiveScreenDistanceMeters = initialScreenDistance
+        self.immersiveScreenOffsetRightMeters = ImmersiveScreenPlacement.currentOffsetRightMeters
+        self.immersiveScreenOffsetUpMeters = ImmersiveScreenPlacement.currentOffsetUpMeters
         self.is3DPreviewRequested = options.video2DTo3DMode.isEnabled
         self.presentationMode = options.video2DTo3DMode.isEnabled
             ? Self.presentationMode(for: initialOutputLayout)
@@ -547,8 +553,9 @@ public final class KSPlayer3DIntegrationViewModel: ObservableObject {
                 return .disabled
             }
             if self.shouldDeliverVideoFramesForImmersive || self.isImmersiveStereoPresented || self.isOpeningImmersiveStereo {
-                let hasDepth = self.metrics.processedFrameCount > 0
-                    || ImmersiveVideoFeed.shared.hasFrames
+                // Cinema shares ImmersiveVideoFeed but must stay flat until depth is window-synced.
+                let immersiveCompositorActive = self.isImmersiveStereoPresented || self.isOpeningImmersiveStereo
+                let hasDepth = immersiveCompositorActive && self.metrics.processedFrameCount > 0
                 return self.immersiveStereoRenderConfiguration(hasDepthMap: hasDepth)
             }
             guard self.is2DTo3DEnabled || self.is3DPreviewRequested else {
@@ -585,14 +592,14 @@ public final class KSPlayer3DIntegrationViewModel: ObservableObject {
             let sendablePixelBuffer = UncheckedSendablePixelBuffer(pixelBuffer)
             if Thread.isMainThread {
                 MainActor.assumeIsolated {
-                    self.presentImmersiveAudioSyncedFrame(
+                    self.presentStereoCompositorFrame(
                         pixelBuffer: sendablePixelBuffer.value,
                         presentationSeconds: presentationSeconds
                     )
                 }
             } else {
                 Task { @MainActor [weak self] in
-                    self?.presentImmersiveAudioSyncedFrame(
+                    self?.presentStereoCompositorFrame(
                         pixelBuffer: sendablePixelBuffer.value,
                         presentationSeconds: presentationSeconds
                     )
@@ -606,19 +613,22 @@ public final class KSPlayer3DIntegrationViewModel: ObservableObject {
         init(_ value: CVPixelBuffer) { self.value = value }
     }
 
-    private func presentImmersiveAudioSyncedFrame(
+    private var hasLoggedFirstCinemaWindowSyncedFrame = false
+
+    private func presentStereoCompositorFrame(
         pixelBuffer: CVPixelBuffer,
         presentationSeconds: TimeInterval
     ) {
-        // Accept frames whenever the immersive session is requested; relying on the feed's
-        // accepting flag proved brittle across lifecycle timing on device.
-        guard ImmersiveStereoSession.isUserRequestedActive else {
+        let cinemaActive = isCinemaWindowStereoActive
+        let immersiveActive = ImmersiveStereoSession.isUserRequestedActive
+        guard cinemaActive || immersiveActive else {
             return
         }
         let frameBuffer = VideoPixelBufferNV12Normalization.nv12VideoRangeCopyIfNeeded(from: pixelBuffer)
             ?? pixelBuffer
         syncImmersivePlaybackTimelineIfPossible()
-        let hasDepth = metrics.processedFrameCount > 0 || ImmersiveVideoFeed.shared.hasFrames
+        // Depth on the shared ring is for full immersive only (FFmpeg DA3 PTS ≠ window video PTS).
+        let hasDepth = immersiveActive && metrics.processedFrameCount > 0
         let configuration = immersiveStereoRenderConfiguration(hasDepthMap: hasDepth)
         guard ImmersiveVideoFeed.shared.append(
             pixelBuffer: frameBuffer,
@@ -627,7 +637,9 @@ public final class KSPlayer3DIntegrationViewModel: ObservableObject {
         ) else {
             return
         }
-        let isFirstFeedFrame = !hasLoggedFirstImmersiveAudioSyncedFrame
+        let isFirstFeedFrame = cinemaActive
+            ? !hasLoggedFirstCinemaWindowSyncedFrame
+            : !hasLoggedFirstImmersiveAudioSyncedFrame
         if isFirstFeedFrame {
             ImmersiveVideoFeed.shared.reanchorPlaybackClock(toVideoPTS: presentationSeconds)
             if let layer = installedLayer ?? coordinator.playerLayer {
@@ -640,7 +652,20 @@ public final class KSPlayer3DIntegrationViewModel: ObservableObject {
                 layer.options.immersiveAudioPlaybackSeconds = presentationSeconds
             }
         }
-        guard !hasLoggedFirstImmersiveAudioSyncedFrame else {
+        if cinemaActive, !hasLoggedFirstCinemaWindowSyncedFrame {
+            hasLoggedFirstCinemaWindowSyncedFrame = true
+            let playback = ImmersiveStereoPlaybackTimeline.nowMediaSeconds()
+            let offset = presentationSeconds - playback
+            let ringCount = ImmersiveVideoFeed.shared.diagnosticsSnapshot().ringCount
+            let message =
+                "First cinema window-synced frame pts \(String(format: "%.3f", presentationSeconds)) "
+                + "audio \(String(format: "%.3f", playback)) offset \(String(format: "%+.3f", offset))s "
+                + "ring=\(ringCount)"
+            Depth3DDebug.log(message, phase: "immersive-compositor")
+            KSLog("[video] \(message)")
+            return
+        }
+        guard immersiveActive, !hasLoggedFirstImmersiveAudioSyncedFrame else {
             return
         }
         hasLoggedFirstImmersiveAudioSyncedFrame = true
@@ -1212,6 +1237,74 @@ public final class KSPlayer3DIntegrationViewModel: ObservableObject {
         lastActionMessage = String(format: "Screen distance %.1f m", Double(validatedValue))
     }
 
+    public func setImmersiveScreenOffsetRightMeters(_ value: Float) {
+        let validatedValue = ImmersiveScreenPlacement.validatedHorizontalOffset(value)
+        guard immersiveScreenOffsetRightMeters != validatedValue else {
+            return
+        }
+        immersiveScreenOffsetRightMeters = validatedValue
+        ImmersiveScreenPlacement.setOffsetRightMeters(validatedValue)
+        lastActionMessage = String(format: "Screen left/right %.2f m", Double(validatedValue))
+    }
+
+    public func setImmersiveScreenOffsetUpMeters(_ value: Float) {
+        let validatedValue = ImmersiveScreenPlacement.validatedVerticalOffset(value)
+        guard immersiveScreenOffsetUpMeters != validatedValue else {
+            return
+        }
+        immersiveScreenOffsetUpMeters = validatedValue
+        ImmersiveScreenPlacement.setOffsetUpMeters(validatedValue)
+        lastActionMessage = String(format: "Screen up/down %.2f m", Double(validatedValue))
+    }
+
+    public func resetImmersiveScreenPlacement() {
+        ImmersiveScreenPlacement.resetPlacement()
+        immersiveScreenDistanceMeters = ImmersiveScreenPlacement.currentDistanceMeters
+        immersiveScreenOffsetRightMeters = ImmersiveScreenPlacement.currentOffsetRightMeters
+        immersiveScreenOffsetUpMeters = ImmersiveScreenPlacement.currentOffsetUpMeters
+        lastActionMessage = "Screen position reset"
+    }
+
+    public func syncImmersiveScreenPlacementFromStore() {
+        immersiveScreenDistanceMeters = ImmersiveScreenPlacement.currentDistanceMeters
+        immersiveScreenOffsetRightMeters = ImmersiveScreenPlacement.currentOffsetRightMeters
+        immersiveScreenOffsetUpMeters = ImmersiveScreenPlacement.currentOffsetUpMeters
+    }
+
+    public func setCinemaWindowStereoActive(_ active: Bool) {
+        guard isCinemaWindowStereoActive != active else {
+            return
+        }
+        isCinemaWindowStereoActive = active
+        #if os(visionOS)
+        options.deliverDecodedVideoFrameToStereoCompositorWhileWindowVisible = active
+        pipeline.setCompositorVideoFromWindowPresentation(active)
+        if active {
+            ImmersiveVideoFeed.shared.setAcceptingFrames(true)
+            ImmersiveVideoFeed.shared.clear()
+            hasLoggedFirstCinemaWindowSyncedFrame = false
+        } else if !shouldDeliverVideoFramesForImmersive {
+            ImmersiveVideoFeed.shared.setAcceptingFrames(false)
+            ImmersiveVideoFeed.shared.clear()
+            hasLoggedFirstCinemaWindowSyncedFrame = false
+        }
+        pipeline.setDeliversImmersiveVideo(shouldDeliverVideoFramesForImmersive)
+        pipeline.setEnabled(shouldCaptureDepthFrames || shouldDeliverVideoFramesForImmersive)
+        if let layer = installedLayer ?? coordinator.playerLayer {
+            applyImmersivePresentationFlags(on: layer)
+            if let mePlayer = layer.player as? KSMEPlayer {
+                mePlayer.synchronizePresentationOptions(from: layer.options)
+                if active {
+                    mePlayer.drainWindowVideoPresentationQueue(maxFrames: 8)
+                }
+            }
+            configureVideoOutput(on: layer, isEnabled: shouldUseVideoOutput, force: true)
+            startImmersivePresentationDrain(on: layer)
+        }
+        #endif
+        lastActionMessage = active ? "Cinema window stereo active" : "Cinema window stereo inactive"
+    }
+
     public func setDepthCurvature(_ value: Float) {
         let validatedValue = DA3VisionProDemoTuning.validatedDepthCurvature(value)
         guard depthCurvature != validatedValue else {
@@ -1631,8 +1724,11 @@ public final class KSPlayer3DIntegrationViewModel: ObservableObject {
         is2DTo3DEnabled && debugRenderMode.capturesDepth
     }
 
+    private var isCinemaWindowStereoActive = false
+
     private var shouldDeliverVideoFramesForImmersive: Bool {
-        presentationMode == .immersiveStereo && (isImmersiveStereoPresented || isOpeningImmersiveStereo)
+        isCinemaWindowStereoActive
+            || (presentationMode == .immersiveStereo && (isImmersiveStereoPresented || isOpeningImmersiveStereo))
     }
 
     private var shouldUseVideoOutput: Bool {
@@ -1986,6 +2082,8 @@ public final class KSPlayer3DIntegrationViewModel: ObservableObject {
         layer.options.suppressWindowVideoPresentationWhileImmersiveCompositorActive =
             options.suppressWindowVideoPresentationWhileImmersiveCompositorActive
         layer.options.immersivePresentVideoFrame = options.immersivePresentVideoFrame
+        layer.options.deliverDecodedVideoFrameToStereoCompositorWhileWindowVisible =
+            options.deliverDecodedVideoFrameToStereoCompositorWhileWindowVisible
         layer.options.immersiveAudioPlaybackSeconds = options.immersiveAudioPlaybackSeconds
         syncImmersivePlaybackTimeline(from: layer)
     }
@@ -2320,6 +2418,7 @@ private final class DA3VideoOutputPipeline: @unchecked Sendable {
     private let lock = NSLock()
     private var isEnabled = false
     private var deliversImmersiveVideo = false
+    private var compositorVideoFromWindowPresentation = false
     private var suppressImmersiveVideoUpdates = false
     private var skipsDepthMapBuild = false
     private var usesContinuousDepthScheduling = false
@@ -2472,6 +2571,20 @@ private final class DA3VideoOutputPipeline: @unchecked Sendable {
         lock.lock()
         deliversImmersiveVideo = isEnabled
         lock.unlock()
+    }
+
+    func setCompositorVideoFromWindowPresentation(_ isEnabled: Bool) {
+        lock.lock()
+        compositorVideoFromWindowPresentation = isEnabled
+        lock.unlock()
+    }
+
+    private var isCompositorVideoFromWindowPresentation: Bool {
+        lock.lock()
+        defer {
+            lock.unlock()
+        }
+        return compositorVideoFromWindowPresentation
     }
 
     var hasReceivedVideoOutputCallback: Bool {
@@ -2632,8 +2745,10 @@ private final class DA3VideoOutputPipeline: @unchecked Sendable {
                 playbackAnchor: anchor
             )
         let immersiveRequested = ImmersiveStereoSession.isUserRequestedActive
-        let bootstrapRing = immersiveRequested && ringEmpty
-        if immersiveRequested,
+        let deliversToStereoFeed = immersiveRequested || isDeliveringImmersiveVideo
+        let feedVideoFromDecodeOutput = deliversToStereoFeed && !isCompositorVideoFromWindowPresentation
+        let bootstrapRing = feedVideoFromDecodeOutput && ringEmpty
+        if feedVideoFromDecodeOutput,
            withinAudioSync,
            bootstrapRing || !isSuppressingImmersiveVideoUpdates
         {
@@ -2645,16 +2760,20 @@ private final class DA3VideoOutputPipeline: @unchecked Sendable {
                 configuration: configuration
             )
             if appended, ringEmpty {
+                if let mediaTime, mediaTime.isFinite {
+                    ImmersiveVideoFeed.shared.reanchorPlaybackClock(toVideoPTS: mediaTime)
+                }
                 let playback = ImmersiveStereoPlaybackTimeline.nowMediaSeconds()
                 let offset = mediaTime.map { $0 - playback } ?? 0
                 let feedDiag = ImmersiveVideoFeed.shared.diagnosticsSnapshot()
+                let destination = immersiveRequested ? "immersive" : "cinema"
                 let ringMessage =
-                    "First immersive video feed frame pts \(mediaTime.map { String(format: "%.3f", $0) } ?? "unknown") "
+                    "First \(destination) video feed frame pts \(mediaTime.map { String(format: "%.3f", $0) } ?? "unknown") "
                     + "audio \(String(format: "%.3f", playback)) offset \(String(format: "%+.3f", offset))s "
                     + "ring=\(feedDiag.ringCount) reject(out=\(feedDiag.rejectedOutsideWindow) accept=\(feedDiag.rejectedNotAccepting))"
                 Depth3DDebug.log(ringMessage, phase: "immersive-compositor")
                 KSLog("[video] \(ringMessage)")
-            } else if immersiveRequested, ringEmpty, !appended {
+            } else if feedVideoFromDecodeOutput, ringEmpty, !appended {
                 let feedDiag = ImmersiveVideoFeed.shared.diagnosticsSnapshot()
                 let rejectMessage =
                     "Immersive feed rejected frame pts \(mediaTime.map { String(format: "%.3f", $0) } ?? "unknown") "
@@ -2807,7 +2926,7 @@ private final class DA3VideoOutputPipeline: @unchecked Sendable {
                     outputName: prediction.diagnostics.outputName
                 )
                 await MainActor.run {
-                    if deliversImmersiveVideo {
+                    if deliversImmersiveVideo, configuration.usesDepthMap {
                         self.renderer?.updateDepth(
                             depthTexture: depthTexture,
                             configuration: configuration,

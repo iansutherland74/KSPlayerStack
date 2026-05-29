@@ -228,6 +228,7 @@ public final class ImmersiveVideoFeed: @unchecked Sendable {
         if depthRing.count > maxDepthEntryCount {
             depthRing.removeFirst(depthRing.count - maxDepthEntryCount)
         }
+        let latestConfiguration = entries.last?.configuration
         if let index = entries.indices.min(by: {
             abs(entries[$0].presentationSeconds - seconds) < abs(entries[$1].presentationSeconds - seconds)
         }),
@@ -235,11 +236,17 @@ public final class ImmersiveVideoFeed: @unchecked Sendable {
         {
             entries[index].depthTexture = depthTexture
             entries[index].depthMediaTime = seconds
+            if let latestConfiguration {
+                entries[index].configuration = latestConfiguration
+            }
             return
         }
         if var last = entries.last {
             last.depthTexture = depthTexture
             last.depthMediaTime = seconds
+            if let latestConfiguration {
+                last.configuration = latestConfiguration
+            }
             entries[entries.count - 1] = last
         }
     }
@@ -314,11 +321,15 @@ public final class ImmersiveVideoFeed: @unchecked Sendable {
                 return false
             }
         }
+        guard let retainedBuffer = VideoPixelBufferNV12Normalization.retainCopyForVideoFeed(from: pixelBuffer) else {
+            lock.unlock()
+            return false
+        }
         let sequence = nextSequence
         nextSequence += 1
         entries.append(
             Entry(
-                pixelBuffer: pixelBuffer,
+                pixelBuffer: retainedBuffer,
                 depthTexture: nil,
                 depthMediaTime: nil,
                 configuration: configuration,
@@ -335,6 +346,31 @@ public final class ImmersiveVideoFeed: @unchecked Sendable {
         }
         lock.unlock()
         return isFirst
+    }
+
+    /// Returns the audio-synced frame only when the ring has a newer entry than `afterSequence`.
+    public func consumeFrame(
+        forMediaSeconds targetSeconds: TimeInterval,
+        afterSequence: UInt64
+    ) -> ImmersiveStereoFrame? {
+        lock.lock()
+        defer { lock.unlock() }
+        let candidate: Entry?
+        if let entry = selectEntry(forMediaSeconds: targetSeconds) {
+            candidate = entry
+        } else if let nearest = entries.min(by: {
+            abs($0.presentationSeconds - targetSeconds) < abs($1.presentationSeconds - targetSeconds)
+        }),
+        abs(nearest.presentationSeconds - targetSeconds) <= max(Self.presentationFallbackSeconds, Self.bootstrapToleranceSeconds)
+        {
+            candidate = nearest
+        } else {
+            candidate = nil
+        }
+        guard let candidate, candidate.sequence > afterSequence else {
+            return nil
+        }
+        return makeStereoFrame(from: candidate)
     }
 
     public func frame(forMediaSeconds targetSeconds: TimeInterval) -> ImmersiveStereoFrame? {
@@ -404,27 +440,38 @@ public final class ImmersiveVideoFeed: @unchecked Sendable {
             }
             return nil
         }()
-        let depthTexture = entry.depthTexture ?? selectedDepth?.texture ?? lastDepthTexture
-        let depthMediaTime = entry.depthMediaTime ?? selectedDepth?.mediaSeconds ?? lastDepthMediaTime
-        if let videoSeconds = entry.presentationSeconds as TimeInterval?,
-           let depthSeconds = depthMediaTime,
-           videoSeconds - depthSeconds > Self.maxDepthAgeSeconds
+        var depthTexture = entry.depthTexture ?? selectedDepth?.texture
+        var depthMediaTime = entry.depthMediaTime ?? selectedDepth?.mediaSeconds
+        if depthTexture == nil,
+           let lastDepthTexture,
+           let lastDepthMediaTime,
+           abs(lastDepthMediaTime - videoSeconds) <= Self.maxDepthAgeSeconds,
+           lastDepthMediaTime <= videoSeconds + depthAttachTolerance
         {
-            // Depth is too far behind; prefer neutral depth over showing stale parallax.
-            return ImmersiveStereoFrame(
-                pixelBuffer: entry.pixelBuffer,
-                depthTexture: nil,
-                configuration: entry.configuration,
-                videoMediaTime: entry.presentationSeconds,
-                depthMediaTime: depthMediaTime
-            )
+            depthTexture = lastDepthTexture
+            depthMediaTime = lastDepthMediaTime
+        }
+        if let depthSeconds = depthMediaTime {
+            let depthTooOld = videoSeconds - depthSeconds > Self.maxDepthAgeSeconds
+            let depthTooFarAhead = depthSeconds > videoSeconds + depthAttachTolerance
+            if depthTooOld || depthTooFarAhead {
+                return ImmersiveStereoFrame(
+                    pixelBuffer: entry.pixelBuffer,
+                    depthTexture: nil,
+                    configuration: entry.configuration,
+                    videoMediaTime: entry.presentationSeconds,
+                    depthMediaTime: depthMediaTime,
+                    feedSequence: entry.sequence
+                )
+            }
         }
         return ImmersiveStereoFrame(
             pixelBuffer: entry.pixelBuffer,
             depthTexture: depthTexture,
             configuration: entry.configuration,
             videoMediaTime: entry.presentationSeconds,
-            depthMediaTime: depthMediaTime
+            depthMediaTime: depthMediaTime,
+            feedSequence: entry.sequence
         )
     }
 }

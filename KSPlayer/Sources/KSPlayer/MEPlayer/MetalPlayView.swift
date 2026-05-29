@@ -217,13 +217,16 @@ extension MetalPlayView {
             guard let frame = renderSource?.getVideoOutputRender(force: force) else {
                 return
             }
-            if options.suppressWindowVideoPresentationWhileImmersiveCompositorActive {
-                // Present immersive video from the same audio-synced frame the window would have shown.
-                if let pixelBuffer = frame.corePixelBuffer?.cvPixelBuffer {
+            if let pixelBuffer = frame.corePixelBuffer?.cvPixelBuffer {
+                if options.suppressWindowVideoPresentationWhileImmersiveCompositorActive {
+                    // Present immersive video from the same audio-synced frame the window would have shown.
+                    options.immersivePresentVideoFrame?(pixelBuffer, frame.seconds)
+                    clearWindowPresentation()
+                    return
+                }
+                if options.deliverDecodedVideoFrameToStereoCompositorWhileWindowVisible {
                     options.immersivePresentVideoFrame?(pixelBuffer, frame.seconds)
                 }
-                clearWindowPresentation()
-                return
             }
             pixelBuffer = frame.corePixelBuffer
             guard let sourcePixelBuffer = pixelBuffer else {

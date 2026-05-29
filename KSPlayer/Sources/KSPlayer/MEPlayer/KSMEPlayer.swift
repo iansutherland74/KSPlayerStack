@@ -391,6 +391,8 @@ extension KSMEPlayer: @preconcurrency MediaPlayerProtocol {
             source.suppressWindowVideoPresentationWhileImmersiveCompositorActive
         options.immersiveAudioPlaybackSeconds = source.immersiveAudioPlaybackSeconds
         options.immersivePresentVideoFrame = source.immersivePresentVideoFrame
+        options.deliverDecodedVideoFrameToStereoCompositorWhileWindowVisible =
+            source.deliverDecodedVideoFrameToStereoCompositorWhileWindowVisible
         options.videoAdaptable = source.videoAdaptable
         options.requiresDecodedVideoFrameOutput = source.requiresDecodedVideoFrameOutput
         options.hardwareDecode = source.hardwareDecode

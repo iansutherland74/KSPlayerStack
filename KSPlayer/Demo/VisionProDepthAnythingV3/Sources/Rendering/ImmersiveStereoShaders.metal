@@ -107,14 +107,15 @@ fragment half4 immersiveNV12Fragment(ImmersiveVertexOut in [[stage_in]],
                                    texture2d<half> chromaTexture [[texture(1)]],
                                    texture2d<float, access::sample> depthTexture [[texture(2)]],
                                    sampler textureSampler [[sampler(0)]],
-                                   constant float3x3& yuvToRGBMatrix [[buffer(0)]],
+                                   constant float3x3& yuvToBGRMatrix [[buffer(0)]],
                                    constant float3& colorOffset [[buffer(1)]],
-                                   constant ImmersiveStereoUniforms& uniforms [[buffer(2)]]) {
+                                   constant uchar3& leftShift [[buffer(2)]],
+                                   constant ImmersiveStereoUniforms& uniforms [[buffer(3)]]) {
     float2 uv = immersiveStereoUV(in.uv, uniforms, depthTexture, textureSampler);
     half3 yuv;
     yuv.x = lumaTexture.sample(textureSampler, uv).r;
     yuv.yz = chromaTexture.sample(textureSampler, uv).rg;
-    half3 rgb = half3x3(yuvToRGBMatrix) * (yuv + half3(colorOffset));
+    half3 rgb = half3x3(yuvToBGRMatrix) * (yuv * half3(leftShift) + half3(colorOffset));
     return half4(rgb, 1.0h);
 }
 
@@ -141,14 +142,15 @@ fragment float4 immersiveNV12RGBA16Fragment(ImmersiveVertexOut in [[stage_in]],
                                           texture2d<half> chromaTexture [[texture(1)]],
                                           texture2d<float, access::sample> depthTexture [[texture(2)]],
                                           sampler textureSampler [[sampler(0)]],
-                                          constant float3x3& yuvToRGBMatrix [[buffer(0)]],
+                                          constant float3x3& yuvToBGRMatrix [[buffer(0)]],
                                           constant float3& colorOffset [[buffer(1)]],
-                                          constant ImmersiveStereoUniforms& uniforms [[buffer(2)]]) {
+                                          constant uchar3& leftShift [[buffer(2)]],
+                                          constant ImmersiveStereoUniforms& uniforms [[buffer(3)]]) {
     float2 uv = immersiveStereoUV(in.uv, uniforms, depthTexture, textureSampler);
     half3 yuv;
     yuv.x = lumaTexture.sample(textureSampler, uv).r;
     yuv.yz = chromaTexture.sample(textureSampler, uv).rg;
-    half3 rgb = half3x3(yuvToRGBMatrix) * (yuv + half3(colorOffset));
+    half3 rgb = half3x3(yuvToBGRMatrix) * (yuv * half3(leftShift) + half3(colorOffset));
     return float4(immersiveSDRToExtendedLinear(rgb), 1.0);
 }
 

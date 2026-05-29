@@ -11,12 +11,14 @@ final class ImmersiveStereoARTracking: @unchecked Sendable {
 
     private struct ARState {
         var worldTracking: WorldTrackingProvider
+        var handTracking: HandTrackingProvider
         var session: ARKitSession
     }
 
     private let stateLock = OSAllocatedUnfairLock(
         initialState: ARState(
             worldTracking: WorldTrackingProvider(),
+            handTracking: HandTrackingProvider(),
             session: ARKitSession()
         )
     )
@@ -89,6 +91,7 @@ final class ImmersiveStereoARTracking: @unchecked Sendable {
 
     func stopIfNeeded() {
         Task { @MainActor in
+            ImmersiveStereoScreenHandDrag.stop()
             let shouldStop = hasStartedSession.withLock { $0 }
             guard shouldStop else {
                 return
@@ -102,6 +105,7 @@ final class ImmersiveStereoARTracking: @unchecked Sendable {
             stateLock.withLock {
                 // Stopped providers cannot be re-run; allocate fresh instances for the next immersive open.
                 $0.worldTracking = WorldTrackingProvider()
+                $0.handTracking = HandTrackingProvider()
                 $0.session = ARKitSession()
             }
             Depth3DDebug.log("ARKit world tracking session stopped (providers recreated)", phase: "immersive-ar")
@@ -147,10 +151,17 @@ final class ImmersiveStereoARTracking: @unchecked Sendable {
         }
 
         do {
-            try await snapshot.session.run([snapshot.worldTracking])
+            var providers: [any DataProvider] = [snapshot.worldTracking]
+            if HandTrackingProvider.isSupported {
+                providers.append(snapshot.handTracking)
+            }
+            try await snapshot.session.run(providers)
             hasStartedSession.withLock { $0 = true }
             lastSessionError.withLock { $0 = nil }
             Depth3DDebug.log("ARKit session.run completed", phase: "immersive-ar")
+            if HandTrackingProvider.isSupported {
+                ImmersiveStereoScreenHandDrag.startMonitoring(snapshot.handTracking)
+            }
             return true
         } catch {
             hasStartedSession.withLock { $0 = false }

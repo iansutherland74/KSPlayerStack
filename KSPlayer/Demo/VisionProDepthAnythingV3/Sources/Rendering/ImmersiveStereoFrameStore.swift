@@ -5,6 +5,7 @@ import CoreVideo
 import KSPlayer
 @preconcurrency import Metal
 import os
+import simd
 
 public enum ImmersiveStereoSpace {
     public static let id = "KSPlayer.DA3.ImmersiveStereo"
@@ -79,8 +80,19 @@ public enum ImmersiveScreenPlacement: Sendable {
     public static let referenceDistanceMeters: Float = 1.4
     public static let defaultDistanceMeters: Float = 4.2
     public static let distanceRangeMeters: ClosedRange<Float> = 1.0 ... 100.0
+    public static let horizontalOffsetRangeMeters: ClosedRange<Float> = -3.0 ... 3.0
+    public static let verticalOffsetRangeMeters: ClosedRange<Float> = -2.0 ... 2.0
+    public static let defaultCenterHeightMeters: Float = 1.4
+
+    public enum AnchoringMode: Sendable {
+        case headLocked
+        case worldAnchored
+    }
 
     private static let distanceMeters = OSAllocatedUnfairLock(initialState: defaultDistanceMeters)
+    private static let offsetRightMeters = OSAllocatedUnfairLock(initialState: Float(0))
+    private static let offsetUpMeters = OSAllocatedUnfairLock(initialState: Float(0))
+    private static let anchoringMode = OSAllocatedUnfairLock(initialState: AnchoringMode.headLocked)
 
     public static var currentDistanceMeters: Float {
         distanceMeters.withLock { $0 }
@@ -88,6 +100,64 @@ public enum ImmersiveScreenPlacement: Sendable {
 
     public static func setDistanceMeters(_ value: Float) {
         distanceMeters.withLock { $0 = validatedDistance(value) }
+    }
+
+    public static var currentOffsetRightMeters: Float {
+        offsetRightMeters.withLock { $0 }
+    }
+
+    public static var currentOffsetUpMeters: Float {
+        offsetUpMeters.withLock { $0 }
+    }
+
+    public static func setOffsetRightMeters(_ value: Float) {
+        offsetRightMeters.withLock { $0 = validatedHorizontalOffset(value) }
+    }
+
+    public static func setOffsetUpMeters(_ value: Float) {
+        offsetUpMeters.withLock { $0 = validatedVerticalOffset(value) }
+    }
+
+    public static func resetPlacement() {
+        distanceMeters.withLock { $0 = defaultDistanceMeters }
+        offsetRightMeters.withLock { $0 = 0 }
+        offsetUpMeters.withLock { $0 = 0 }
+        anchoringMode.withLock { $0 = .headLocked }
+    }
+
+    public static var currentAnchoringMode: AnchoringMode {
+        anchoringMode.withLock { $0 }
+    }
+
+    public static func setAnchoringMode(_ mode: AnchoringMode) {
+        anchoringMode.withLock { $0 = mode }
+    }
+
+    public static var worldPosition: SIMD3<Float> {
+        SIMD3(
+            currentOffsetRightMeters,
+            defaultCenterHeightMeters + currentOffsetUpMeters,
+            -resolvedScreenDistanceMeters()
+        )
+    }
+
+    public static func setWorldPosition(_ position: SIMD3<Float>) {
+        setAnchoringMode(.worldAnchored)
+        setDistanceMeters(validatedDistance(-position.z))
+        setOffsetRightMeters(validatedHorizontalOffset(position.x))
+        setOffsetUpMeters(
+            validatedVerticalOffset(position.y - defaultCenterHeightMeters)
+        )
+    }
+
+    public static func validatedHorizontalOffset(_ value: Float) -> Float {
+        guard value.isFinite else { return 0 }
+        return min(max(value, horizontalOffsetRangeMeters.lowerBound), horizontalOffsetRangeMeters.upperBound)
+    }
+
+    public static func validatedVerticalOffset(_ value: Float) -> Float {
+        guard value.isFinite else { return 0 }
+        return min(max(value, verticalOffsetRangeMeters.lowerBound), verticalOffsetRangeMeters.upperBound)
     }
 
     public static func validatedDistance(_ value: Float) -> Float {
@@ -121,26 +191,36 @@ public struct ImmersiveStereoFrame: @unchecked Sendable {
     public let configuration: Video2DTo3DRenderConfiguration
     public let videoMediaTime: TimeInterval?
     public let depthMediaTime: TimeInterval?
+    /// Ring-buffer sequence for deduplicating cinema enqueues.
+    public let feedSequence: UInt64
 
     public init(
         pixelBuffer: CVPixelBuffer,
         depthTexture: (any MTLTexture)?,
         configuration: Video2DTo3DRenderConfiguration,
         videoMediaTime: TimeInterval? = nil,
-        depthMediaTime: TimeInterval? = nil
+        depthMediaTime: TimeInterval? = nil,
+        feedSequence: UInt64 = 0
     ) {
         self.pixelBuffer = pixelBuffer
         self.depthTexture = depthTexture
         self.configuration = configuration
         self.videoMediaTime = videoMediaTime
         self.depthMediaTime = depthMediaTime
+        self.feedSequence = feedSequence
     }
 
     public var isDepthStaleForPresentation: Bool {
-        guard let videoMediaTime, let depthMediaTime else {
-            return depthTexture == nil
+        guard depthTexture != nil else {
+            return true
         }
-        return videoMediaTime - depthMediaTime > 0.45
+        guard let videoMediaTime, let depthMediaTime else {
+            return false
+        }
+        if videoMediaTime - depthMediaTime > ImmersiveVideoFeed.maxDepthAgeSeconds {
+            return true
+        }
+        return depthMediaTime > videoMediaTime + 0.2
     }
 }
 
